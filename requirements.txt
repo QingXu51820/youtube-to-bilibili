@@ -1,0 +1,30 @@
+# YouTube Download
+yt-dlp>=2026.06.09
+
+# Translation (Google - free, no API key needed)
+deep-translator>=1.11.0
+
+# Translation (OpenAI and DeepSeek via OpenAI-compatible SDK)
+openai>=1.0.0
+socksio>=1.0.0
+
+# Cover processing
+Pillow>=10.0.0
+
+# Bilibili Upload
+bilibili-api-python>=16.0.0
+
+# HTTP client (required by bilibili-api-python, choose one)
+aiohttp>=3.8.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# YouTube subscriptions script
+google-api-python-client>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.2.0
+feedparser>=6.0.0
+
+# Optional: for TLS fingerprint spoofing to avoid B站 rate limiting
+# curl_cffi>=0.7.0

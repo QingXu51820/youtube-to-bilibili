@@ -1,0 +1,41 @@
+# Environment
+.env
+.env.*
+!.env.example
+cookies.txt
+client_secret.json
+youtube_token.json
+subscriptions_cache.json
+urls.txt
+channels.txt
+
+# Downloaded videos
+downloads/
+runs/
+state/
+*.part
+*.ytdl
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
