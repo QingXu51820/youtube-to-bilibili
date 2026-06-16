@@ -28,7 +28,8 @@ from datetime import datetime
 from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent))
+from frozen_paths import user_data_dir as _user_data_dir
+sys.path.insert(0, str(_user_data_dir()))
 
 import config
 from config import validate
@@ -360,9 +361,42 @@ def _read_urls_file(path: str) -> list[str]:
         return []
 
 
+def _check_external_tools() -> None:
+    """Check for optional external tools (ffmpeg, ffprobe, Node.js) on PATH.
+
+    Missing tools print a warning but do not prevent startup — the pipeline
+    degrades gracefully when they are absent.
+    """
+    import subprocess
+
+    tools = {
+        "ffmpeg": "视频分割不可用",
+        "ffprobe": "分辨率/时长探测不可用",
+        "node": "yt-dlp 将使用内置 JS 引擎（可能较慢）",
+    }
+    for tool, impact in tools.items():
+        try:
+            subprocess.run(
+                [tool, "-version"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            version_check = "OK"
+        except FileNotFoundError:
+            version_check = f"未找到 — {impact}"
+        except subprocess.TimeoutExpired:
+            version_check = f"响应超时 — {impact}"
+        except OSError as exc:
+            version_check = f"启动失败: {exc} — {impact}"
+        print(f"[工具] {tool}: {version_check}")
+
+
 def main():
     """Main entry point."""
     args = _build_parser().parse_args()
+
+    _check_external_tools()
 
     if args.no_speed_protection:
         config.DOWNLOAD_MIN_SPEED_KIB = 0
