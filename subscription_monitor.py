@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlparse
 import config
 from youtube_subscriptions import (
     VideoItem,
+    YouTubeNetworkError,
     chunked,
     execute_youtube_request,
     fetch_recent_videos_api,
@@ -39,6 +40,11 @@ LIVE_SKIP_MARKERS = (
     "is live",
     "upcoming",
 )
+# ── Per-video retry ────────────────────────────────────────────────
+_VIDEO_RETRY_MAX = max(0, int(getattr(config, "YOUTUBE_VIDEO_RETRY_MAX", None) or 2))
+_VIDEO_RETRY_DELAY = max(10.0, float(getattr(config, "YOUTUBE_VIDEO_RETRY_DELAY", None) or 30))
+# Stages whose failures are considered transient (retryable)
+_RETRYABLE_STAGES = frozenset({"download", "split", "upload"})
 ISO_DURATION_RE = re.compile(
     r"^P"
     r"(?:(?P<days>\d+)D)?"
@@ -448,7 +454,33 @@ def run_monitor_cycle(
     results: list[Any] = []
     for index, video in enumerate(candidates, start=1):
         print(f"\n[订阅] 处理 {index}/{len(candidates)}: {video.channel_title} | {video.title}")
-        result = process_video(video.url)
+
+        result = None
+        for retry_attempt in range(_VIDEO_RETRY_MAX + 1):
+            result = process_video(video.url)
+            if getattr(result, "success", False):
+                break
+
+            # Don't retry if the failure is not a transient network/download issue
+            stage = getattr(result, "stage", "")
+            if stage not in _RETRYABLE_STAGES:
+                break
+
+            if retry_attempt >= _VIDEO_RETRY_MAX:
+                break
+
+            delay = _VIDEO_RETRY_DELAY * (2 ** retry_attempt)
+            error = getattr(result, "error", "")
+            print(
+                f"\n[订阅] ⚠️ 处理失败 ({stage})，{delay:.0f}s 后重试 "
+                f"({retry_attempt + 1}/{_VIDEO_RETRY_MAX}): {error[:150]}"
+            )
+            try:
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                print("\n[订阅] 用户中断重试等待。")
+                break
+
         results.append(result)
         if getattr(result, "success", False):
             record_success(state, video, result)
@@ -475,19 +507,53 @@ def run_monitor_loop(
     dry_run: bool,
     **cycle_kwargs: Any,
 ) -> int:
+    import os as _os
+
     if interval_seconds <= 0:
         raise SystemExit("--monitor-interval must be positive")
 
+    monitor_max_retries = max(0, int(_os.getenv("YOUTUBE_MONITOR_MAX_RETRIES", "5")))
+    monitor_retry_base = max(10.0, float(_os.getenv("YOUTUBE_MONITOR_RETRY_DELAY", "30.0")))
+
+    consecutive_failures = 0
     while True:
         print("=" * 60)
         print(f"[订阅] 开始检查: {utc_now()}")
         print("=" * 60)
-        run_monitor_cycle(
-            process_video=process_video,
-            write_run_report=write_run_report,
-            dry_run=dry_run,
-            **cycle_kwargs,
-        )
+
+        try:
+            run_monitor_cycle(
+                process_video=process_video,
+                write_run_report=write_run_report,
+                dry_run=dry_run,
+                **cycle_kwargs,
+            )
+            consecutive_failures = 0  # reset on success
+        except YouTubeNetworkError as exc:
+            consecutive_failures += 1
+            if once and consecutive_failures > monitor_max_retries:
+                print(f"\n[订阅] ❌ 单次检查失败，已达最大重试次数 {monitor_max_retries}: {exc}")
+                return 1
+            if not once and consecutive_failures > monitor_max_retries:
+                print(
+                    f"\n[订阅] ⚠️ 连续失败 {consecutive_failures} 次，"
+                    f"已达最大重试次数 {monitor_max_retries}，等待 {interval_seconds}s 后重置计数"
+                )
+                try:
+                    time.sleep(interval_seconds)
+                except KeyboardInterrupt:
+                    print("\n[订阅] 已停止轮询。")
+                    return 0
+                consecutive_failures = 0
+                continue
+            delay = min(monitor_retry_base * (2 ** (consecutive_failures - 1)), 600.0)
+            print(f"\n[订阅] ⚠️ 网络错误，{delay:.0f}s 后重试 ({consecutive_failures}/{monitor_max_retries}): {exc}")
+            try:
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                print("\n[订阅] 已停止轮询。")
+                return 0
+            continue
 
         if once:
             return 0
