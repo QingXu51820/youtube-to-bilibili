@@ -32,6 +32,7 @@ STATE_VERSION = 1
 STATUS_UPLOADED = "uploaded"
 STATUS_FAILED = "failed"
 STATUS_SKIPPED_LIVE = "skipped_live"
+STATUS_SKIPPED_LONG = "skipped_long"
 LIVE_SKIP_MARKERS = (
     "不是可下载的普通视频",
     "正在直播",
@@ -318,6 +319,8 @@ def should_skip_video(state: dict[str, Any], video: VideoItem) -> tuple[bool, st
         return True, f"已上传 {entry.get('bvid', '')}".strip()
     if status == STATUS_SKIPPED_LIVE:
         return True, "直播内容已永久跳过"
+    if status == STATUS_SKIPPED_LONG:
+        return True, "超长视频已永久跳过"
     return False, ""
 
 
@@ -436,6 +439,36 @@ def run_monitor_cycle(
             queue_details,
             config.YOUTUBE_DEFER_LONG_VIDEO_MINUTES,
         )
+
+    # ── Skip videos longer than YOUTUBE_SKIP_LONG_VIDEO_MINUTES ──
+    skip_threshold_minutes = max(0, int(getattr(config, "YOUTUBE_SKIP_LONG_VIDEO_MINUTES", 0) or 0))
+    if skip_threshold_minutes > 0 and (source == "api" or queue_details):
+        if source == "api" and not queue_details:
+            queue_details = fetch_video_queue_details(
+                video_ids=[video.video_id for video in candidates],
+                client_secret_file=client_secret_file,
+                token_file=token_file,
+            )
+        kept: list[VideoItem] = []
+        for video in candidates:
+            detail = queue_details.get(video.video_id, {})
+            duration_seconds = int(detail.get("duration_seconds") or 0)
+            if duration_seconds >= skip_threshold_minutes * 60:
+                entry = _base_entry(state, video, STATUS_SKIPPED_LONG)
+                state["videos"][video.video_id] = entry
+                print(
+                    f"[订阅] 跳过: {video.channel_title} | {video.title}"
+                    f"（超长视频 {format_duration(duration_seconds)} ≥ {skip_threshold_minutes} 分钟，永久跳过）"
+                )
+            else:
+                kept.append(video)
+        if len(kept) < len(candidates):
+            print(
+                f"[订阅] 因超长阈值 ({skip_threshold_minutes} 分钟)"
+                f" 跳过 {len(candidates) - len(kept)} 条"
+            )
+            candidates = kept
+            save_state(state_path, state)
 
     if dry_run:
         for video in candidates:
