@@ -1,0 +1,12 @@
+# YouTube 频道列表（RSS 模式使用）
+# 每行一个频道，格式: 频道ID,频道名称（名称可选）
+# 空行和 # 开头的行为注释，会被忽略
+#
+# 获取频道 ID 的方法:
+#   1. 打开 YouTube 频道页面
+#   2. 从地址栏复制: https://www.youtube.com/channel/UCxxxxxx
+#   3. UCxxxxxx 即为频道 ID
+#
+# 示例:
+# UCupvZG-5ko_eiXAupbDfxWw,CNN
+# UCX6OQ3DkcsbYNE6H8uQQuVA,MrBeast
