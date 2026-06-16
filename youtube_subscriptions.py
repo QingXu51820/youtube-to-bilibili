@@ -25,7 +25,9 @@ import requests
 from dotenv import load_dotenv
 
 
-PROJECT_ROOT = Path(__file__).parent
+from frozen_paths import user_data_dir
+
+PROJECT_ROOT = user_data_dir()
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v={video_id}"
 YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"

@@ -11,7 +11,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load .env from the project root (if it exists)
-PROJECT_ROOT = Path(__file__).parent
+from frozen_paths import user_data_dir
+
+PROJECT_ROOT = user_data_dir()
 load_dotenv(PROJECT_ROOT / ".env")
 
 
