@@ -36,6 +36,7 @@ from cover import image_size, prepare_cover
 from downloader import download_video
 from translator import translate
 from uploader import upload_video
+from video_splitter import split_video
 import auth
 
 
@@ -74,11 +75,22 @@ def _remove_file(path: str, label: str) -> None:
         print(f"[清理] ⚠️ 删除{label}失败: {e}")
 
 
-def _cleanup_after_success(video, cover_path: str) -> None:
+def _cleanup_after_success(video, cover_path: str, extra_video_paths: list[str] | None = None) -> None:
     if not config.CLEANUP_AFTER_UPLOAD:
         return
 
-    _remove_file(video.file_path, "视频")
+    _remove_file(video.file_path, "原始视频")
+    if extra_video_paths:
+        for vp in extra_video_paths:
+            if vp != video.file_path:
+                _remove_file(vp, "分P视频")
+        # Remove empty split directory
+        split_dir = Path(video.file_path).parent / "splits" / Path(video.file_path).stem
+        if split_dir.exists():
+            try:
+                split_dir.rmdir()  # only removes if empty
+            except OSError:
+                pass
     _remove_file(video.thumbnail_path, "缩略图")
     if cover_path and cover_path != video.thumbnail_path:
         _remove_file(cover_path, "封面")
@@ -111,6 +123,23 @@ def process_video(url: str) -> ProcessResult:
     record.original_title = video.title
     if video.width and video.height:
         record.video_resolution = f"{video.width}x{video.height}"
+
+    # ── Step 1.5: Split if video exceeds Bilibili's 10h limit ──
+    record.stage = "split"
+    video_files_for_upload = [video.file_path]
+    if video.duration > 0 and video.duration > config.MAX_VIDEO_DURATION_SECONDS:
+        print(f"\n[分割] 视频时长 {video.duration:.0f}s ({video.duration/3600:.2f}h)"
+              f"，超过 {config.MAX_VIDEO_DURATION_SECONDS/3600:.0f}h 限制")
+        try:
+            segments = split_video(video.file_path)
+            if len(segments) > 1:
+                video_files_for_upload = segments
+            elif len(segments) == 1:
+                print(f"[分割] 分割后仅 1 个文件，按单分P处理")
+            else:
+                print(f"[分割] ⚠️ 分割失败，将上传原始文件")
+        except Exception as e:
+            print(f"[分割] ⚠️ 分割异常: {e}，将上传原始文件")
 
     # ── Step 2: Translate title ───────────────────────────────
     record.stage = "translate"
@@ -149,7 +178,7 @@ def process_video(url: str) -> ProcessResult:
     print()
     try:
         result = upload_video(
-            file_path=video.file_path,
+            file_paths=video_files_for_upload,
             title=translated_title,
             original_url=video.original_url,
             original_description=video.description,
@@ -171,7 +200,8 @@ def process_video(url: str) -> ProcessResult:
     # ── Step 5: Report result ─────────────────────────────────
     print()
     print("=" * 60)
-    print("🎉 全流程完成!")
+    part_note = f" ({len(video_files_for_upload)}分P)" if len(video_files_for_upload) > 1 else ""
+    print(f"🎉 全流程完成!{part_note}")
     print(f"   B站 BV号: {result.bvid}")
     print(f"   B站 AV号: {result.aid}")
     if result.bvid:
@@ -180,7 +210,10 @@ def process_video(url: str) -> ProcessResult:
     print(f"   原视频: {url}")
     print("=" * 60)
 
-    _cleanup_after_success(video, cover_path)
+    _cleanup_after_success(
+        video, cover_path,
+        extra_video_paths=video_files_for_upload if len(video_files_for_upload) > 1 else None,
+    )
     return record
 
 
@@ -281,6 +314,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=config.YOUTUBE_MAX_VIDEOS_PER_CHANNEL,
         help="每个订阅频道抓取最近多少条视频",
     )
+    parser.add_argument(
+        "--no-speed-protection",
+        action="store_true",
+        help="禁用下载低速保护（不限制最低下载速度）",
+    )
     return parser
 
 
@@ -325,6 +363,9 @@ def _read_urls_file(path: str) -> list[str]:
 def main():
     """Main entry point."""
     args = _build_parser().parse_args()
+
+    if args.no_speed_protection:
+        config.DOWNLOAD_MIN_SPEED_KIB = 0
 
     if args.refresh_youtube_cookies:
         from downloader import refresh_youtube_cookies

@@ -77,6 +77,7 @@ class VideoInfo:
     thumbnail_path: str = ""  # path to downloaded thumbnail
     width: int = 0
     height: int = 0
+    duration: float = 0.0  # seconds, probed from merged file
 
 
 def _download_proxy() -> str:
@@ -450,6 +451,35 @@ def _probe_video_resolution(file_path: Path) -> tuple[int, int] | None:
     return width, height
 
 
+def _probe_video_duration(file_path: Path) -> float:
+    """Probe video file duration in seconds using ffprobe."""
+    command = [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "csv=p=0",
+        str(file_path),
+    ]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return 0.0
+    if proc.returncode != 0:
+        return 0.0
+    try:
+        return float(proc.stdout.strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _download_thumbnail(video_id: str, download_dir: Path) -> str:
     """
     Download YouTube thumbnail for a video.
@@ -791,6 +821,12 @@ def download_video(url: str) -> VideoInfo:
     else:
         print("[下载] 实际分辨率: 未知（ffprobe 不可用或探测失败）")
 
+    duration = _probe_video_duration(file_path)
+    if duration > 0:
+        print(f"[下载] 视频时长: {duration:.1f}s ({duration/3600:.2f}h)")
+    else:
+        print("[下载] 视频时长: 未知（ffprobe 不可用或探测失败）")
+
     return VideoInfo(
         file_path=str(file_path),
         title=title,
@@ -800,4 +836,5 @@ def download_video(url: str) -> VideoInfo:
         thumbnail_path=thumbnail_path,
         width=width,
         height=height,
+        duration=duration,
     )

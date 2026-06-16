@@ -96,9 +96,9 @@ def _build_description(
     # Include original description if not too long
     if original_description:
         desc_lines = original_description.strip().split("\n")
-        # Limit to first 10 lines of original description
-        short_desc = "\n".join(desc_lines[:10])
-        if len(desc_lines) > 10:
+        # Limit to first 3 lines of original description (B站简介有字数限制)
+        short_desc = "\n".join(desc_lines[:3])
+        if len(desc_lines) > 3:
             short_desc += "\n..."
         parts.append(f"\n原视频简介:\n{short_desc}")
 
@@ -106,7 +106,7 @@ def _build_description(
 
 
 async def _upload_async(
-    file_path: str,
+    file_paths: list[str],
     title: str,
     desc: str = "",
     tags: list[str] | None = None,
@@ -115,10 +115,10 @@ async def _upload_async(
     cover_path: str | None = None,
 ) -> UploadResult:
     """
-    Async upload a video to Bilibili.
+    Async upload a video to Bilibili (single or multi-part).
 
     Args:
-        file_path: Path to the video file (.mp4)
+        file_paths: Paths to video files (.mp4).  Multiple paths → 分P upload.
         title: Video title on B站
         desc: Video description
         tags: List of tags
@@ -131,9 +131,13 @@ async def _upload_async(
     """
     credential = _build_credential()
 
-    # Truncate description to B站 limit (2000 chars)
-    if len(desc) > 2000:
-        desc = desc[:1997] + "..."
+    # Truncate description to B站 byte-length limit (use byte count;
+    # Chinese characters are 3 bytes each in UTF-8, so 2000 chars ≈ 6000 bytes)
+    desc_bytes = desc.encode("utf-8")
+    if len(desc_bytes) > 2000:
+        # Trim to fit within 2000 bytes, preserving full UTF-8 sequences
+        trimmed = desc_bytes[:1997]
+        desc = trimmed.decode("utf-8", errors="ignore") + "..."
 
     # Ensure we have a valid cover image
     cover = _ensure_cover(cover_path)
@@ -151,15 +155,28 @@ async def _upload_async(
         source=source_url,          # 转载来源链接
     )
 
-    # Create upload page (single-part video)
-    page = video_uploader.VideoUploaderPage(
-        path=file_path,
-        title=title,
-    )
+    # Build upload pages (one per segment for 分P, single page otherwise)
+    pages = []
+    for i, fp in enumerate(file_paths):
+        if len(file_paths) == 1:
+            page_title = title
+        elif i == 0:
+            page_title = title  # P1: no suffix
+        else:
+            page_title = f"{title} P{i+1}"
+        pages.append(video_uploader.VideoUploaderPage(path=fp, title=page_title))
+
+    # Log part info
+    if len(pages) == 1:
+        print(f"  [上传] 文件: {Path(file_paths[0]).name}")
+    else:
+        print(f"  [上传] {len(pages)} 个分P:")
+        for i, p in enumerate(pages):
+            print(f"         P{i+1}: {Path(p.path).name} — \"{p.title}\"")
 
     # Create uploader and start
     uploader = video_uploader.VideoUploader(
-        pages=[page],
+        pages=pages,
         meta=vu_meta,
         credential=credential,
     )
@@ -213,7 +230,7 @@ async def _upload_async(
 
 
 def upload_video(
-    file_path: str,
+    file_paths: str | list[str],
     title: str,
     original_url: str = "",
     original_description: str = "",
@@ -226,7 +243,7 @@ def upload_video(
     Upload a video to Bilibili (synchronous wrapper).
 
     Args:
-        file_path: Path to the video file
+        file_paths: Path to the video file, or a list of paths for 分P upload.
         title: Translated title for B站
         original_url: Original YouTube URL (shown in description as source)
         original_description: Original video description
@@ -238,6 +255,12 @@ def upload_video(
     Returns:
         UploadResult
     """
+    # Normalize to list
+    if isinstance(file_paths, str):
+        file_paths = [file_paths]
+    if not file_paths:
+        return UploadResult(success=False, message="没有视频文件可上传")
+
     # Build description with source attribution
     desc = _build_description(original_url, original_description, title, original_title)
     cover = _ensure_cover(cover_path)
@@ -249,7 +272,12 @@ def upload_video(
     print(f"[上传] 标签: {tags or config.DEFAULT_TAGS.split(',')}")
     print(f"[上传] 版权: 转载 (original=False)")
     print(f"[上传] 来源: {original_url}")
-    print(f"[上传] 文件: {Path(file_path).name}")
+    if len(file_paths) == 1:
+        print(f"[上传] 文件: {Path(file_paths[0]).name}")
+    else:
+        print(f"[上传] {len(file_paths)} 个分P:")
+        for i, fp in enumerate(file_paths):
+            print(f"       P{i+1}: {Path(fp).name}")
     print(f"[上传] 封面: {cover}")
     if cover_size:
         print(f"[上传] 封面尺寸: {cover_size[0]}x{cover_size[1]}")
@@ -263,12 +291,12 @@ def upload_video(
             import nest_asyncio
             nest_asyncio.apply()
         result = loop.run_until_complete(
-            _upload_async(file_path, title, desc, tags, tid, original_url, cover)
+            _upload_async(file_paths, title, desc, tags, tid, original_url, cover)
         )
     except RuntimeError:
         # No event loop running, use asyncio.run
         result = asyncio.run(
-            _upload_async(file_path, title, desc, tags, tid, original_url, cover)
+            _upload_async(file_paths, title, desc, tags, tid, original_url, cover)
         )
 
     return result
