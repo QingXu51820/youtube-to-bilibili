@@ -23,12 +23,21 @@ from typing import Iterable
 
 import requests
 from dotenv import load_dotenv
+import time as _time
 
 
 PROJECT_ROOT = Path(__file__).parent
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v={video_id}"
 YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+
+# ── Retry configuration (env overridable) ──────────────────────────
+_API_MAX_RETRIES = max(0, int(os.getenv("YOUTUBE_API_MAX_RETRIES", "3")))
+_API_RETRY_BASE_DELAY = max(1.0, float(os.getenv("YOUTUBE_API_RETRY_DELAY", "2.0")))
+
+
+class YouTubeNetworkError(Exception):
+    """Raised when a YouTube API network request fails (transient, retryable)."""
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -125,8 +134,8 @@ def _proxy_info_from_config():
     return httplib2.proxy_info_from_environment()
 
 
-def _api_network_error(exc: BaseException) -> SystemExit:
-    return SystemExit(
+def _api_network_error(exc: BaseException) -> YouTubeNetworkError:
+    return YouTubeNetworkError(
         "YouTube Data API request failed due to a network/proxy timeout.\n"
         f"Original error: {exc}\n\n"
         "Try these checks:\n"
@@ -149,11 +158,32 @@ def build_requests_session() -> requests.Session:
 
 
 def execute_youtube_request(request):
-    """Execute a YouTube API request with clearer network error messages."""
-    try:
-        return request.execute()
-    except (requests.exceptions.RequestException, TimeoutError, socket.timeout, OSError) as exc:
-        raise _api_network_error(exc) from exc
+    """Execute a YouTube API request with retry on transient network errors."""
+    last_error = None
+    for attempt in range(_API_MAX_RETRIES + 1):
+        try:
+            return request.execute()
+        except YouTubeNetworkError as exc:
+            last_error = exc
+            if attempt >= _API_MAX_RETRIES:
+                raise
+            delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+            print(
+                f"[API] 网络错误，{delay:.0f}s 后重试 "
+                f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
+            )
+            _time.sleep(delay)
+        except (requests.exceptions.RequestException, TimeoutError, OSError) as exc:
+            last_error = exc
+            if attempt >= _API_MAX_RETRIES:
+                raise _api_network_error(exc) from exc
+            delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+            print(
+                f"[API] 网络错误，{delay:.0f}s 后重试 "
+                f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
+            )
+            _time.sleep(delay)
+    raise _api_network_error(last_error) from last_error
 
 
 class YouTubeRequest:
@@ -206,34 +236,90 @@ class YouTubeClient:
 
     def _ensure_valid_token(self) -> None:
         if self.creds.expired and self.creds.refresh_token:
-            try:
-                self.creds.refresh(self.google_auth_request)
-            except Exception as exc:
-                raise _api_network_error(exc) from exc
+            last_error = None
+            for attempt in range(_API_MAX_RETRIES + 1):
+                try:
+                    self.creds.refresh(self.google_auth_request)
+                    return
+                except YouTubeNetworkError:
+                    raise  # already wrapped, let caller retry
+                except Exception as exc:
+                    last_error = exc
+                    if attempt >= _API_MAX_RETRIES:
+                        raise _api_network_error(exc) from exc
+                    delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+                    print(
+                        f"[API] Token 刷新网络错误，{delay:.0f}s 后重试 "
+                        f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
+                    )
+                    _time.sleep(delay)
+            raise _api_network_error(last_error) from last_error
 
     def get(self, endpoint: str, params: dict) -> dict:
-        self._ensure_valid_token()
-        url = f"{self.BASE_URL}/{endpoint}"
-        headers = {"Authorization": f"Bearer {self.creds.token}"}
-        try:
-            response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as exc:
-            if getattr(exc, "response", None) is not None:
-                raise _api_http_error(exc.response) from exc
-            raise _api_network_error(exc) from exc
-        return response.json()
+        last_error = None
+        for attempt in range(_API_MAX_RETRIES + 1):
+            try:
+                self._ensure_valid_token()
+            except YouTubeNetworkError as exc:
+                last_error = exc
+                if attempt >= _API_MAX_RETRIES:
+                    raise
+                delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+                print(
+                    f"[API] Token 刷新失败，{delay:.0f}s 后重试 "
+                    f"({attempt + 1}/{_API_MAX_RETRIES})"
+                )
+                _time.sleep(delay)
+                continue
+
+            url = f"{self.BASE_URL}/{endpoint}"
+            headers = {"Authorization": f"Bearer {self.creds.token}"}
+            try:
+                response = self.session.get(url, params=params, headers=headers, timeout=self.timeout)
+                response.raise_for_status()
+                return response.json()
+            except requests.exceptions.RequestException as exc:
+                if getattr(exc, "response", None) is not None:
+                    http_err = _api_http_error(exc.response)
+                    if isinstance(http_err, YouTubeNetworkError):
+                        # 5xx server error — retryable
+                        last_error = http_err
+                        if attempt >= _API_MAX_RETRIES:
+                            raise http_err
+                        delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+                        print(
+                            f"[API] 服务器错误 (HTTP {exc.response.status_code})，"
+                            f"{delay:.0f}s 后重试 ({attempt + 1}/{_API_MAX_RETRIES})"
+                        )
+                        _time.sleep(delay)
+                        continue
+                    raise http_err  # 4xx — not retryable
+                last_error = exc
+                if attempt >= _API_MAX_RETRIES:
+                    raise _api_network_error(exc) from exc
+                delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+                print(
+                    f"[API] 请求网络错误，{delay:.0f}s 后重试 "
+                    f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
+                )
+                _time.sleep(delay)
+        raise _api_network_error(last_error) from last_error
 
 
-def _api_http_error(response: requests.Response) -> SystemExit:
+def _api_http_error(response: requests.Response) -> Exception:
     try:
         payload = response.json()
     except ValueError:
         payload = response.text
-    return SystemExit(
+
+    message = (
         f"YouTube Data API request failed: HTTP {response.status_code}\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2) if isinstance(payload, dict) else payload}"
     )
+    # 5xx errors are transient — retryable
+    if response.status_code >= 500:
+        return YouTubeNetworkError(message)
+    return SystemExit(message)
 
 
 def get_youtube_service(client_secret_file: Path, token_file: Path):
@@ -256,10 +342,21 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(auth_request)
-            except Exception as exc:
-                raise _api_network_error(exc) from exc
+            last_error = None
+            for attempt in range(_API_MAX_RETRIES + 1):
+                try:
+                    creds.refresh(auth_request)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt >= _API_MAX_RETRIES:
+                        raise _api_network_error(exc) from exc
+                    delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+                    print(
+                        f"[API] Token 刷新网络错误，{delay:.0f}s 后重试 "
+                        f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
+                    )
+                    _time.sleep(delay)
         else:
             require_file(client_secret_file, "OAuth client secret file")
             flow = InstalledAppFlow.from_client_secrets_file(
@@ -445,11 +542,23 @@ def fetch_recent_videos_rss(
 
     for sub in subscriptions:
         feed_url = YOUTUBE_RSS_URL.format(channel_id=sub.channel_id)
-        try:
-            response = session.get(feed_url, timeout=timeout)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as exc:
-            raise _api_network_error(exc) from exc
+        last_error = None
+        response = None
+        for attempt in range(_API_MAX_RETRIES + 1):
+            try:
+                response = session.get(feed_url, timeout=timeout)
+                response.raise_for_status()
+                break
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                if attempt >= _API_MAX_RETRIES:
+                    raise _api_network_error(exc) from exc
+                delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+                print(
+                    f"[RSS] 网络错误，{delay:.0f}s 后重试 "
+                    f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
+                )
+                _time.sleep(delay)
 
         feed = feedparser.parse(response.content)
         channel_title = sub.channel_title or getattr(feed.feed, "title", "")
