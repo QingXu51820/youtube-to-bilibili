@@ -44,6 +44,29 @@ def _crop_to_ratio(img: Image.Image, width: int, height: int) -> Image.Image:
     return img.crop(box)
 
 
+def _pad_to_size(img: Image.Image, width: int, height: int) -> Image.Image:
+    """Scale an image to fit within target dimensions, padding with black bars."""
+    source_width, source_height = img.size
+    target_ratio = width / height
+    source_ratio = source_width / source_height
+
+    if source_ratio > target_ratio:
+        # Image is wider — fit to width, pad top/bottom
+        new_width = width
+        new_height = int(width / source_ratio)
+    else:
+        # Image is taller — fit to height, pad left/right
+        new_height = height
+        new_width = int(height * source_ratio)
+
+    scaled = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", (width, height), (0, 0, 0))
+    paste_x = (width - new_width) // 2
+    paste_y = (height - new_height) // 2
+    canvas.paste(scaled, (paste_x, paste_y))
+    return canvas
+
+
 def prepare_cover(cover_path: str | Path | None, video_id: str = "") -> str:
     """
     Validate and convert a thumbnail into the configured Bilibili cover size.
@@ -64,9 +87,16 @@ def prepare_cover(cover_path: str | Path | None, video_id: str = "") -> str:
     with Image.open(source) as img:
         img = ImageOps.exif_transpose(img)
         img = img.convert("RGB")
-        if config.COVER_FIT == "crop":
+        fit_mode = config.COVER_FIT
+        if fit_mode == "crop":
             img = _crop_to_ratio(img, config.COVER_WIDTH, config.COVER_HEIGHT)
-        img = img.resize((config.COVER_WIDTH, config.COVER_HEIGHT), Image.Resampling.LANCZOS)
+            img = img.resize((config.COVER_WIDTH, config.COVER_HEIGHT), Image.Resampling.LANCZOS)
+        elif fit_mode == "contain":
+            img = _pad_to_size(img, config.COVER_WIDTH, config.COVER_HEIGHT)
+        else:
+            # Fallback: treat unknown mode as crop
+            img = _crop_to_ratio(img, config.COVER_WIDTH, config.COVER_HEIGHT)
+            img = img.resize((config.COVER_WIDTH, config.COVER_HEIGHT), Image.Resampling.LANCZOS)
         img.save(output, format="JPEG", quality=95, optimize=True)
 
     return str(output.resolve())

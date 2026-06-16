@@ -129,8 +129,8 @@ def validate() -> list[str]:
         issues.append("COVER_WIDTH must be a positive integer")
     if COVER_HEIGHT <= 0:
         issues.append("COVER_HEIGHT must be a positive integer")
-    if COVER_FIT != "crop":
-        issues.append("COVER_FIT currently supports only: crop")
+    if COVER_FIT not in ("crop", "contain"):
+        issues.append("COVER_FIT must be crop or contain")
     # Useless default values for SESSDATA / bili_jct check
     bogus_defaults = ("your_sessdata_here", "your_bili_jct_here", "")
     if BILI_SESSDATA.lower() in bogus_defaults:
