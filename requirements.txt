@@ -13,6 +13,7 @@ Pillow>=10.0.0
 
 # Bilibili Upload
 bilibili-api-python>=16.0.0
+nest_asyncio>=1.5.0
 
 # HTTP client (required by bilibili-api-python, choose one)
 aiohttp>=3.8.0

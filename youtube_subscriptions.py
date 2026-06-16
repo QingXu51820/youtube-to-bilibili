@@ -13,7 +13,6 @@ import argparse
 import csv
 import json
 import os
-import socket
 import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -124,16 +123,6 @@ def require_file(path: Path, purpose: str) -> None:
             f"Missing {purpose}: {path}\n"
             f"Create it first or pass the correct path on the command line."
         )
-
-
-def _proxy_info_from_config():
-    """Return httplib2 proxy info from YOUTUBE_PROXY or environment variables."""
-    import httplib2
-
-    proxy_url = _env("YOUTUBE_PROXY", "").strip()
-    if proxy_url:
-        return httplib2.proxy_info_from_url(proxy_url)
-    return httplib2.proxy_info_from_environment()
 
 
 def _api_network_error(exc: BaseException) -> YouTubeNetworkError:

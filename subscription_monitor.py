@@ -428,6 +428,17 @@ def run_monitor_cycle(
     )
 
     queue_details: dict[str, dict[str, Any]] = {}
+
+    # ── RSS mode: warn if duration-based features are configured ──
+    if source == "rss" and candidates:
+        defer_minutes = max(0, int(getattr(config, "YOUTUBE_DEFER_LONG_VIDEO_MINUTES", 0) or 0))
+        skip_minutes = max(0, int(getattr(config, "YOUTUBE_SKIP_LONG_VIDEO_MINUTES", 0) or 0))
+        if defer_minutes > 0 or skip_minutes > 0:
+            print(
+                "[订阅] ⚠️ RSS 模式无法获取视频时长，"
+                "YOUTUBE_DEFER_LONG_VIDEO_MINUTES / YOUTUBE_SKIP_LONG_VIDEO_MINUTES 不生效"
+            )
+
     if source == "api" and candidates and config.YOUTUBE_DEFER_LONG_VIDEO_MINUTES > 0:
         queue_details = fetch_video_queue_details(
             video_ids=[video.video_id for video in candidates],
@@ -540,13 +551,11 @@ def run_monitor_loop(
     dry_run: bool,
     **cycle_kwargs: Any,
 ) -> int:
-    import os as _os
-
     if interval_seconds <= 0:
         raise SystemExit("--monitor-interval must be positive")
 
-    monitor_max_retries = max(0, int(_os.getenv("YOUTUBE_MONITOR_MAX_RETRIES", "5")))
-    monitor_retry_base = max(10.0, float(_os.getenv("YOUTUBE_MONITOR_RETRY_DELAY", "30.0")))
+    monitor_max_retries = max(0, int(getattr(config, "YOUTUBE_MONITOR_MAX_RETRIES", 5)))
+    monitor_retry_base = max(10.0, float(getattr(config, "YOUTUBE_MONITOR_RETRY_DELAY", 30)))
 
     consecutive_failures = 0
     while True:

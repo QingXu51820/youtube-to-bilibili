@@ -8,7 +8,6 @@ Uses ``-c copy`` for fast, lossless splitting at keyframe boundaries.
 """
 
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -151,24 +150,3 @@ def split_video(
     return [str(s) for s in segments]
 
 
-def need_split(
-    file_path: str,
-    max_duration_seconds: int | None = None,
-) -> bool:
-    """
-    Return True if the video at *file_path* is longer than the threshold.
-
-    Args:
-        file_path: Path to the video file.
-        max_duration_seconds: Threshold in seconds; defaults to
-            ``config.MAX_VIDEO_DURATION_SECONDS``.
-
-    Returns:
-        ``True`` when the duration exceeds the threshold.  Returns
-        ``False`` for unknown duration or duration at or below threshold.
-    """
-    max_sec = max_duration_seconds or int(config.MAX_VIDEO_DURATION_SECONDS)
-    if max_sec <= 0:
-        return False
-    dur = _probe_duration(Path(file_path))
-    return dur > max_sec
