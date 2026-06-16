@@ -16,6 +16,10 @@
 - 上传成功后可清理本地视频、缩略图和生成封面
 - 可通过 `main.py --monitor` 定时检查 YouTube 订阅更新并自动上传
 - 支持代理、YouTube Cookie、低速重启和超长视频排队
+- 多层次自动重试：API 调用、监控周期、单视频处理均支持指数退避重试
+- 超长视频（>10h）自动使用 ffmpeg 无损分割为分 P 上传
+- 支持 PyInstaller 打包为单个 Windows EXE，无需安装 Python
+- 启动时自动检测 ffmpeg / ffprobe / Node.js 可用性并给出明确提示
 
 ## Quick Start
 
@@ -119,10 +123,12 @@ python main.py --monitor --once --dry-run
 | `TRANSLATION_PRESERVE_TERMS` | 翻译时原样保留的术语，逗号分隔 | 空 |
 | `TRANSLATION_EXTRA_PROMPT` | 追加给 AI 翻译器的额外要求 | 空 |
 | `TRANSLATION_PROXY` | 单独指定翻译代理，留空时复用 `YOUTUBE_PROXY` | 空 |
+| `SOURCE_LANG` | 源语言，`auto` 表示自动检测 | `auto` |
 | `DEFAULT_TID` | B站分区 ID | `172` |
 | `DEFAULT_TAGS` | B站标签，逗号分隔 | `转载,YouTube` |
 | `DOWNLOAD_DIR` | 下载目录 | `./downloads` |
 | `MAX_HEIGHT` | 下载视频最高画质 | `1080` |
+| `MAX_VIDEO_DURATION_SECONDS` | 触发视频分割的时长阈值（秒），超过则分 P 上传 | `36000`（10 小时） |
 | `CLEANUP_AFTER_UPLOAD` | 上传成功后清理本地文件 | `true` |
 | `RUNS_DIR` | 批量结果记录目录 | `./runs` |
 | `YOUTUBE_PROXY` | YouTube API 和默认下载代理 | 空 |
@@ -142,6 +148,26 @@ python main.py --monitor --once --dry-run
 | `DOWNLOAD_MAX_RESTARTS` | 单个视频因低速自动重启的最大次数 | `3` |
 | `DOWNLOAD_STARTUP_STATUS_SECONDS` | 下载开始传输前，每隔多少秒提示解析/等待状态 | `30` |
 
+网络重试配置：
+
+| 配置项 | 说明 | 默认值 |
+| --- | --- | --- |
+| `YOUTUBE_API_MAX_RETRIES` | YouTube API 单次请求的最大重试次数 | `3` |
+| `YOUTUBE_API_RETRY_DELAY` | API 重试基础延迟秒数（指数退避：delay × 2^n） | `2` |
+| `YOUTUBE_MONITOR_MAX_RETRIES` | 监控周期连续网络失败多少次后等待一个完整间隔 | `5` |
+| `YOUTUBE_MONITOR_RETRY_DELAY` | 监控周期重试基础延迟秒数（上限 600s） | `30` |
+| `YOUTUBE_VIDEO_RETRY_MAX` | 单视频处理失败后的额外重试次数（仅 download/split/upload 阶段） | `2` |
+| `YOUTUBE_VIDEO_RETRY_DELAY` | 单视频重试基础延迟秒数 | `30` |
+
+## 视频分割与分 P 上传
+
+Bilibili 限制单个视频时长不超过 10 小时。超过此限制的视频会自动使用 ffmpeg 分割为多个片段，以分 P（多部分）形式上传：
+
+- 使用 `ffmpeg -c copy` 在关键帧处无损分割，无需重新编码，速度快且不损失画质
+- 分割后的片段按 `_P001`、`_P002`... 命名
+- 上传时自动检测分 P 数量并在完成信息中标注
+- 可通过 `MAX_VIDEO_DURATION_SECONDS` 调整分割阈值（默认 `36000` 秒）
+
 封面配置：
 
 ```env
@@ -160,7 +186,6 @@ B站常用游戏分区 ID：
 | 游戏-电子竞技 | `171` |
 | 游戏-桌游棋牌 | `173` |
 
-注意：`28` 是 `音乐-原创音乐`，不是游戏区。
 
 ## YouTube Cookie 与代理
 
@@ -197,6 +222,25 @@ TRANSLATION_PROXY=http://127.0.0.1:7897
 python main.py --monitor
 ```
 
+常用命令行选项：
+
+```bash
+# 每 30 分钟检查一次
+python main.py --monitor --monitor-interval 1800
+
+# 只检查一次（调试用）
+python main.py --monitor --once
+
+# 仅打印待处理视频，不下载不上传
+python main.py --monitor --once --dry-run
+
+# 使用 RSS 模式（不消耗 API 配额）
+python main.py --monitor --monitor-source rss
+
+# 禁用下载低速保护
+python main.py --monitor --no-speed-protection
+```
+
 配置项：
 
 | 配置项 | 说明 | 默认值 |
@@ -206,11 +250,14 @@ python main.py --monitor
 | `YOUTUBE_MONITOR_LIMIT` | 每轮读取的订阅视频数量 | `50` |
 | `YOUTUBE_MONITOR_STATE` | 已处理视频状态文件 | `state/processed_videos.json` |
 | `YOUTUBE_DEFER_LONG_VIDEO_MINUTES` | 直播回放或超长视频排到队尾的时长阈值，`0` 表示关闭 | `60` |
+| `YOUTUBE_MAX_VIDEOS_PER_CHANNEL` | 每个订阅频道抓取最近多少条视频 | `5` |
 
 自动轮询策略：
 
 - 每轮处理全部未上传的新视频
-- 上传或下载失败的视频会在下一轮继续重试
+- 上传或下载失败的视频会在 **同一周期内** 自动重试（最多 `YOUTUBE_VIDEO_RETRY_MAX` 次，仅 download/split/upload 阶段）
+- 重试采用指数退避：30s → 60s → 120s...，避免频繁请求
+- 若整个周期的 API/网络请求连续失败，监控循环也会自动重试，不会直接退出
 - 直播、预约直播和直播处理中内容会被永久跳过
 - 直播回放或时长达到阈值的视频会排到队尾，先上传普通视频
 - 处理历史写入 `state/processed_videos.json`，用 YouTube `video_id` 去重
@@ -310,6 +357,58 @@ YouTube URL
   -> bilibili-api-python 上传为转载
   -> 写入 runs 结果记录
 ```
+
+## 启动工具检查
+
+每次启动时，程序会自动检测以下外部工具的可用性：
+
+```
+[工具] ffmpeg: OK
+[工具] ffprobe: OK
+[工具] node: OK
+```
+
+缺少工具时会显示 `未找到` 及影响说明，但**不会阻止程序运行**——相关功能会优雅降级：
+
+| 工具 | 缺失影响 |
+| --- | --- |
+| ffmpeg | 视频分割不可用 |
+| ffprobe | 分辨率/时长探测不可用 |
+| Node.js | yt-dlp 将使用内置 JS 引擎（可能较慢） |
+
+## EXE 打包（Windows）
+
+项目支持通过 PyInstaller 打包为单个 `.exe` 文件，无需安装 Python 即可运行：
+
+```batch
+build_exe.bat
+```
+
+输出：`dist\yt2bili.exe`（约 150–200 MB）
+
+**打包前准备：**
+
+1. 安装 PyInstaller：`pip install pyinstaller`
+2. （可选）安装 [UPX](https://upx.github.io/) 并加入 PATH，可压缩约 40% 体积
+3. 确保 `ffmpeg` / `ffprobe` 已安装并加入系统 PATH（EXE 运行时仍需它们）
+
+**打包后的目录结构：**
+
+```
+D:\yt2bili\
+  yt2bili.exe          ← 主程序
+  .env                 ← 配置文件（从 .env.example 复制并填写）
+  client_secret.json   ← YouTube OAuth（使用 API 监控模式时需要）
+  downloads/           ← 下载目录（自动创建）
+  runs/                ← 运行记录（自动创建）
+  state/               ← 监控状态（自动创建）
+```
+
+**与开发模式的区别：**
+
+- 所有用户数据（`.env`、下载、记录）保存在 EXE 所在目录，而非解压临时目录
+- 通过 `frozen_paths.py` 自动检测运行环境，无需手动配置路径
+- 命令行用法与 `python main.py` 完全一致：`yt2bili.exe --monitor`
 
 ## 常见问题
 
