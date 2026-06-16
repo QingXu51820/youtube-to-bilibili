@@ -39,3 +39,7 @@ build/
 # OS
 Thumbs.db
 .DS_Store
+
+# EXE and shortcuts
+*.exe
+*.lnk
