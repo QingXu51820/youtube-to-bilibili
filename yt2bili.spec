@@ -3,7 +3,7 @@
 PyInstaller spec for yt2bili.exe (YouTube → Bilibili pipeline).
 
 Build:  pyinstaller yt2bili.spec
-Output: dist\yt2bili.exe
+Output: dist/yt2bili.exe
 
 Requires UPX on PATH for compression (optional, saves ~40% size).
 """
@@ -36,13 +36,12 @@ a = Analysis(
         # yt-dlp internals (loaded dynamically)
         "yt_dlp.cookies",
         "yt_dlp.postprocessor.ffmpeg",
-        "yt_dlp.postprocessor.metadataembed",
-        "yt_dlp.postprocessor.thumbnail",
         # bilibili-api-python async internals
         "bilibili_api",
         "bilibili_api.video_uploader",
         "bilibili_api.login_v2",
-        "bilibili_api.credential",
+        "bilibili_api.clients.HTTPXClient",
+        "bilibili_api.clients.AioHTTPClient",
         # Google API + OAuth
         "googleapiclient",
         "googleapiclient.discovery",
@@ -87,26 +86,7 @@ a = Analysis(
 # ── Strip debug symbols ────────────────────────────────────────
 a.binaries = [b for b in a.binaries if not b[0].endswith(".pdb")]
 
-# ── Block 2: Collect data files from key packages ──────────────
-try:
-    import PyInstaller.utils.hooks as _pi_hooks
-    for _mod in [
-        "yt_dlp", "bilibili_api", "PIL", "googleapiclient",
-        "deep_translator", "openai", "httpx", "aiohttp",
-        "feedparser", "nest_asyncio",
-    ]:
-        try:
-            a.datas += _pi_hooks.collect_data_files(_mod)
-        except Exception:
-            pass
-        try:
-            a.binaries += _pi_hooks.collect_dynamic_libs(_mod)
-        except Exception:
-            pass
-except Exception:
-    pass
-
-# ── Block 3: PYZ, EXE, COLLECT ─────────────────────────────────
+# ── Block 2: EXE ─────────────────────────────────~~~~~~~~~~~~~
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
 _icon_path = "icon.ico" if Path("icon.ico").exists() else None
