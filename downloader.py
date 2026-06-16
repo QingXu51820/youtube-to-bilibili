@@ -287,7 +287,16 @@ def _cookie_hint() -> str:
 
 
 def _with_stderr_suppressed(callback):
-    """Run a callback while suppressing noisy yt-dlp browser-cookie stderr."""
+    """Run a callback while suppressing noisy yt-dlp browser-cookie stderr.
+
+    In PyInstaller-frozen EXEs, manipulating fd 2 breaks the bootloader's
+    console handling (→ [WinError 1]).  We simply skip suppression there.
+    """
+    from frozen_paths import is_frozen
+
+    if is_frozen():
+        return callback()
+
     import os
 
     stderr_fd = os.dup(2)
