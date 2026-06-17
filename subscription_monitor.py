@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -60,8 +60,15 @@ ProcessVideoFunc = Callable[[str], Any]
 WriteRunReportFunc = Callable[[list[Any]], Path]
 
 
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def beijing_now() -> str:
+    return datetime.now(BEIJING_TZ).isoformat(timespec="seconds")
 
 
 def project_path(path: str | Path) -> Path:
@@ -560,7 +567,7 @@ def run_monitor_loop(
     consecutive_failures = 0
     while True:
         print("=" * 60)
-        print(f"[订阅] 开始检查: {utc_now()}")
+        print(f"[订阅] 开始检查: {beijing_now()}")
         print("=" * 60)
 
         try:
