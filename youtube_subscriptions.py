@@ -125,7 +125,22 @@ def require_file(path: Path, purpose: str) -> None:
         )
 
 
+def _is_token_expired(exc: BaseException) -> bool:
+    """Check if an exception is caused by expired/revoked OAuth token."""
+    text = str(exc).lower()
+    return "invalid_grant" in text or "token has been expired" in text
+
+
 def _api_network_error(exc: BaseException) -> YouTubeNetworkError:
+    if _is_token_expired(exc):
+        return YouTubeNetworkError(
+            "YouTube OAuth token 已过期或被撤销。\n"
+            f"原始错误: {exc}\n\n"
+            "解决方法：\n"
+            "1. 删除 youtube_token.json\n"
+            "2. 重新运行 python main.py --monitor\n"
+            "3. 浏览器会弹出 Google 授权页面，重新授权即可"
+        )
     return YouTubeNetworkError(
         "YouTube Data API request failed due to a network/proxy timeout.\n"
         f"Original error: {exc}\n\n"
@@ -227,24 +242,13 @@ class YouTubeClient:
 
     def _ensure_valid_token(self) -> None:
         if self.creds.expired and self.creds.refresh_token:
-            last_error = None
-            for attempt in range(_API_MAX_RETRIES + 1):
-                try:
-                    self.creds.refresh(self.google_auth_request)
-                    return
-                except YouTubeNetworkError:
-                    raise  # already wrapped, let caller retry
-                except Exception as exc:
-                    last_error = exc
-                    if attempt >= _API_MAX_RETRIES:
-                        raise _api_network_error(exc) from exc
-                    delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
-                    print(
-                        f"[API] Token 刷新网络错误，{delay:.0f}s 后重试 "
-                        f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
-                    )
-                    _time.sleep(delay)
-            raise _api_network_error(last_error) from last_error
+            try:
+                self.creds.refresh(self.google_auth_request)
+                return
+            except Exception as exc:
+                if _is_token_expired(exc):
+                    raise _api_network_error(exc) from exc
+                raise _api_network_error(exc) from exc
 
     def get(self, endpoint: str, params: dict) -> dict:
         last_error = None
@@ -333,22 +337,18 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            last_error = None
-            for attempt in range(_API_MAX_RETRIES + 1):
-                try:
-                    creds.refresh(auth_request)
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    if attempt >= _API_MAX_RETRIES:
-                        raise _api_network_error(exc) from exc
-                    delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
-                    print(
-                        f"[API] Token 刷新网络错误，{delay:.0f}s 后重试 "
-                        f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
-                    )
-                    _time.sleep(delay)
-        else:
+            try:
+                creds.refresh(auth_request)
+            except Exception as exc:
+                if _is_token_expired(exc):
+                    # Token expired/revoked — delete old token and re-auth from scratch
+                    print("[API] Token 已过期，删除旧 token 并重新授权...")
+                    token_file.unlink(missing_ok=True)
+                    creds = None
+                else:
+                    raise _api_network_error(exc) from exc
+
+        if not creds or not creds.refresh_token:
             require_file(client_secret_file, "OAuth client secret file")
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(client_secret_file), [YOUTUBE_READONLY_SCOPE]
