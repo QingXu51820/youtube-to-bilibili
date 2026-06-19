@@ -353,7 +353,26 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(client_secret_file), [YOUTUBE_READONLY_SCOPE]
             )
-            creds = flow.run_local_server(port=0)
+            # Apply YOUTUBE_PROXY to OAuth token-exchange requests
+            # (googleapis.com is blocked without proxy in some regions)
+            proxy_url = _env("YOUTUBE_PROXY", "").strip()
+            _prev_http = os.environ.get("HTTP_PROXY")
+            _prev_https = os.environ.get("HTTPS_PROXY")
+            try:
+                if proxy_url:
+                    os.environ["HTTP_PROXY"] = proxy_url
+                    os.environ["HTTPS_PROXY"] = proxy_url
+                creds = flow.run_local_server(port=0)
+            finally:
+                if proxy_url:
+                    if _prev_http is not None:
+                        os.environ["HTTP_PROXY"] = _prev_http
+                    else:
+                        os.environ.pop("HTTP_PROXY", None)
+                    if _prev_https is not None:
+                        os.environ["HTTPS_PROXY"] = _prev_https
+                    else:
+                        os.environ.pop("HTTPS_PROXY", None)
         token_file.write_text(creds.to_json(), encoding="utf-8")
 
     return YouTubeClient(creds, session=session)
