@@ -790,6 +790,35 @@ def download_video(url: str) -> VideoInfo:
 
     print(f"[下载] 标题: {title}")
     _reject_non_video_content(info)
+
+    # Content filter via DeepSeek
+    if config.CONTENT_FILTER_ENABLED:
+        from translator import classify_content
+        print(f"[筛选] 检查内容相关性（关键词: {config.CONTENT_FILTER_KEYWORDS}）...")
+        if not classify_content(title, description, config.CONTENT_FILTER_KEYWORDS):
+            raise RuntimeError(
+                f"内容筛选已跳过（与 {config.CONTENT_FILTER_KEYWORDS} 无关）: {title}"
+            )
+        print(f"[筛选] 内容相关，继续处理")
+
+    # Reject vertical / Shorts videos before downloading
+    if config.YOUTUBE_SKIP_VERTICAL_VIDEOS:
+        best_w, best_h = 0, 0
+        for fmt in (info.get("formats") or []):
+            h = fmt.get("height")
+            w = fmt.get("width")
+            vcodec = fmt.get("vcodec")
+            if h and w and vcodec != "none" and int(h) <= config.MAX_HEIGHT:
+                if int(h) > best_h or (int(h) == best_h and int(w) > best_w):
+                    best_h, best_w = int(h), int(w)
+        if best_h == 0:
+            best_w = info.get("width") or 0
+            best_h = info.get("height") or 0
+        if best_h > 0 and best_w > 0 and best_h > best_w:
+            raise RuntimeError(
+                f"检测到竖屏视频 {best_w}x{best_h}，已跳过"
+            )
+
     available_resolution = _best_available_resolution(info)
     if available_resolution:
         print(f"[下载] 可用最高(≤{config.MAX_HEIGHT}p): {available_resolution}")
