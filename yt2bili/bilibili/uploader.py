@@ -10,9 +10,9 @@ from dataclasses import dataclass
 
 from bilibili_api import video_uploader
 
-import config
-import auth
-from cover import image_size, is_valid_image
+from yt2bili import config
+from yt2bili.bilibili import auth
+from yt2bili.media.cover import image_size, is_valid_image
 
 
 def _make_minimal_jpeg() -> bytes:

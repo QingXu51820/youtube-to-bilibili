@@ -13,8 +13,8 @@ from copy import deepcopy
 from pathlib import Path
 from dataclasses import dataclass
 
-import config
-from cover import is_valid_image
+from yt2bili import config
+from yt2bili.media.cover import is_valid_image
 
 
 BLOCKED_LIVE_STATUSES = {
@@ -292,7 +292,7 @@ def _with_stderr_suppressed(callback):
     In PyInstaller-frozen EXEs, manipulating fd 2 breaks the bootloader's
     console handling (→ [WinError 1]).  We simply skip suppression there.
     """
-    from frozen_paths import is_frozen
+    from yt2bili.frozen_paths import is_frozen
 
     if is_frozen():
         return callback()
@@ -793,7 +793,7 @@ def download_video(url: str) -> VideoInfo:
 
     # Content filter via DeepSeek
     if config.CONTENT_FILTER_ENABLED:
-        from translator import classify_content
+        from yt2bili.translation.translator import classify_content
         print(f"[筛选] 检查内容相关性（关键词: {config.CONTENT_FILTER_KEYWORDS}）...")
         if not classify_content(title, description, config.CONTENT_FILTER_KEYWORDS):
             raise RuntimeError(

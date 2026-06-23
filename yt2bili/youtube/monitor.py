@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-import config
-from youtube_subscriptions import (
+from yt2bili import config
+from yt2bili.youtube.subscriptions import (
     VideoItem,
     YouTubeNetworkError,
     chunked,

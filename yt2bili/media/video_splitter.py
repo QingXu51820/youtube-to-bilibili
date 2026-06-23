@@ -11,7 +11,7 @@ import subprocess
 import time
 from pathlib import Path
 
-import config
+from yt2bili import config
 
 
 def _probe_duration(file_path: Path) -> float:

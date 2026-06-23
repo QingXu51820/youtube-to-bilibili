@@ -287,6 +287,7 @@ python main.py --monitor --no-speed-protection
 
 ```bash
 python youtube_subscriptions.py --source api --limit 50
+python -m yt2bili.youtube.subscriptions --source api --limit 50
 ```
 
 首次使用前需要配置 Google OAuth：
@@ -304,6 +305,8 @@ python youtube_subscriptions.py --source rss --limit 50
 python youtube_subscriptions.py --source rss --channels-file channels.txt --limit 50
 ```
 
+仓库中提供 `examples/channels.example.txt` 作为频道列表格式示例。
+
 配额说明：
 
 - `subscriptions.list`、`channels.list`、`playlistItems.list` 官方配额成本都是 1 unit/请求
@@ -313,7 +316,7 @@ python youtube_subscriptions.py --source rss --channels-file channels.txt --limi
 
 ## urls.txt 格式
 
-实际运行文件名为 `urls.txt`，该文件会被 `.gitignore` 忽略。仓库中提供 `urls.example.txt` 作为示例：
+实际运行文件名为 `urls.txt`，该文件会被 `.gitignore` 忽略。仓库中提供 `examples/urls.example.txt` 作为示例：
 
 ```txt
 # 空行和注释会被忽略
@@ -398,7 +401,8 @@ YouTube URL
 项目支持通过 PyInstaller 打包为单个 `.exe` 文件，无需安装 Python 即可运行：
 
 ```batch
-build_exe.bat
+tools\build_exe.bat
+pyinstaller packaging\yt2bili.spec
 ```
 
 输出：`dist\yt2bili.exe`（约 150–200 MB）
@@ -424,7 +428,7 @@ D:\yt2bili\
 **与开发模式的区别：**
 
 - 所有用户数据（`.env`、下载、记录）保存在 EXE 所在目录，而非解压临时目录
-- 通过 `frozen_paths.py` 自动检测运行环境，无需手动配置路径
+- 通过 `yt2bili/frozen_paths.py` 自动检测运行环境，无需手动配置路径
 - 命令行用法与 `python main.py` 完全一致：`yt2bili.exe --monitor`
 
 ## 常见问题

@@ -6,7 +6,7 @@ Supports Google Translate, OpenAI, and DeepSeek.
 from abc import ABC, abstractmethod
 import re
 
-import config
+from yt2bili import config
 
 
 TRAILING_HASHTAG_RE = re.compile(r"(?:\s+#[-\w\u4e00-\u9fff]+)+\s*$", re.IGNORECASE)

@@ -2,7 +2,7 @@
 """
 PyInstaller spec for yt2bili.exe (YouTube → Bilibili pipeline).
 
-Build:  pyinstaller yt2bili.spec
+Build:  pyinstaller packaging/yt2bili.spec
 Output: dist/yt2bili.exe
 
 Requires UPX on PATH for compression (optional, saves ~40% size).
@@ -10,6 +10,8 @@ Requires UPX on PATH for compression (optional, saves ~40% size).
 
 import pkgutil
 from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
 
 # ── Collect yt-dlp extractor submodules ────────────────────────
 # yt-dlp discovers extractors at runtime via pkgutil.iter_modules.
@@ -26,11 +28,11 @@ except Exception:
 
 # ── Block 1: Analysis ──────────────────────────────────────────
 a = Analysis(
-    ["main.py"],
-    pathex=[],
+    [str(_ROOT / "yt2bili" / "main.py")],
+    pathex=[str(_ROOT)],
     binaries=[],
     datas=[
-        (".env.example", "."),
+        (str(_ROOT / ".env.example"), "."),
     ],
     hiddenimports=[
         # yt-dlp internals (loaded dynamically)
@@ -89,7 +91,7 @@ a.binaries = [b for b in a.binaries if not b[0].endswith(".pdb")]
 # ── Block 2: EXE ─────────────────────────────────~~~~~~~~~~~~~
 pyz = PYZ(a.pure, a.zipped_data, cipher=None)
 
-_icon_path = "icon.ico" if Path("icon.ico").exists() else None
+_icon_path = str(_ROOT / "icon.ico") if (_ROOT / "icon.ico").exists() else None
 
 exe = EXE(
     pyz,

@@ -6,7 +6,7 @@ Validates YouTube thumbnails and converts them to a 1920x1080 JPEG cover.
 from pathlib import Path
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-import config
+from yt2bili import config
 
 
 def is_valid_image(path: str | Path | None) -> bool:

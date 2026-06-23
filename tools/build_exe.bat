@@ -6,6 +6,9 @@ REM  Prerequisites: Python 3.12, all deps installed, conda env "yt2bili"
 REM  Optional: UPX on PATH for compression
 REM ============================================================
 
+set "SCRIPT_DIR=%~dp0"
+pushd "%SCRIPT_DIR%.."
+
 echo ============================================================
 echo   yt2bili.exe Builder
 echo ============================================================
@@ -21,6 +24,7 @@ REM --- Check Python --------------------------------------------
 python --version 2>nul
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Python not found on PATH
+    popd
     exit /b 1
 )
 
@@ -31,6 +35,7 @@ if %ERRORLEVEL% NEQ 0 (
     pip install pyinstaller
     if %ERRORLEVEL% NEQ 0 (
         echo [ERROR] Failed to install PyInstaller
+        popd
         exit /b 1
     )
 )
@@ -47,10 +52,11 @@ if %ERRORLEVEL% EQU 0 (
 REM --- Build ---------------------------------------------------
 echo.
 echo [BUILD] Running PyInstaller...
-pyinstaller --clean yt2bili.spec
+pyinstaller --clean --distpath dist --workpath build packaging\yt2bili.spec
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [ERROR] Build FAILED
+    popd
     exit /b 1
 )
 
@@ -62,7 +68,7 @@ if not exist "dist\.env" (
     echo [INFO] Created dist\.env from .env.example
 )
 if exist client_secret.json copy /Y client_secret.json dist\ >nul 2>&1
-if exist urls.example.txt copy /Y urls.example.txt dist\urls.txt >nul 2>&1
+if exist examples\urls.example.txt copy /Y examples\urls.example.txt dist\urls.txt >nul 2>&1
 
 REM --- Report --------------------------------------------------
 echo.
@@ -79,4 +85,5 @@ echo   Quick start:
 echo     dist\yt2bili.exe --help
 echo     dist\yt2bili.exe --monitor --refresh-youtube-cookies
 echo ============================================================
+popd
 exit /b 0
