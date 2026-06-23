@@ -9,8 +9,9 @@
 - 下载 YouTube 视频，默认最高 1080p，输出 MP4
 - 获取 YouTube 标题、简介、视频 ID 和缩略图
 - 使用 DeepSeek、OpenAI 兼容接口或 Google 翻译标题
+- **内容筛选**：可选在下前用 DeepSeek 判断视频是否与指定主题相关，过滤无关内容
 - 自动移除标题末尾的 YouTube hashtag，并可保留指定术语
-- 将缩略图校验并等比裁剪为 1920×1080 JPEG 封面
+- 将缩略图校验并等比裁剪或填充为 1920×1080 JPEG 封面
 - 上传到 Bilibili，投稿类型为转载，简介保留原视频链接
 - 批量处理时单条失败不影响后续，并写入 `runs/latest.json`
 - 上传成功后可清理本地视频、缩略图和生成封面
@@ -18,6 +19,8 @@
 - 支持代理、YouTube Cookie、低速重启和超长视频排队
 - 多层次自动重试：API 调用、监控周期、单视频处理均支持指数退避重试
 - 超长视频（>10h）自动使用 ffmpeg 无损分割为分 P 上传
+- **竖屏过滤**：自动跳过 YouTube Shorts 等竖屏视频（可配置）
+- **超长视频永久跳过**：超过指定时长的视频直接标记跳过，不再排队
 - 支持 PyInstaller 打包为单个 Windows EXE，无需安装 Python
 - 启动时自动检测 ffmpeg / ffprobe / Node.js 可用性并给出明确提示
 
@@ -129,6 +132,11 @@ python main.py --monitor --once --dry-run
 | `DOWNLOAD_DIR` | 下载目录 | `./downloads` |
 | `MAX_HEIGHT` | 下载视频最高画质 | `1080` |
 | `MAX_VIDEO_DURATION_SECONDS` | 触发视频分割的时长阈值（秒），超过则分 P 上传 | `36000`（10 小时） |
+| `COVER_FIT` | 封面适配模式：`crop`=居中裁剪，`contain`=等比缩放加黑边 | `crop` |
+| `YOUTUBE_SKIP_LONG_VIDEO_MINUTES` | 永久跳过超过该时长的视频（分钟），`0`=禁用 | `0` |
+| `YOUTUBE_SKIP_VERTICAL_VIDEOS` | 自动跳过竖屏视频（YouTube Shorts 等） | `true` |
+| `CONTENT_FILTER_ENABLED` | 开启 DeepSeek 内容筛选 | `false` |
+| `CONTENT_FILTER_KEYWORDS` | 内容筛选关键词，视频标题/简介需包含 | `Marvel SNAP` |
 | `CLEANUP_AFTER_UPLOAD` | 上传成功后清理本地文件 | `true` |
 | `RUNS_DIR` | 批量结果记录目录 | `./runs` |
 | `YOUTUBE_PROXY` | YouTube API 和默认下载代理 | 空 |
@@ -250,6 +258,10 @@ python main.py --monitor --no-speed-protection
 | `YOUTUBE_MONITOR_LIMIT` | 每轮读取的订阅视频数量 | `50` |
 | `YOUTUBE_MONITOR_STATE` | 已处理视频状态文件 | `state/processed_videos.json` |
 | `YOUTUBE_DEFER_LONG_VIDEO_MINUTES` | 直播回放或超长视频排到队尾的时长阈值，`0` 表示关闭 | `60` |
+| `YOUTUBE_SKIP_LONG_VIDEO_MINUTES` | 永久跳过超过该时长的视频（分钟），`0`=禁用（仅 API 模式） | `0` |
+| `YOUTUBE_SKIP_VERTICAL_VIDEOS` | 自动跳过竖屏/Shorts 视频 | `true` |
+| `CONTENT_FILTER_ENABLED` | 开启 DeepSeek 内容筛选，下载前过滤无关视频 | `false` |
+| `CONTENT_FILTER_KEYWORDS` | 内容筛选关键词 | `Marvel SNAP` |
 | `YOUTUBE_MAX_VIDEOS_PER_CHANNEL` | 每个订阅频道抓取最近多少条视频 | `5` |
 
 自动轮询策略：
@@ -258,8 +270,13 @@ python main.py --monitor --no-speed-protection
 - 上传或下载失败的视频会在 **同一周期内** 自动重试（最多 `YOUTUBE_VIDEO_RETRY_MAX` 次，仅 download/split/upload 阶段）
 - 重试采用指数退避：30s → 60s → 120s...，避免频繁请求
 - 若整个周期的 API/网络请求连续失败，监控循环也会自动重试，不会直接退出
-- 直播、预约直播和直播处理中内容会被永久跳过
-- 直播回放或时长达到阈值的视频会排到队尾，先上传普通视频
+- **永久跳过规则（不重试、不排队）**：
+  - 直播、预约直播和直播处理中内容
+  - 竖屏视频（`YOUTUBE_SKIP_VERTICAL_VIDEOS=true`）
+  - 超长视频（`YOUTUBE_SKIP_LONG_VIDEO_MINUTES > 0`）
+  - 内容筛选不相关（`CONTENT_FILTER_ENABLED=true`）
+- 直播回放或时长达到 `YOUTUBE_DEFER_LONG_VIDEO_MINUTES` 的视频会排到队尾，先上传普通视频
+- 内容筛选（可选）：下载前用 DeepSeek 判断标题+简介是否与 `CONTENT_FILTER_KEYWORDS` 相关，无关则永久跳过
 - 处理历史写入 `state/processed_videos.json`，用 YouTube `video_id` 去重
 
 ## YouTube 订阅列表脚本
