@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load .env from the project root (if it exists)
-from frozen_paths import user_data_dir
+from yt2bili.frozen_paths import user_data_dir
 
 PROJECT_ROOT = user_data_dir()
 load_dotenv(PROJECT_ROOT / ".env")

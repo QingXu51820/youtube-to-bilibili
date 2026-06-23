@@ -6,7 +6,7 @@ In a PyInstaller --onefile EXE:
 - sys._MEIPASS is the temp extraction directory (read-only bundled data)
 
 In development:
-- Everything is relative to this file's parent dir (the project root)
+- Everything is relative to the repository root (the package's parent dir)
 """
 
 import sys
@@ -23,8 +23,8 @@ def user_data_dir() -> Path:
     Return the writable directory for mutable runtime files.
 
     - Frozen: next to the EXE (e.g. D:\\yt2bili\\)
-    - Dev:    the project root (where this file lives)
+    - Dev:    the project root (the package's parent directory)
     """
     if is_frozen():
         return Path(sys.executable).parent.resolve()
-    return Path(__file__).parent
+    return Path(__file__).resolve().parent.parent

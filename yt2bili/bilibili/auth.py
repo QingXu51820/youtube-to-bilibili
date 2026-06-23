@@ -7,7 +7,7 @@ with the B站 app, then saves credentials to .env automatically.
 import os
 import sys
 from pathlib import Path
-import config
+from yt2bili import config
 
 
 def get_credential():
