@@ -268,3 +268,43 @@ def get_translator() -> BaseTranslator:
 def translate(text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
     """Convenience function: translate text using configured backend."""
     return get_translator().translate(text, source_lang, target_lang)
+
+
+def classify_content(title: str, description: str, keywords: str) -> bool:
+    """Return True if the video is relevant to the given keywords (via DeepSeek)."""
+    from openai import OpenAI
+    import httpx
+
+    proxy = _translation_proxy()
+    http_client = None
+    if proxy:
+        timeout = max(10, int(getattr(config, "YOUTUBE_HTTP_TIMEOUT", 60) or 60))
+        http_client = httpx.Client(proxy=proxy, timeout=timeout)
+
+    client = OpenAI(
+        api_key=config.DEEPSEEK_API_KEY,
+        base_url=config.DEEPSEEK_BASE_URL,
+        http_client=http_client,
+    )
+
+    prompt = (
+        "你是一个内容审核助手。根据视频标题和简介，判断该视频是否与以下主题相关。\n"
+        f"主题：{keywords}\n"
+        "如果相关，只回复 YES；如果不相关，只回复 NO。不要回复其他内容。"
+    )
+
+    desc_snippet = (description or "")[:500]
+    user_message = f"标题：{title}\n\n简介：{desc_snippet}" if desc_snippet else f"标题：{title}"
+
+    response = client.chat.completions.create(
+        model=config.DEEPSEEK_MODEL,
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0,
+        max_tokens=10,
+    )
+
+    result = (response.choices[0].message.content or "").strip().upper()
+    return "YES" in result

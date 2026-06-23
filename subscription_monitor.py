@@ -33,6 +33,8 @@ STATUS_UPLOADED = "uploaded"
 STATUS_FAILED = "failed"
 STATUS_SKIPPED_LIVE = "skipped_live"
 STATUS_SKIPPED_LONG = "skipped_long"
+STATUS_SKIPPED_VERTICAL = "skipped_vertical"
+STATUS_SKIPPED_CONTENT = "skipped_content"
 LIVE_SKIP_MARKERS = (
     "不是可下载的普通视频",
     "正在直播",
@@ -40,6 +42,13 @@ LIVE_SKIP_MARKERS = (
     "直播刚结束",
     "is live",
     "upcoming",
+)
+VERTICAL_SKIP_MARKERS = (
+    "检测到竖屏视频",
+    "竖屏",
+)
+CONTENT_SKIP_MARKERS = (
+    "内容筛选已跳过",
 )
 # ── Per-video retry ────────────────────────────────────────────────
 _VIDEO_RETRY_MAX = max(0, int(getattr(config, "YOUTUBE_VIDEO_RETRY_MAX", None) or 2))
@@ -317,6 +326,20 @@ def is_live_skip_result(result: Any) -> bool:
     return any(marker.lower() in error for marker in LIVE_SKIP_MARKERS)
 
 
+def is_vertical_skip_result(result: Any) -> bool:
+    if getattr(result, "stage", "") != "download":
+        return False
+    error = str(getattr(result, "error", "")).lower()
+    return any(marker.lower() in error for marker in VERTICAL_SKIP_MARKERS)
+
+
+def is_content_skip_result(result: Any) -> bool:
+    if getattr(result, "stage", "") != "download":
+        return False
+    error = str(getattr(result, "error", "")).lower()
+    return any(marker.lower() in error for marker in CONTENT_SKIP_MARKERS)
+
+
 def should_skip_video(state: dict[str, Any], video: VideoItem) -> tuple[bool, str]:
     entry = state["videos"].get(video.video_id)
     if not entry:
@@ -328,6 +351,10 @@ def should_skip_video(state: dict[str, Any], video: VideoItem) -> tuple[bool, st
         return True, "直播内容已永久跳过"
     if status == STATUS_SKIPPED_LONG:
         return True, "超长视频已永久跳过"
+    if status == STATUS_SKIPPED_VERTICAL:
+        return True, "竖屏视频已永久跳过"
+    if status == STATUS_SKIPPED_CONTENT:
+        return True, "内容筛选已跳过"
     return False, ""
 
 
@@ -375,7 +402,14 @@ def record_success(state: dict[str, Any], video: VideoItem, result: Any) -> None
 
 
 def record_failure(state: dict[str, Any], video: VideoItem, result: Any) -> None:
-    status = STATUS_SKIPPED_LIVE if is_live_skip_result(result) else STATUS_FAILED
+    if is_live_skip_result(result):
+        status = STATUS_SKIPPED_LIVE
+    elif is_vertical_skip_result(result):
+        status = STATUS_SKIPPED_VERTICAL
+    elif is_content_skip_result(result):
+        status = STATUS_SKIPPED_CONTENT
+    else:
+        status = STATUS_FAILED
     entry = _base_entry(state, video, status)
     entry.update(
         {
