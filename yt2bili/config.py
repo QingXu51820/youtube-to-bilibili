@@ -102,6 +102,20 @@ YOUTUBE_MONITOR_STATE = _get(
     str(PROJECT_ROOT / "state" / "processed_videos.json"),
 )
 
+# ── Discord Message Monitor ────────────────────────────────────────
+DISCORD_BOT_TOKEN = _get("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_IDS = _get("DISCORD_CHANNEL_IDS", "")  # comma-separated channel IDs
+DISCORD_SKIP_BOTS = _get("DISCORD_SKIP_BOTS", "true").lower() == "true"
+DISCORD_SKIP_EMPTY = _get("DISCORD_SKIP_EMPTY", "true").lower() == "true"
+DISCORD_MAX_IMAGES = _get_int("DISCORD_MAX_IMAGES", 9)
+DISCORD_TRANSLATE = _get("DISCORD_TRANSLATE", "true").lower() == "true"
+DISCORD_STATE_FILE = _get(
+    "DISCORD_STATE_FILE",
+    str(PROJECT_ROOT / "state" / "discord_messages.json"),
+)
+DISCORD_FALLBACK_LIMIT = _get_int("DISCORD_FALLBACK_LIMIT", 20)
+DISCORD_PROXY = _get("DISCORD_PROXY", YOUTUBE_PROXY).strip()
+
 # ── Marvel SNAP Glossary ─────────────────────────────────────────────
 SNAP_GLOSSARY_ENABLED = _get("SNAP_GLOSSARY_ENABLED", "true").lower() == "true"
 SNAP_GLOSSARY_CACHE = _get(
