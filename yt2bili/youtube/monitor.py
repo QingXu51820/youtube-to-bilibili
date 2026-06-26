@@ -480,7 +480,7 @@ def run_monitor_cycle(
                 "YOUTUBE_DEFER_LONG_VIDEO_MINUTES / YOUTUBE_SKIP_LONG_VIDEO_MINUTES 不生效"
             )
 
-    if source == "api" and candidates and config.YOUTUBE_DEFER_LONG_VIDEO_MINUTES > 0:
+    if source == "api" and candidates:
         queue_details = fetch_video_queue_details(
             video_ids=[video.video_id for video in candidates],
             client_secret_file=client_secret_file,
@@ -522,6 +522,31 @@ def run_monitor_cycle(
             candidates = kept
             save_state(state_path, state)
 
+    # ── Skip live/upcoming streams (API mode only) ──
+    if source == "api" and queue_details:
+        kept = []
+        for video in candidates:
+            detail = queue_details.get(video.video_id, {})
+            lbc = detail.get("live_broadcast_content", "")
+            if lbc in ("live", "upcoming"):
+                entry = _base_entry(state, video, STATUS_SKIPPED_LIVE)
+                label = "正在直播" if lbc == "live" else "预约直播"
+                entry["error"] = (
+                    f"检测到该链接是{label}，"
+                    f"不是可下载的普通视频，已跳过: {video.title}"
+                )
+                state["videos"][video.video_id] = entry
+                print(
+                    f"[订阅] 跳过: {video.channel_title} | {video.title}"
+                    f"（{label}，永久跳过）"
+                )
+            else:
+                kept.append(video)
+        if len(kept) < len(candidates):
+            print(f"[订阅] 因直播/预约跳过 {len(candidates) - len(kept)} 条")
+            candidates = kept
+            save_state(state_path, state)
+
     if dry_run:
         for video in candidates:
             detail = queue_details.get(video.video_id, {})
@@ -549,6 +574,10 @@ def run_monitor_cycle(
             # Don't retry if the failure is not a transient network/download issue
             stage = getattr(result, "stage", "")
             if stage not in _RETRYABLE_STAGES:
+                break
+
+            # Permanent skips (vertical/live/content) — don't retry
+            if is_live_skip_result(result) or is_vertical_skip_result(result) or is_content_skip_result(result):
                 break
 
             if retry_attempt >= _VIDEO_RETRY_MAX:
