@@ -63,12 +63,25 @@ if %ERRORLEVEL% NEQ 0 (
 REM --- Copy runtime files --------------------------------------
 echo.
 echo [INFO] Copying runtime files to dist\...
-if not exist "dist\.env" (
-    copy /Y .env.example dist\.env >nul 2>&1
-    echo [INFO] Created dist\.env from .env.example
+
+REM Create config directory in dist (if not exists)
+if not exist "dist\config" mkdir dist\config
+
+REM Copy .env.example → config\.env (only if .env doesn't already exist in dist)
+if not exist "dist\config\.env" (
+    if exist "config\.env.example" (
+        copy /Y config\.env.example dist\config\.env >nul 2>&1
+        echo [INFO] Created dist\config\.env from config\.env.example
+    )
 )
-if exist client_secret.json copy /Y client_secret.json dist\ >nul 2>&1
-if exist examples\urls.example.txt copy /Y examples\urls.example.txt dist\urls.txt >nul 2>&1
+
+REM Copy client_secret.json if exists (now from config\)
+if exist config\client_secret.json copy /Y config\client_secret.json dist\config\ >nul 2>&1
+
+REM Copy urls example
+if exist examples\urls.example.txt (
+    copy /Y examples\urls.example.txt dist\config\urls.txt >nul 2>&1
+)
 
 REM --- Report --------------------------------------------------
 echo.

@@ -32,7 +32,7 @@ a = Analysis(
     pathex=[str(_ROOT)],
     binaries=[],
     datas=[
-        (str(_ROOT / ".env.example"), "."),
+        (str(_ROOT / "config" / ".env.example"), "config"),
     ],
     hiddenimports=[
         # yt-dlp internals (loaded dynamically)

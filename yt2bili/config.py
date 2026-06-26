@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from yt2bili.frozen_paths import user_data_dir
 
 PROJECT_ROOT = user_data_dir()
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / "config" / ".env")
 
 
 def _get(key: str, default: str = "") -> str:
@@ -72,15 +72,15 @@ COVER_FIT = _get("COVER_FIT", "crop").lower()
 RUNS_DIR = _get("RUNS_DIR", str(PROJECT_ROOT / "runs"))
 
 # ── YouTube Subscription Monitor ─────────────────────────────────
-YOUTUBE_CLIENT_SECRET_FILE = _get("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json")
-YOUTUBE_TOKEN_FILE = _get("YOUTUBE_TOKEN_FILE", "youtube_token.json")
+YOUTUBE_CLIENT_SECRET_FILE = _get("YOUTUBE_CLIENT_SECRET_FILE", "config/client_secret.json")
+YOUTUBE_TOKEN_FILE = _get("YOUTUBE_TOKEN_FILE", "config/youtube_token.json")
 YOUTUBE_MAX_VIDEOS_PER_CHANNEL = _get_int("YOUTUBE_MAX_VIDEOS_PER_CHANNEL", 5)
-YOUTUBE_SUBSCRIPTIONS_CACHE = _get("YOUTUBE_SUBSCRIPTIONS_CACHE", "subscriptions_cache.json")
+YOUTUBE_SUBSCRIPTIONS_CACHE = _get("YOUTUBE_SUBSCRIPTIONS_CACHE", "config/subscriptions_cache.json")
 YOUTUBE_PROXY = _get("YOUTUBE_PROXY", "").strip()
 YOUTUBE_HTTP_TIMEOUT = _get_int("YOUTUBE_HTTP_TIMEOUT", 60)
 DOWNLOAD_PROXY = _get("DOWNLOAD_PROXY", YOUTUBE_PROXY).strip()
 YOUTUBE_COOKIES_FROM_BROWSER = _get("YOUTUBE_COOKIES_FROM_BROWSER", "chrome,edge,firefox")
-YOUTUBE_COOKIE_FILE = _get("YOUTUBE_COOKIE_FILE", "cookies.txt")
+YOUTUBE_COOKIE_FILE = _get("YOUTUBE_COOKIE_FILE", "config/cookies.txt")
 YTDLP_REMOTE_COMPONENTS = _get("YTDLP_REMOTE_COMPONENTS", "ejs:github")
 YOUTUBE_MONITOR_INTERVAL_SECONDS = _get_int("YOUTUBE_MONITOR_INTERVAL_SECONDS", 3600)
 YOUTUBE_MONITOR_SOURCE = _get("YOUTUBE_MONITOR_SOURCE", "api").lower()

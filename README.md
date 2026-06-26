@@ -46,16 +46,16 @@ ffprobe -version
 ### 2. 创建配置文件
 
 ```bash
-copy .env.example .env
+copy config\.env.example config\.env
 ```
 
 Linux/macOS:
 
 ```bash
-cp .env.example .env
+cp config/.env.example config/.env
 ```
 
-`.env` 是本地私密配置文件，不要提交到 Git。
+`config/.env` 是本地私密配置文件，不要提交到 Git。
 
 ### 3. 配置翻译
 
@@ -80,7 +80,7 @@ OPENAI_MODEL=gpt-4o-mini
 
 ### 4. 登录 Bilibili
 
-首次运行会弹出 B站登录二维码，使用 Bilibili App 扫码即可。程序会把登录凭据写入 `.env`：
+首次运行会弹出 B站登录二维码，使用 Bilibili App 扫码即可。程序会把登录凭据写入 `config/.env`：
 
 ```bash
 python main.py --login
@@ -143,7 +143,7 @@ python main.py --monitor --once --dry-run
 | `DOWNLOAD_PROXY` | 单独指定下载代理，留空时复用 `YOUTUBE_PROXY` | 空 |
 | `YOUTUBE_HTTP_TIMEOUT` | YouTube API、元数据和缩略图请求超时秒数 | `60` |
 | `YOUTUBE_COOKIES_FROM_BROWSER` | yt-dlp 读取 YouTube 登录 Cookie 的浏览器列表；可写 `chrome:Profile 1` 指定个人资料 | `chrome,edge,firefox` |
-| `YOUTUBE_COOKIE_FILE` | 自动生成/使用的 Netscape `cookies.txt` 路径，优先于浏览器 Cookie | `cookies.txt` |
+| `YOUTUBE_COOKIE_FILE` | 自动生成/使用的 Netscape `config/cookies.txt` 路径，优先于浏览器 Cookie | `config/cookies.txt` |
 | `YTDLP_REMOTE_COMPONENTS` | yt-dlp 允许下载的 YouTube JS challenge 解算组件 | `ejs:github` |
 
 下载稳定性配置：
@@ -197,7 +197,7 @@ B站常用游戏分区 ID：
 
 ## YouTube Cookie 与代理
 
-YouTube 有时会要求登录或验证不是机器人。程序会优先使用 `YOUTUBE_COOKIE_FILE` 指向的 `cookies.txt`。如果文件不存在，会按 `YOUTUBE_COOKIES_FROM_BROWSER` 自动尝试从浏览器导出 YouTube/Google Cookie 并保存。
+YouTube 有时会要求登录或验证不是机器人。程序会优先使用 `YOUTUBE_COOKIE_FILE` 指向的 `config/cookies.txt`。如果文件不存在，会按 `YOUTUBE_COOKIES_FROM_BROWSER` 自动尝试从浏览器导出 YouTube/Google Cookie 并保存。
 
 也可以手动刷新 Cookie：
 
@@ -295,8 +295,8 @@ python -m yt2bili.youtube.subscriptions --source api --limit 50
 1. 在 Google Cloud Console 创建或选择项目。
 2. 启用 YouTube Data API v3。
 3. 创建 OAuth Desktop App 凭据。
-4. 下载客户端 JSON，保存为 `client_secret.json`。
-5. 运行脚本，浏览器会打开授权页面；授权后会生成 `youtube_token.json`。
+4. 下载客户端 JSON，保存为 `config/client_secret.json`。
+5. 运行脚本，浏览器会打开授权页面；授权后会生成 `config/youtube_token.json`。
 
 RSS 低配额模式：
 
@@ -312,11 +312,11 @@ python youtube_subscriptions.py --source rss --channels-file channels.txt --limi
 - `subscriptions.list`、`channels.list`、`playlistItems.list` 官方配额成本都是 1 unit/请求
 - YouTube Data API 默认项目配额是每天 10,000 units
 - 脚本避免使用更贵的 `search.list`
-- RSS 模式不消耗 YouTube Data API 配额，但不能自动读取订阅频道，需要 `subscriptions_cache.json` 或频道列表文件
+- RSS 模式不消耗 YouTube Data API 配额，但不能自动读取订阅频道，需要 `config/subscriptions_cache.json` 或频道列表文件
 
 ## urls.txt 格式
 
-实际运行文件名为 `urls.txt`，该文件会被 `.gitignore` 忽略。仓库中提供 `examples/urls.example.txt` 作为示例：
+实际运行文件名为 `urls.txt`（位于 `config/` 目录下），该文件会被 `.gitignore` 忽略。仓库中提供 `examples/urls.example.txt` 作为示例：
 
 ```txt
 # 空行和注释会被忽略
@@ -337,13 +337,12 @@ https://youtu.be/yyyyy
 
 以下文件包含凭据、Cookie、本地历史或下载内容，已经在 `.gitignore` 中忽略：
 
-- `.env`
-- `cookies.txt`
-- `client_secret.json`
-- `youtube_token.json`
-- `subscriptions_cache.json`
-- `urls.txt`
-- `channels.txt`
+- `config/.env`
+- `config/cookies.txt`
+- `config/client_secret.json`
+- `config/youtube_token.json`
+- `config/subscriptions_cache.json`
+- `config/urls.txt`
 - `downloads/`
 - `runs/`
 - `state/`
@@ -352,13 +351,13 @@ https://youtu.be/yyyyy
 如果这些文件已经被 Git 跟踪，请先从索引中移除：
 
 ```bash
-git rm --cached .env cookies.txt client_secret.json youtube_token.json subscriptions_cache.json
+git rm --cached config/.env config/cookies.txt config/client_secret.json config/youtube_token.json config/subscriptions_cache.json
 git rm --cached -r downloads runs state .idea
 ```
 
 ## Marvel SNAP 示例配置
 
-如果转载 Marvel SNAP 相关内容，可以在 `.env` 中使用类似配置：
+如果转载 Marvel SNAP 相关内容，可以在 `config/.env` 中使用类似配置：
 
 ```env
 DEFAULT_TID=172
@@ -418,8 +417,13 @@ pyinstaller packaging\yt2bili.spec
 ```
 D:\yt2bili\
   yt2bili.exe          ← 主程序
-  .env                 ← 配置文件（从 .env.example 复制并填写）
-  client_secret.json   ← YouTube OAuth（使用 API 监控模式时需要）
+  config\              ← 配置文件目录
+    .env               ← 配置文件（从 .env.example 复制并填写）
+    .env.example       ← 配置模板
+    client_secret.json ← YouTube OAuth（使用 API 监控模式时需要）
+    cookies.txt        ← YouTube Cookie（自动生成使用）
+    urls.txt           ← 批量 URL 输入
+    youtube_token.json ← OAuth 令牌
   downloads/           ← 下载目录（自动创建）
   runs/                ← 运行记录（自动创建）
   state/               ← 监控状态（自动创建）
@@ -427,7 +431,7 @@ D:\yt2bili\
 
 **与开发模式的区别：**
 
-- 所有用户数据（`.env`、下载、记录）保存在 EXE 所在目录，而非解压临时目录
+- 所有用户数据（`config/.env`、下载、记录）保存在 EXE 所在目录，而非解压临时目录
 - 通过 `yt2bili/frozen_paths.py` 自动检测运行环境，无需手动配置路径
 - 命令行用法与 `python main.py` 完全一致：`yt2bili.exe --monitor`
 
@@ -435,7 +439,7 @@ D:\yt2bili\
 
 **DeepSeek 返回空翻译怎么办？**
 
-确认 `.env` 中 `DEEPSEEK_THINKING=disabled`。DeepSeek V4 默认会开启 thinking mode，短标题翻译可能把输出 token 用在 reasoning 上，导致最终 `content` 为空或被截断。
+确认 `config/.env` 中 `DEEPSEEK_THINKING=disabled`。DeepSeek V4 默认会开启 thinking mode，短标题翻译可能把输出 token 用在 reasoning 上，导致最终 `content` 为空或被截断。
 
 **封面处理失败怎么办？**
 
@@ -447,7 +451,7 @@ D:\yt2bili\
 
 **分区投错怎么办？**
 
-检查 `.env` 中的 `DEFAULT_TID`。例如 `172` 是游戏-手机游戏，`28` 是音乐-原创音乐。
+检查 `config/.env` 中的 `DEFAULT_TID`。例如 `172` 是游戏-手机游戏，`28` 是音乐-原创音乐。
 
 ## License
 

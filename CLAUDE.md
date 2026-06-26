@@ -13,7 +13,7 @@ yt2bili — YouTube → Bilibili automated repost pipeline. Downloads YouTube vi
 python main.py "https://www.youtube.com/watch?v=xxxxx"
 
 # Batch from file
-python main.py --file urls.txt
+python main.py --file config/urls.txt
 
 # Subscription monitor (continuous polling)
 python main.py --monitor
@@ -39,7 +39,7 @@ tools\build_exe.bat
 
 ## Configuration
 
-All settings in `.env` (copy from `.env.example`). Read by `yt2bili/config.py` via `python-dotenv`. Key groups:
+All settings in `config/.env` (copy from `config/.env.example`). Read by `yt2bili/config.py` via `python-dotenv`. Key groups:
 
 - **Bilibili credentials**: `BILI_SESSDATA`, `BILI_BILI_JCT` — auto-populated by QR login
 - **Translation**: `TRANSLATE_PROVIDER` (deepseek/openai/google), API keys, model selection, `TRANSLATION_PRESERVE_TERMS`
@@ -69,7 +69,7 @@ Each stage is a separate `try/except` block. Failure at any stage records the er
 | `yt2bili/translation/translator.py` | `BaseTranslator` → `GoogleTranslator` / `OpenAITranslator` / `DeepSeekTranslator`, term preservation, 80-char truncation |
 | `yt2bili/media/cover.py` | Pillow-based: validate → EXIF transpose → crop or contain → resize to 1920×1080 JPEG |
 | `yt2bili/bilibili/uploader.py` | Async `bilibili-api-python` wrapped synchronously, multi-part (分P) support, fallback 1×1 JPEG cover |
-| `yt2bili/bilibili/auth.py` | Bilibili QR login flow, auto-saves credentials to `.env` |
+| `yt2bili/bilibili/auth.py` | Bilibili QR login flow, auto-saves credentials to `config/.env` |
 | `yt2bili/media/video_splitter.py` | ffmpeg `-c copy` lossless segmenting at keyframes |
 | `yt2bili/youtube/monitor.py` | Polling loop: fetch subs → deduplicate → sort queue → process → retry → persist state |
 | `yt2bili/youtube/subscriptions.py` | Standalone sub fetcher (API + RSS), custom `YouTubeClient` (requests-based, avoids httplib2 proxy issues) |
@@ -78,16 +78,16 @@ Each stage is a separate `try/except` block. Failure at any stage records the er
 ### Monitor State Flow
 
 ```
-state/processed_videos.json  ← persisted per-video status (uploaded/failed/skipped_live/skipped_long)
-runs/*.json                  ← historical batch reports, seeded into state to avoid re-processing
-subscriptions_cache.json     ← cached channel list for RSS mode
+state/processed_videos.json      ← persisted per-video status (uploaded/failed/skipped_live/skipped_long)
+runs/*.json                      ← historical batch reports, seeded into state to avoid re-processing
+config/subscriptions_cache.json  ← cached channel list for RSS mode
 ```
 
 ## Key Patterns & Gotchas
 
 ### Cookie Fallback Chain (`yt2bili/youtube/downloader.py:_with_yt_dlp_cookies`)
 
-1. Try `cookies.txt` → if bot-detected, auto-refresh and retry
+1. Try `config/cookies.txt` → if bot-detected, auto-refresh and retry
 2. Try each browser in `YOUTUBE_COOKIES_FROM_BROWSER` (chrome, edge, firefox)
 3. Fall back to bare yt-dlp (no cookies)
 4. Wrap bot-detection errors with Chinese-language hint about browser login

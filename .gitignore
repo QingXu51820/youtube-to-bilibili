@@ -1,13 +1,10 @@
-# Environment
-.env
-.env.*
-!.env.example
-cookies.txt
-client_secret.json
-youtube_token.json
-subscriptions_cache.json
-urls.txt
-channels.txt
+# Environment / config files (inside config/)
+/config/.env
+/config/cookies.txt
+/config/client_secret.json
+/config/youtube_token.json
+/config/subscriptions_cache.json
+/config/urls.txt
 
 # Downloaded videos
 downloads/

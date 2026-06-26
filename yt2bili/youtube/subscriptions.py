@@ -137,7 +137,7 @@ def _api_network_error(exc: BaseException) -> YouTubeNetworkError:
             "YouTube OAuth token 已过期或被撤销。\n"
             f"原始错误: {exc}\n\n"
             "解决方法：\n"
-            "1. 删除 youtube_token.json\n"
+            "1. 删除 config/youtube_token.json\n"
             "2. 重新运行 python main.py --monitor\n"
             "3. 浏览器会弹出 Google 授权页面，重新授权即可"
         )
@@ -651,7 +651,7 @@ def write_output(videos: list[VideoItem], output_format: str, output_file: Path 
 
 
 def build_parser() -> argparse.ArgumentParser:
-    load_dotenv(PROJECT_ROOT / ".env")
+    load_dotenv(PROJECT_ROOT / "config" / ".env")
 
     parser = argparse.ArgumentParser(
         description="List recent videos from YouTube subscriptions.",
@@ -672,17 +672,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--client-secret-file",
         type=Path,
-        default=Path(_env("YOUTUBE_CLIENT_SECRET_FILE", "client_secret.json")),
+        default=Path(_env("YOUTUBE_CLIENT_SECRET_FILE", "config/client_secret.json")),
     )
     parser.add_argument(
         "--token-file",
         type=Path,
-        default=Path(_env("YOUTUBE_TOKEN_FILE", "youtube_token.json")),
+        default=Path(_env("YOUTUBE_TOKEN_FILE", "config/youtube_token.json")),
     )
     parser.add_argument(
         "--cache-file",
         type=Path,
-        default=Path(_env("YOUTUBE_SUBSCRIPTIONS_CACHE", "subscriptions_cache.json")),
+        default=Path(_env("YOUTUBE_SUBSCRIPTIONS_CACHE", "config/subscriptions_cache.json")),
     )
     parser.add_argument(
         "--channels-file",

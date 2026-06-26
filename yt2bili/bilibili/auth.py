@@ -134,14 +134,14 @@ def _open_image(path: Path) -> None:
 
 def _save_credential_to_env(credential) -> None:
     """Save Bilibili credential to .env file, preserving other settings."""
-    env_path = config.PROJECT_ROOT / ".env"
+    env_path = config.PROJECT_ROOT / "config" / ".env"
 
-    # Read existing .env (or .env.example if .env doesn't exist)
+    # Read existing .env (or config/.env.example if .env doesn't exist)
     existing_lines = []
     if env_path.exists():
         existing_lines = env_path.read_text(encoding="utf-8").split("\n")
     else:
-        example_path = config.PROJECT_ROOT / ".env.example"
+        example_path = config.PROJECT_ROOT / "config" / ".env.example"
         if example_path.exists():
             existing_lines = example_path.read_text(encoding="utf-8").split("\n")
 

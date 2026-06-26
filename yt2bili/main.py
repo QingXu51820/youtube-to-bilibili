@@ -355,7 +355,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("urls", nargs="*", help="YouTube 视频链接")
     parser.add_argument("--file", help="从文件批量读取 YouTube URL，默认每行一个")
     parser.add_argument("--login", action="store_true", help="重新扫码登录 B站")
-    parser.add_argument("--refresh-youtube-cookies", action="store_true", help="从浏览器自动生成/刷新 YouTube cookies.txt")
+    parser.add_argument("--refresh-youtube-cookies", action="store_true", help="从浏览器自动生成/刷新 YouTube cookies.txt (config/)")
     parser.add_argument("--monitor", action="store_true", help="每小时检查 YouTube 订阅更新并自动上传")
     parser.add_argument("--discord", action="store_true", help="实时监听 Discord 频道消息并搬运到 B站动态")
     parser.add_argument("--once", action="store_true", help="仅在 --monitor 模式下检查一次")
@@ -408,7 +408,7 @@ def _gather_urls(args: argparse.Namespace) -> list[str]:
         return urls
 
     # ── Auto-detect urls.txt ──────────────────────────────────
-    urls_file = Path("urls.txt")
+    urls_file = config.PROJECT_ROOT / "config" / "urls.txt"
     if urls_file.exists():
         urls = _read_urls_file(str(urls_file))
         if urls:
