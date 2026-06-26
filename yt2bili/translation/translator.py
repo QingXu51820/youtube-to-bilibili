@@ -51,9 +51,24 @@ def _openai_http_client():
 
 
 def _preserve_terms() -> list[str]:
-    """Terms that should stay unchanged in translated titles."""
+    """Terms that should stay unchanged in translated titles.
+
+    Includes user-configured terms plus glossary Chinese names (if enabled),
+    so translated card/location names are protected from AI mangling.
+    """
     raw = config.TRANSLATION_PRESERVE_TERMS or ""
     terms = [term.strip() for term in raw.split(",") if term.strip()]
+
+    if config.SNAP_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_glossary
+            glossary = get_glossary()
+            # Only protect CN names — they will appear in the text after
+            # _apply_glossary replaces EN names with CN before translation.
+            terms.extend(glossary.values())
+        except Exception:
+            pass
+
     return sorted(dict.fromkeys(terms), key=len, reverse=True)
 
 
@@ -79,6 +94,51 @@ def _restore_terms(text: str, replacements: dict[str, str]) -> str:
         spaced = " ".join(placeholder)
         restored = re.sub(re.escape(spaced), term, restored, flags=re.IGNORECASE)
     return restored
+
+
+def _apply_glossary(text: str) -> str:
+    """Replace English card/location names with official Chinese translations.
+
+    Scans the input text for known English names from the SNAP glossary
+    and replaces them with their Chinese equivalents.  Matches whole words
+    only (\\b boundaries), case-insensitive, longest-names-first to avoid
+    partial-match clashes.
+    """
+    if not config.SNAP_GLOSSARY_ENABLED:
+        return text
+
+    try:
+        from yt2bili.glossary import get_glossary
+        glossary = get_glossary()
+    except Exception:
+        return text
+
+    if not glossary:
+        return text
+
+    result = text
+    # Sort by English name length descending — "Altar of Death" before "Death"
+    sorted_terms = sorted(glossary.items(), key=lambda x: len(x[0]), reverse=True)
+    for en, cn in sorted_terms:
+        # Only match standalone words (not parts of other words)
+        pattern = re.compile(rf"\b{re.escape(en)}\b", re.IGNORECASE)
+        result = pattern.sub(cn, result)
+    return result
+
+
+# Regex: a CJK character followed by whitespace followed by another CJK character
+_CJK_SPACE_RE = re.compile(r"(?<=[一-鿿㐀-䶿⺀-⿿])\s+"
+                           r"(?=[一-鿿㐀-䶿⺀-⿿])")
+
+
+def _cleanup_cjk_spaces(text: str) -> str:
+    """Remove whitespace between adjacent CJK characters.
+
+    AI translators sometimes insert spaces between Chinese words after
+    placeholder restoration — e.g. "恶型怪 被削弱了". This collapses
+    those spaces so the output reads naturally: "恶型怪被削弱了".
+    """
+    return _CJK_SPACE_RE.sub("", text)
 
 
 def _prepare_source_title(text: str) -> str:
@@ -152,6 +212,7 @@ class GoogleTranslator(BaseTranslator):
             return text
         try:
             source_text = _prepare_source_title(text)
+            source_text = _apply_glossary(source_text)
             protected_text, replacements = _protect_terms(source_text)
             translator = self._translator(
                 source=source_lang,
@@ -159,7 +220,9 @@ class GoogleTranslator(BaseTranslator):
                 proxies=_requests_proxies(),
             )
             result = translator.translate(protected_text)
-            return clean_title(_restore_terms(result, replacements))
+            result = _restore_terms(result, replacements)
+            result = _cleanup_cjk_spaces(result)
+            return clean_title(result)
         except Exception as e:
             print(f"[翻译] Google 翻译失败: {e}")
             raise RuntimeError(f"Google 翻译失败: {e}") from e
@@ -186,6 +249,7 @@ class OpenAITranslator(BaseTranslator):
 
         try:
             source_text = _prepare_source_title(text)
+            source_text = _apply_glossary(source_text)
             protected_text, replacements = _protect_terms(source_text)
             response = self._client.chat.completions.create(
                 model=self._model,
@@ -196,7 +260,9 @@ class OpenAITranslator(BaseTranslator):
                 temperature=0.3,
                 max_tokens=200,
             )
-            return clean_title(_restore_terms(_extract_chat_content(response, "OpenAI"), replacements))
+            result = _restore_terms(_extract_chat_content(response, "OpenAI"), replacements)
+            result = _cleanup_cjk_spaces(result)
+            return clean_title(result)
         except Exception as e:
             print(f"[翻译] OpenAI 翻译失败: {e}")
             raise RuntimeError(f"OpenAI 翻译失败: {e}") from e
@@ -223,6 +289,7 @@ class DeepSeekTranslator(BaseTranslator):
 
         try:
             source_text = _prepare_source_title(text)
+            source_text = _apply_glossary(source_text)
             protected_text, replacements = _protect_terms(source_text)
             response = self._client.chat.completions.create(
                 model=self._model,
@@ -234,7 +301,9 @@ class DeepSeekTranslator(BaseTranslator):
                 max_tokens=512,
                 extra_body={"thinking": {"type": config.DEEPSEEK_THINKING}},
             )
-            return clean_title(_restore_terms(_extract_chat_content(response, "DeepSeek"), replacements))
+            result = _restore_terms(_extract_chat_content(response, "DeepSeek"), replacements)
+            result = _cleanup_cjk_spaces(result)
+            return clean_title(result)
         except Exception as e:
             print(f"[翻译] DeepSeek 翻译失败: {e}")
             raise RuntimeError(f"DeepSeek 翻译失败: {e}") from e
