@@ -1,22 +1,96 @@
 #!/usr/bin/env python3
 """
-YouTube → Bilibili 自动转载流水线
+YouTube → Bilibili 自动转载流水线 / Discord → Bilibili 动态搬运
 
-Usage:
-    python main.py                          # 交互式输入 URL（首次自动扫码登录）
-    python main.py <youtube_url>            # 命令行参数
-    python main.py --file urls.txt          # 批量处理
-    python main.py --monitor                # 每小时检查订阅更新并自动处理
-    python main.py --login                  # 重新登录（刷新 B站 凭据）
+三种运行模式：
+  单视频/批量模式      python main.py <url> [url ...]
+  订阅监控模式          python main.py --monitor
+  Discord 搬运模式      python main.py --discord
 
-Workflow:
-    1. Download YouTube video (1080p)
-    2. Translate title to Chinese
-    3. Upload to Bilibili as 转载 (repost)
+────────────────────────────────────────────────────────────────
+  基础参数
+────────────────────────────────────────────────────────────────
 
-First-time setup:
-    Run `python main.py` and scan the QR code with your Bilibili app.
-    Credentials are saved to .env automatically.
+  url                        YouTube 视频链接，支持多个，空格分隔
+  --file PATH                从文件批量读取 URL（每行一个，#开头为注释）
+  --login                    重新扫码登录 B站，刷新凭据
+  --refresh-youtube-cookies  从浏览器导出 YouTube Cookie（用于绕过反爬）
+
+────────────────────────────────────────────────────────────────
+  视频专用参数
+────────────────────────────────────────────────────────────────
+
+  --no-speed-protection      禁用下载低速保护（网络差时有用）
+
+────────────────────────────────────────────────────────────────
+  YouTube 订阅监控 (--monitor)
+────────────────────────────────────────────────────────────────
+
+  --monitor                  启动订阅监控，定时轮询 YouTube 订阅更新并自动搬运
+  --once                     与 --monitor 配合，仅执行一轮检查后退出
+  --dry-run                  与 --monitor 配合，只打印待处理视频，不下载上传
+  --monitor-source {api|rss} 订阅数据源（默认读取 .env 配置）
+  --monitor-limit N          每轮最多处理多少条视频（默认 50）
+  --monitor-interval SECONDS 轮询间隔秒数（默认 3600 = 1小时）
+  --monitor-state PATH       处理状态文件路径（默认 state/processed_videos.json）
+  --max-videos-per-channel N 每个频道抓取最近 N 条视频（默认 5）
+
+────────────────────────────────────────────────────────────────
+  Discord 消息搬运 (--discord)
+────────────────────────────────────────────────────────────────
+
+  --discord                  启动 Discord 实时监听，搬运消息到 B站动态
+                             需要 .env 中配置 DISCORD_BOT_TOKEN 和 DISCORD_CHANNEL_IDS
+
+  Discord 所有配置项均在 .env 中设置（无命令行参数）：
+    DISCORD_BOT_TOKEN         Bot 令牌（必填）
+    DISCORD_CHANNEL_IDS       监听频道 ID，逗号分隔（必填）
+    DISCORD_SKIP_BOTS         跳过其他 Bot 的消息（默认 true）
+    DISCORD_SKIP_EMPTY        跳过无文本无附件的空消息（默认 true）
+    DISCORD_MAX_IMAGES        每条动态最多几张图（默认 9）
+    DISCORD_TRANSLATE         是否翻译为中文（默认 true）
+    DISCORD_STATE_FILE        已处理消息记录（默认 state/discord_messages.json）
+    DISCORD_FALLBACK_LIMIT    启动时回溯最近 N 条消息（默认 20）
+
+────────────────────────────────────────────────────────────────
+  示例
+────────────────────────────────────────────────────────────────
+
+  # 单个视频
+  python main.py https://www.youtube.com/watch?v=xxxxx
+
+  # 批量处理
+  python main.py --file urls.txt
+
+  # YouTube 订阅监控（持续运行）
+  python main.py --monitor
+
+  # 只检查一次有什么新视频
+  python main.py --monitor --once --dry-run
+
+  # 订阅监控 + 无速度限制
+  python main.py --monitor --no-speed-protection
+
+  # Discord 实时搬运
+  python main.py --discord
+
+  # 重新登录 B站
+  python main.py --login
+
+  # 刷新 YouTube Cookie
+  python main.py --refresh-youtube-cookies
+
+────────────────────────────────────────────────────────────────
+  流水线步骤
+────────────────────────────────────────────────────────────────
+
+  视频: 下载 → 分割(>10h) → 翻译标题 → 生成封面 → 上传B站 → 清理
+  Discord: 监听消息 → 英文卡牌名替换 → 翻译文本 → 发布B站动态
+
+  Marvel SNAP 术语表（自动保护卡牌/地形官方中文名）：
+    SNAP_GLOSSARY_ENABLED=true  启用术语表（默认）
+    SNAP_GLOSSARY_CACHE         缓存文件（默认 data/snap_glossary.json）
+    SNAP_GLOSSARY_TTL           刷新间隔秒数（默认 86400 = 1天）
 """
 
 import argparse
@@ -283,6 +357,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--login", action="store_true", help="重新扫码登录 B站")
     parser.add_argument("--refresh-youtube-cookies", action="store_true", help="从浏览器自动生成/刷新 YouTube cookies.txt")
     parser.add_argument("--monitor", action="store_true", help="每小时检查 YouTube 订阅更新并自动上传")
+    parser.add_argument("--discord", action="store_true", help="实时监听 Discord 频道消息并搬运到 B站动态")
     parser.add_argument("--once", action="store_true", help="仅在 --monitor 模式下检查一次")
     parser.add_argument("--dry-run", action="store_true", help="仅在 --monitor 模式下打印待处理视频")
     parser.add_argument(
@@ -415,6 +490,42 @@ def main():
         if not args.monitor and not args.file and not args.urls:
             return 0
 
+    # ── Both YouTube + Discord monitors (parallel) ──────────────
+    if args.monitor and args.discord:
+        if args.once or args.dry_run:
+            print("⚠️  --once / --dry-run 在 --monitor --discord 并行模式下不适用")
+            return 1
+        _ensure_credentials()
+        import asyncio
+        import threading
+        from yt2bili.youtube.monitor import project_path, run_monitor_loop
+        from yt2bili.discord.monitor import run_discord_monitor
+
+        def _run_discord():
+            asyncio.run(run_discord_monitor())
+
+        discord_thread = threading.Thread(target=_run_discord, daemon=True, name="discord-monitor")
+        discord_thread.start()
+
+        print("[并行] YouTube 监控 + Discord 监控 同时运行中...")
+        print("       按 Ctrl+C 停止\n")
+
+        return run_monitor_loop(
+            process_video=process_video,
+            write_run_report=_write_run_report,
+            interval_seconds=args.monitor_interval,
+            once=False,
+            dry_run=False,
+            state_path=project_path(args.monitor_state),
+            source=args.monitor_source,
+            limit=args.monitor_limit,
+            max_videos_per_channel=args.max_videos_per_channel,
+            client_secret_file=project_path(config.YOUTUBE_CLIENT_SECRET_FILE),
+            token_file=project_path(config.YOUTUBE_TOKEN_FILE),
+            cache_file=project_path(config.YOUTUBE_SUBSCRIPTIONS_CACHE),
+        )
+
+    # ── YouTube monitor only ──────────────────────────────────
     if args.monitor:
         if args.monitor_source not in ("api", "rss"):
             raise SystemExit("--monitor-source must be api or rss")
@@ -443,6 +554,21 @@ def main():
 
     if args.once or args.dry_run:
         print("⚠️  --once / --dry-run 只在 --monitor 模式下生效，当前按普通模式运行。")
+
+    if args.discord:
+        if not config.DISCORD_BOT_TOKEN:
+            print("❌ 未配置 DISCORD_BOT_TOKEN")
+            print("   请在 .env 中设置 DISCORD_BOT_TOKEN")
+            return 1
+        if not config.DISCORD_CHANNEL_IDS:
+            print("❌ 未配置 DISCORD_CHANNEL_IDS")
+            print("   请在 .env 中设置 DISCORD_CHANNEL_IDS=频道ID1,频道ID2")
+            return 1
+        _ensure_credentials()
+        from yt2bili.discord.monitor import run_discord_monitor
+        import asyncio
+        asyncio.run(run_discord_monitor())
+        return 0
 
     # Step 0: Ensure logged in (QR code flow on first run)
     _ensure_credentials()
