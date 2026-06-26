@@ -115,7 +115,7 @@ def _yt_dlp_network_opts() -> dict:
 
 
 def _cookie_file() -> str:
-    return str(getattr(config, "YOUTUBE_COOKIE_FILE", "cookies.txt") or "").strip()
+    return str(getattr(config, "YOUTUBE_COOKIE_FILE", "config/cookies.txt") or "").strip()
 
 
 def _cookie_file_path() -> Path | None:
@@ -282,7 +282,7 @@ def _cookie_hint() -> str:
     return (
         "YouTube 要求登录验证。请确认你在 Chrome/Edge/Firefox 中已登录 YouTube，"
         "并关闭正在使用该浏览器配置文件的全部窗口后重试；"
-        "或者运行 python main.py --refresh-youtube-cookies 自动生成 cookies.txt。"
+        "或者运行 python main.py --refresh-youtube-cookies 自动生成 config/cookies.txt。"
     )
 
 
