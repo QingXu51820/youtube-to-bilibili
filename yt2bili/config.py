@@ -102,6 +102,14 @@ YOUTUBE_MONITOR_STATE = _get(
     str(PROJECT_ROOT / "state" / "processed_videos.json"),
 )
 
+# ── Marvel SNAP Glossary ─────────────────────────────────────────────
+SNAP_GLOSSARY_ENABLED = _get("SNAP_GLOSSARY_ENABLED", "true").lower() == "true"
+SNAP_GLOSSARY_CACHE = _get(
+    "SNAP_GLOSSARY_CACHE",
+    str(PROJECT_ROOT / "data" / "snap_glossary.json"),
+)
+SNAP_GLOSSARY_TTL = _get_int("SNAP_GLOSSARY_TTL", 86400)  # 1 day
+
 # ── Source Language ───────────────────────────────────────────────
 SOURCE_LANG = _get("SOURCE_LANG", "auto")  # source language for translation
 
