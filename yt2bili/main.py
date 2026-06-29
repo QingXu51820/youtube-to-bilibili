@@ -102,8 +102,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Add project root to path
-from yt2bili.frozen_paths import user_data_dir as _user_data_dir
-sys.path.insert(0, str(_user_data_dir()))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from yt2bili import config
 from yt2bili.config import validate

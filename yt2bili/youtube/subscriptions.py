@@ -25,9 +25,7 @@ from dotenv import load_dotenv
 import time as _time
 
 
-from yt2bili.frozen_paths import user_data_dir
-
-PROJECT_ROOT = user_data_dir()
+from yt2bili.config import PROJECT_ROOT
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v={video_id}"
 YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"

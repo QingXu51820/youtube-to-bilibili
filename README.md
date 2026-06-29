@@ -21,7 +21,6 @@
 - 超长视频（>10h）自动使用 ffmpeg 无损分割为分 P 上传
 - **竖屏过滤**：自动跳过 YouTube Shorts 等竖屏视频（可配置）
 - **超长视频永久跳过**：超过指定时长的视频直接标记跳过，不再排队
-- 支持 PyInstaller 打包为单个 Windows EXE，无需安装 Python
 - 启动时自动检测 ffmpeg / ffprobe / Node.js 可用性并给出明确提示
 
 ## Quick Start
@@ -394,46 +393,6 @@ YouTube URL
 | ffmpeg | 视频分割不可用 |
 | ffprobe | 分辨率/时长探测不可用 |
 | Node.js | yt-dlp 将使用内置 JS 引擎（可能较慢） |
-
-## EXE 打包（Windows）
-
-项目支持通过 PyInstaller 打包为单个 `.exe` 文件，无需安装 Python 即可运行：
-
-```batch
-tools\build_exe.bat
-pyinstaller packaging\yt2bili.spec
-```
-
-输出：`dist\yt2bili.exe`（约 150–200 MB）
-
-**打包前准备：**
-
-1. 安装 PyInstaller：`pip install pyinstaller`
-2. （可选）安装 [UPX](https://upx.github.io/) 并加入 PATH，可压缩约 40% 体积
-3. 确保 `ffmpeg` / `ffprobe` 已安装并加入系统 PATH（EXE 运行时仍需它们）
-
-**打包后的目录结构：**
-
-```
-D:\yt2bili\
-  yt2bili.exe          ← 主程序
-  config\              ← 配置文件目录
-    .env               ← 配置文件（从 .env.example 复制并填写）
-    .env.example       ← 配置模板
-    client_secret.json ← YouTube OAuth（使用 API 监控模式时需要）
-    cookies.txt        ← YouTube Cookie（自动生成使用）
-    urls.txt           ← 批量 URL 输入
-    youtube_token.json ← OAuth 令牌
-  downloads/           ← 下载目录（自动创建）
-  runs/                ← 运行记录（自动创建）
-  state/               ← 监控状态（自动创建）
-```
-
-**与开发模式的区别：**
-
-- 所有用户数据（`config/.env`、下载、记录）保存在 EXE 所在目录，而非解压临时目录
-- 通过 `yt2bili/frozen_paths.py` 自动检测运行环境，无需手动配置路径
-- 命令行用法与 `python main.py` 完全一致：`yt2bili.exe --monitor`
 
 ## 常见问题
 

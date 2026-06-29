@@ -23,8 +23,6 @@ __pycache__/
 .ruff_cache/
 .venv/
 venv/
-dist/
-build/
 *.egg-info/
 
 # IDE
@@ -37,6 +35,3 @@ build/
 Thumbs.db
 .DS_Store
 
-# EXE and shortcuts
-*.exe
-*.lnk
