@@ -98,7 +98,7 @@ import sys
 import os
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Add project root to path
@@ -291,6 +291,25 @@ def process_video(url: str) -> ProcessResult:
     return record
 
 
+def _cleanup_old_runs(runs_dir: Path, *, keep_days: int = 3) -> int:
+    """Delete run reports older than `keep_days`. Returns count of deleted files."""
+    if not runs_dir.exists():
+        return 0
+    cutoff = datetime.now() - timedelta(days=keep_days)
+    deleted = 0
+    for f in runs_dir.glob("*.json"):
+        if f.name == "latest.json":
+            continue
+        try:
+            file_time = datetime.strptime(f.stem, "%Y%m%d-%H%M%S")
+            if file_time < cutoff:
+                f.unlink()
+                deleted += 1
+        except (ValueError, OSError):
+            pass
+    return deleted
+
+
 def _write_run_report(results: list[ProcessResult]) -> Path:
     """Write a batch report to runs/latest.json and a timestamped JSON file."""
     runs_dir = Path(config.RUNS_DIR)
@@ -310,6 +329,9 @@ def _write_run_report(results: list[ProcessResult]) -> Path:
     content = json.dumps(payload, ensure_ascii=False, indent=2)
     report_path.write_text(content + "\n", encoding="utf-8")
     latest_path.write_text(content + "\n", encoding="utf-8")
+
+    _cleanup_old_runs(runs_dir)
+
     return report_path
 
 
@@ -471,6 +493,9 @@ def main():
     args = _build_parser().parse_args()
 
     _check_external_tools()
+
+    # 清理超过 3 天的旧 runs 报告
+    _cleanup_old_runs(Path(config.RUNS_DIR))
 
     if args.no_speed_protection:
         config.DOWNLOAD_MIN_SPEED_KIB = 0
