@@ -261,6 +261,15 @@ def process_video(url: str) -> ProcessResult:
         )
         if not result.success:
             raise RuntimeError(result.message)
+    except RuntimeError as e:
+        msg = str(e)
+        record.error = msg
+        # Auth errors already include the re-login hint
+        if "请重新扫码登录" in msg:
+            print(f"\n🔐 {msg}")
+        else:
+            print(f"\n❌ 上传失败: {e}")
+        return record
     except Exception as e:
         record.error = str(e)
         print(f"\n❌ 上传失败: {e}")
