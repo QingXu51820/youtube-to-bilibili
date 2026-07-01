@@ -14,6 +14,9 @@ from yt2bili import config
 from yt2bili.bilibili import auth
 from yt2bili.media.cover import image_size, is_valid_image
 
+# HTTP status codes that indicate credential / authentication issues
+_AUTH_ERROR_CODES = (401, 403)
+
 
 def _make_minimal_jpeg() -> bytes:
     """Generate a minimal valid 1x1 JPEG byte sequence (valid everywhere)."""
@@ -129,6 +132,8 @@ async def _upload_async(
     Returns:
         UploadResult with status and BV/AV numbers
     """
+    from bilibili_api.exceptions.NetworkException import NetworkException
+
     credential = _build_credential()
 
     # Truncate description to B站 byte-length limit (use byte count;
@@ -209,7 +214,15 @@ async def _upload_async(
 
     @uploader.on(video_uploader.VideoUploaderEvents.FAILED.value)
     async def on_failed(event_data=None):
-        print(f"[上传] ❌ 上传失败: {event_data}")
+        err = (event_data or {}).get("err")
+        if err is not None:
+            code = getattr(err, 'code', 0) or getattr(err, 'status', 0)
+            if code in _AUTH_ERROR_CODES:
+                print(f"[上传] 🔐 B站登录凭据已过期（HTTP {code}），需要重新登录")
+            else:
+                print(f"[上传] ❌ 上传失败: {event_data}")
+        else:
+            print(f"[上传] ❌ 上传失败: {event_data}")
 
     try:
         result = await uploader.start()
@@ -221,6 +234,19 @@ async def _upload_async(
             bvid=bvid,
             aid=aid,
             message=f"上传成功! BV: {bvid}, AV: {aid}",
+        )
+    except NetworkException as e:
+        code = getattr(e, 'code', 0) or getattr(e, 'status', 0)
+        if code in _AUTH_ERROR_CODES:
+            msg = (
+                f"B站登录凭据已过期（HTTP {code}），请重新扫码登录。\n"
+                f"运行: python main.py --login"
+            )
+            print(f"\n[上传] 🔐 {msg}")
+            return UploadResult(success=False, message=msg)
+        return UploadResult(
+            success=False,
+            message=f"上传失败: {e}",
         )
     except Exception as e:
         return UploadResult(
