@@ -605,6 +605,9 @@ def _download_with_progress(url: str, output_template: str, info: dict | None = 
             label="下载",
         )
 
+    use_continuedl = True
+    use_nopart = True
+
     for attempt in range(max_restarts + 1):
         final_path = [None]  # mutable container for closure
         first_progress_at = [None]
@@ -689,8 +692,8 @@ def _download_with_progress(url: str, output_template: str, info: dict | None = 
             "progress_hooks": [_progress_hook],
             "concurrent_fragment_downloads": 16,
             # Resume partial downloads
-            "continuedl": True,
-            "nopart": True,
+            "continuedl": use_continuedl,
+            "nopart": use_nopart,
             # JS runtime for better YouTube extraction
             "js_runtimes": {"node": {}},
             # Thumbnail: write separate file for B站 cover
@@ -738,11 +741,17 @@ def _download_with_progress(url: str, output_template: str, info: dict | None = 
                 )
                 ydl_opts.pop("continuedl", None)
                 ydl_opts.pop("nopart", None)
+                use_continuedl = False
+                use_nopart = False
+                if attempt >= max_restarts:
+                    raise RuntimeError(
+                        f"下载失败: HTTP 416 范围请求不可用，已达到最大重启次数 {max_restarts}"
+                    ) from e
                 print(f"\n[下载] ⚠️ 断点续传失败 (HTTP 416)，已清理残留文件，从头下载...")
                 continue
             raise RuntimeError(f"下载失败: {e}") from e
 
-    return ""
+    raise RuntimeError(f"下载失败: 已达到最大重启次数 {max_restarts}，下载未完成")
 
 
 def download_video(url: str) -> VideoInfo:
