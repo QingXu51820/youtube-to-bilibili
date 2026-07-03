@@ -10,6 +10,7 @@ from yt2bili import config
 
 
 TRAILING_HASHTAG_RE = re.compile(r"(?:\s+#[-\w\u4e00-\u9fff]+)+\s*$", re.IGNORECASE)
+CONTENT_KEYWORD_SPLIT_RE = re.compile(r"[,，;；\n]+")
 
 
 def strip_trailing_hashtags(text: str) -> str:
@@ -28,6 +29,56 @@ def clean_title(text: str) -> str:
     if len(text) > 80:
         text = text[:77] + '...'
     return text
+
+
+def _content_filter_keywords(keywords: str) -> list[str]:
+    """Split configured content-filter terms without breaking phrases."""
+    return [term.strip() for term in CONTENT_KEYWORD_SPLIT_RE.split(keywords or "") if term.strip()]
+
+
+def _content_keyword_patterns(keyword: str) -> list[re.Pattern[str]]:
+    parts = [part for part in re.split(r"\s+", keyword.strip()) if part]
+    if not parts:
+        return []
+
+    phrase = r"\s+".join(re.escape(part) for part in parts)
+    compact = re.sub(r"\s+", "", keyword.strip())
+    has_ascii_word = bool(re.search(r"[A-Za-z0-9]", compact))
+    prefix = r"(?<![A-Za-z0-9])#?" if has_ascii_word else ""
+    suffix = r"(?![A-Za-z0-9])" if has_ascii_word else ""
+
+    patterns = [re.compile(prefix + phrase + suffix, re.IGNORECASE)]
+    if compact and compact != keyword.strip():
+        patterns.append(re.compile(prefix + re.escape(compact) + suffix, re.IGNORECASE))
+    return patterns
+
+
+def _match_content_keyword(text: str, keywords: str) -> str:
+    """Return the matched configured keyword, or an empty string."""
+    haystack = text or ""
+    for keyword in _content_filter_keywords(keywords):
+        if any(pattern.search(haystack) for pattern in _content_keyword_patterns(keyword)):
+            return keyword
+    return ""
+
+
+def _parse_content_classification(raw: str) -> bool | None:
+    """Parse a short YES/NO-style classifier reply."""
+    normalized = re.sub(r"[\s\"'`*_]+", "", raw or "").strip()
+    normalized = normalized.strip("。.!！,，:：;；()（）[]【】")
+    if not normalized:
+        return None
+
+    upper = normalized.upper()
+    if upper in {"NO", "N", "FALSE"} or upper.startswith(("NO", "FALSE")):
+        return False
+    if any(marker in normalized for marker in ("不相关", "无关", "否", "不是")):
+        return False
+    if upper in {"YES", "Y", "TRUE"} or upper.startswith(("YES", "TRUE")):
+        return True
+    if any(marker in normalized for marker in ("相关", "是")):
+        return True
+    return None
 
 
 def _translation_proxy() -> str:
@@ -341,20 +392,11 @@ def translate(text: str, source_lang: str = "auto", target_lang: str = "zh-CN") 
 
 def classify_content(title: str, description: str, keywords: str) -> bool:
     """Return True if the video is relevant to the given keywords (via DeepSeek)."""
-    from openai import OpenAI
-    import httpx
-
-    proxy = _translation_proxy()
-    http_client = None
-    if proxy:
-        timeout = max(10, int(getattr(config, "YOUTUBE_HTTP_TIMEOUT", 60) or 60))
-        http_client = httpx.Client(proxy=proxy, timeout=timeout)
-
-    client = OpenAI(
-        api_key=config.DEEPSEEK_API_KEY,
-        base_url=config.DEEPSEEK_BASE_URL,
-        http_client=http_client,
-    )
+    source_text = f"{title or ''}\n{description or ''}"
+    matched_keyword = _match_content_keyword(source_text, keywords)
+    if matched_keyword:
+        print(f"[筛选] 关键词命中“{matched_keyword}”，跳过 AI 分类")
+        return True
 
     prompt = (
         "你是一个内容审核助手。根据视频标题和简介，判断该视频是否与以下主题相关。\n"
@@ -366,6 +408,20 @@ def classify_content(title: str, description: str, keywords: str) -> bool:
     user_message = f"标题：{title}\n\n简介：{desc_snippet}" if desc_snippet else f"标题：{title}"
 
     try:
+        from openai import OpenAI
+
+        proxy = _translation_proxy()
+        http_client = None
+        if proxy:
+            import httpx
+            timeout = max(10, int(getattr(config, "YOUTUBE_HTTP_TIMEOUT", 60) or 60))
+            http_client = httpx.Client(proxy=proxy, timeout=timeout)
+
+        client = OpenAI(
+            api_key=config.DEEPSEEK_API_KEY,
+            base_url=config.DEEPSEEK_BASE_URL,
+            http_client=http_client,
+        )
         response = client.chat.completions.create(
             model=config.DEEPSEEK_MODEL,
             messages=[
@@ -374,10 +430,15 @@ def classify_content(title: str, description: str, keywords: str) -> bool:
             ],
             temperature=0,
             max_tokens=10,
+            extra_body={"thinking": {"type": config.DEEPSEEK_THINKING}},
         )
 
-        result = (response.choices[0].message.content or "").strip().upper()
-        return result == "YES"
+        result = response.choices[0].message.content or ""
+        parsed = _parse_content_classification(result)
+        if parsed is None:
+            print(f"[筛选] 警告：内容分类返回无法解析: {result!r}，为避免误杀已放行")
+            return True
+        return parsed
     except Exception as e:
-        print(f"[筛选] ⚠️ 内容分类 API 调用失败: {e}，保守跳过该视频")
-        return False
+        print(f"[筛选] 警告：内容分类 API 调用失败: {e}，为避免误杀已放行")
+        return True

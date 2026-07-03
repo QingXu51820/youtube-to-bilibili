@@ -82,30 +82,77 @@ def _build_credential():
     return auth.get_credential()
 
 
+_TRUNCATION_SUFFIX = "..."
+_RESERVE_BYTES = len(_TRUNCATION_SUFFIX.encode("utf-8"))  # 3
+
+
 def _build_description(
-    original_url: str,
     original_description: str,
     translated_title: str,
     original_title: str = "",
+    *,
+    byte_limit: int = 2000,
 ) -> str:
-    """Build the video description for B站 upload."""
-    parts = []
-    # Source attribution (required for 转载)
-    parts.append(f"原视频链接: {original_url}")
+    """Build the video description for B站 upload.
+
+    Note: the source URL is set via VideoMeta.source and displayed by B站
+    automatically; we don't duplicate it in the description text.
+
+    The header (原标题 + 翻译标题) is always preserved.  After the header,
+    as many *complete* lines of the original description as fit within
+    `byte_limit` UTF-8 bytes are appended.  Lines are never split mid-way;
+    if truncation is needed a trailing "..." is added.
+    """
+    # ── header (title lines only, no description section yet) ──────────
+    header_parts = []
     if original_title:
-        parts.append(f"原标题: {original_title}")
-    parts.append(f"翻译标题: {translated_title}")
+        header_parts.append(f"原标题: {original_title}")
+    header_parts.append(f"翻译标题: {translated_title}")
+    header = "\n".join(header_parts)
 
-    # Include original description if not too long
-    if original_description:
-        desc_lines = original_description.strip().split("\n")
-        # Limit to first 3 lines of original description (B站简介有字数限制)
-        short_desc = "\n".join(desc_lines[:3])
-        if len(desc_lines) > 3:
-            short_desc += "\n..."
-        parts.append(f"\n原视频简介:\n{short_desc}")
+    if not original_description:
+        return header
 
-    return "\n".join(parts)
+    desc_lines = original_description.strip().split("\n")
+
+    # ── prefix = header + section label ──────────────────────────────
+    prefix = header + "\n\n原视频简介:\n"
+    prefix_bytes = len(prefix.encode("utf-8"))
+    budget = byte_limit - prefix_bytes
+
+    if budget <= 0:
+        # Header + label alone exceeds the limit (extremely rare).
+        # Return the prefix as-is; the safety net in _upload_async will
+        # handle the final byte-level truncation.
+        return prefix
+
+    # ── greedily pack complete lines into the remaining budget ───────
+    selected: list[str] = []
+    used = 0
+    all_fit = True
+
+    for line in desc_lines:
+        separator_cost = 1 if selected else 0  # "\n" between lines
+        line_content_bytes = len(line.encode("utf-8"))
+        total_line_cost = separator_cost + line_content_bytes
+
+        if used + total_line_cost + _RESERVE_BYTES > budget:
+            all_fit = False
+            break
+
+        selected.append(line)
+        used += total_line_cost
+
+    if not selected:
+        # Even the first line of the description doesn't fit → omit the
+        # description section entirely rather than showing an empty label.
+        return header
+
+    body = "\n".join(selected)
+    if not all_fit:
+        body += "\n" + _TRUNCATION_SUFFIX
+
+    return prefix + body
 
 
 async def _upload_async(
@@ -136,8 +183,10 @@ async def _upload_async(
 
     credential = _build_credential()
 
-    # Truncate description to B站 byte-length limit (use byte count;
-    # Chinese characters are 3 bytes each in UTF-8, so 2000 chars ≈ 6000 bytes)
+    # Truncate description to B站 byte-length limit (2000 bytes in UTF-8).
+    # This is a last-resort safety net; _build_description already ensures
+    # the budget is respected.  Only triggers when the header alone exceeds
+    # 2000 bytes (extremely rare).
     desc_bytes = desc.encode("utf-8")
     if len(desc_bytes) > 2000:
         # Trim to fit within 2000 bytes, preserving full UTF-8 sequences
@@ -288,7 +337,7 @@ def upload_video(
         return UploadResult(success=False, message="没有视频文件可上传")
 
     # Build description with source attribution
-    desc = _build_description(original_url, original_description, title, original_title)
+    desc = _build_description(original_description, title, original_title)
     cover = _ensure_cover(cover_path)
     cover_size = image_size(cover)
 

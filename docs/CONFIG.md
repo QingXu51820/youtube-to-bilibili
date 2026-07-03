@@ -25,8 +25,8 @@
 | `COVER_FIT` | 封面适配模式：`crop`=居中裁剪，`contain`=等比缩放加黑边 | `crop` |
 | `YOUTUBE_SKIP_LONG_VIDEO_MINUTES` | 永久跳过超过该时长的视频（分钟），`0`=禁用 | `0` |
 | `YOUTUBE_SKIP_VERTICAL_VIDEOS` | 自动跳过竖屏视频（YouTube Shorts 等） | `true` |
-| `CONTENT_FILTER_ENABLED` | 开启 DeepSeek 内容筛选 | `false` |
-| `CONTENT_FILTER_KEYWORDS` | 内容筛选关键词，视频标题/简介需包含 | `Marvel SNAP` |
+| `CONTENT_FILTER_ENABLED` | 开启内容筛选；明确命中关键词时直接通过，否则用 DeepSeek 判断 | `false` |
+| `CONTENT_FILTER_KEYWORDS` | 内容筛选关键词，按完整短语匹配标题/简介 | `Marvel SNAP` |
 | `CLEANUP_AFTER_UPLOAD` | 上传成功后清理本地文件 | `true` |
 | `RUNS_DIR` | 批量结果记录目录 | `./runs` |
 | `YOUTUBE_PROXY` | YouTube API 和默认下载代理 | 空 |
@@ -159,8 +159,8 @@ python main.py --monitor --no-speed-protection
 | `YOUTUBE_DEFER_LONG_VIDEO_MINUTES` | 直播回放或超长视频排到队尾的时长阈值，`0` 表示关闭 | `60` |
 | `YOUTUBE_SKIP_LONG_VIDEO_MINUTES` | 永久跳过超过该时长的视频（分钟），`0`=禁用（仅 API 模式） | `0` |
 | `YOUTUBE_SKIP_VERTICAL_VIDEOS` | 自动跳过竖屏/Shorts 视频 | `true` |
-| `CONTENT_FILTER_ENABLED` | 开启 DeepSeek 内容筛选，下载前过滤无关视频 | `false` |
-| `CONTENT_FILTER_KEYWORDS` | 内容筛选关键词 | `Marvel SNAP` |
+| `CONTENT_FILTER_ENABLED` | 开启内容筛选，下载前过滤无关视频；明确命中关键词时直接通过 | `false` |
+| `CONTENT_FILTER_KEYWORDS` | 内容筛选关键词，按完整短语匹配标题/简介 | `Marvel SNAP` |
 | `YOUTUBE_MAX_VIDEOS_PER_CHANNEL` | 每个订阅频道抓取最近多少条视频 | `5` |
 
 ### 自动轮询策略
@@ -175,7 +175,7 @@ python main.py --monitor --no-speed-protection
   - 超长视频（`YOUTUBE_SKIP_LONG_VIDEO_MINUTES > 0`）
   - 内容筛选不相关（`CONTENT_FILTER_ENABLED=true`）
 - 直播回放或时长达到 `YOUTUBE_DEFER_LONG_VIDEO_MINUTES` 的视频会排到队尾，先上传普通视频
-- 内容筛选（可选）：下载前用 DeepSeek 判断标题+简介是否与 `CONTENT_FILTER_KEYWORDS` 相关，无关则永久跳过
+- 内容筛选（可选）：下载前先按完整短语匹配 `CONTENT_FILTER_KEYWORDS`；标题/简介明确命中时直接通过，未命中时再用 DeepSeek 判断。只有明确不相关才永久跳过，API 失败或返回无法解析时会放行以避免误杀。
 - 处理历史写入 `state/processed_videos.json`，用 YouTube `video_id` 去重
 
 ---

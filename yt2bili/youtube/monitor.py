@@ -223,7 +223,7 @@ def load_state(path: Path) -> dict[str, Any]:
         return empty_state()
 
     try:
-        state = json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
         raise SystemExit(f"状态文件不是有效 JSON: {path}\n{exc}") from exc
 
