@@ -365,15 +365,19 @@ def classify_content(title: str, description: str, keywords: str) -> bool:
     desc_snippet = (description or "")[:500]
     user_message = f"标题：{title}\n\n简介：{desc_snippet}" if desc_snippet else f"标题：{title}"
 
-    response = client.chat.completions.create(
-        model=config.DEEPSEEK_MODEL,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=0,
-        max_tokens=10,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0,
+            max_tokens=10,
+        )
 
-    result = (response.choices[0].message.content or "").strip().upper()
-    return "YES" in result
+        result = (response.choices[0].message.content or "").strip().upper()
+        return result == "YES"
+    except Exception as e:
+        print(f"[筛选] ⚠️ 内容分类 API 调用失败: {e}，保守跳过该视频")
+        return False

@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,7 @@ def _save_cache(path: Path, glossary: dict[str, str]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "version": 1,
-            "updated_at": time.time(),
+            "updated_at": datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S (北京时间)"),
             "count": len(glossary),
             "glossary": glossary,
         }
