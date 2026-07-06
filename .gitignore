@@ -1,3 +1,6 @@
+# Frequently modified data files
+data/snap_glossary.json
+
 # Environment / config files (inside config/)
 /config/.env
 /config/cookies.txt
