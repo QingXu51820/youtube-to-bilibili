@@ -33,6 +33,7 @@ def _get_int(key: str, default: int) -> int:
 BILI_SESSDATA = _get("BILI_SESSDATA", "")
 BILI_BILI_JCT = _get("BILI_BILI_JCT", "")
 BILI_BUVID3 = _get("BILI_BUVID3", "")
+BILI_LOGIN_TIME = _get("BILI_LOGIN_TIME", "")  # ISO 8601 timestamp of last successful QR login
 
 # ── Translation ───────────────────────────────────────────────────
 TRANSLATE_PROVIDER = _get("TRANSLATE_PROVIDER", "deepseek").lower()  # google | openai | deepseek

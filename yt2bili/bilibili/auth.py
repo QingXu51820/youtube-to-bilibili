@@ -148,7 +148,7 @@ def _save_credential_to_env(credential) -> None:
     # Replace BILI_* lines, keep everything else
     new_lines = []
     seen_keys = set()
-    bili_keys = {"BILI_SESSDATA", "BILI_BILI_JCT", "BILI_BUVID3"}
+    bili_keys = {"BILI_SESSDATA", "BILI_BILI_JCT", "BILI_BUVID3", "BILI_LOGIN_TIME"}
 
     for line in existing_lines:
         stripped = line.strip()
@@ -166,6 +166,9 @@ def _save_credential_to_env(credential) -> None:
                 new_lines.append(f"BILI_BILI_JCT={credential.bili_jct}")
             elif key == "BILI_BUVID3":
                 new_lines.append(f"BILI_BUVID3={credential.buvid3 or ''}")
+            elif key == "BILI_LOGIN_TIME":
+                from datetime import datetime, timezone
+                new_lines.append(f"BILI_LOGIN_TIME={datetime.now(timezone.utc).isoformat()}")
         else:
             new_lines.append(line)
 
@@ -176,6 +179,9 @@ def _save_credential_to_env(credential) -> None:
         new_lines.append(f"BILI_BILI_JCT={credential.bili_jct}")
     if "BILI_BUVID3" not in seen_keys and credential.buvid3:
         new_lines.append(f"BILI_BUVID3={credential.buvid3}")
+    if "BILI_LOGIN_TIME" not in seen_keys:
+        from datetime import datetime, timezone
+        new_lines.append(f"BILI_LOGIN_TIME={datetime.now(timezone.utc).isoformat()}")
 
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 

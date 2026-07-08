@@ -386,6 +386,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--file", help="从文件批量读取 YouTube URL，默认每行一个")
     parser.add_argument("--login", action="store_true", help="重新扫码登录 B站")
     parser.add_argument("--refresh-youtube-cookies", action="store_true", help="从浏览器自动生成/刷新 YouTube cookies.txt (config/)")
+    parser.add_argument("--check-auth", action="store_true", help="检查所有凭据（Bilibili/YouTube OAuth/YouTube Cookie）的有效期和状态")
     parser.add_argument("--monitor", action="store_true", help="每小时检查 YouTube 订阅更新并自动上传")
     parser.add_argument("--discord", action="store_true", help="实时监听 Discord 频道消息并搬运到 B站动态")
     parser.add_argument("--once", action="store_true", help="仅在 --monitor 模式下检查一次")
@@ -508,6 +509,13 @@ def main():
 
     if args.no_speed_protection:
         config.DOWNLOAD_MIN_SPEED_KIB = 0
+
+    if args.check_auth:
+        from yt2bili.auth_checker import run_auth_check
+
+        exit_code = run_auth_check()
+        if not args.login and not args.monitor and not args.file and not args.urls and not args.refresh_youtube_cookies:
+            return exit_code
 
     if args.refresh_youtube_cookies:
         from yt2bili.youtube.downloader import refresh_youtube_cookies
