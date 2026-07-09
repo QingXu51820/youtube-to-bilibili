@@ -272,6 +272,7 @@ def process_video(url: str, credential=None) -> ProcessResult:
 
     # Launch subtitle processing in background BEFORE starting the upload
     subtitle_future = None
+    subtitle_executor = None
     should_process_subtitles = (
         not is_multi_part and config.SUBTITLE_ENABLED
     )
@@ -302,37 +303,45 @@ def process_video(url: str, credential=None) -> ProcessResult:
         subtitle_executor = ThreadPoolExecutor(max_workers=1)
         subtitle_future = subtitle_executor.submit(_process_subtitles_background)
 
-    print()
+    upload_succeeded = False
     try:
-        result = upload_video(
-            file_paths=video_files_for_upload,
-            title=translated_title,
-            original_url=video.original_url,
-            original_description=video.description,
-            original_title=video.title,
-            cover_path=cover_path,
-            credential=credential,
-        )
-        if not result.success:
-            raise RuntimeError(result.message)
-    except RuntimeError as e:
-        msg = str(e)
-        record.error = msg
-        # Auth errors already include the re-login hint
-        if "请重新扫码登录" in msg:
-            print(f"\n🔐 {msg}")
-        else:
+        print()
+        try:
+            result = upload_video(
+                file_paths=video_files_for_upload,
+                title=translated_title,
+                original_url=video.original_url,
+                original_description=video.description,
+                original_title=video.title,
+                cover_path=cover_path,
+                credential=credential,
+            )
+            if not result.success:
+                raise RuntimeError(result.message)
+        except RuntimeError as e:
+            msg = str(e)
+            record.error = msg
+            if "请重新扫码登录" in msg:
+                print(f"\n🔐 {msg}")
+            else:
+                print(f"\n❌ 上传失败: {e}")
+            return record
+        except Exception as e:
+            record.error = str(e)
             print(f"\n❌ 上传失败: {e}")
-        return record
-    except Exception as e:
-        record.error = str(e)
-        print(f"\n❌ 上传失败: {e}")
-        return record
+            return record
 
-    record.success = True
-    record.stage = "complete"
-    record.bvid = result.bvid
-    record.aid = result.aid
+        upload_succeeded = True
+        record.success = True
+        record.stage = "complete"
+        record.bvid = result.bvid
+        record.aid = result.aid
+    finally:
+        # Always cancel background subtitle thread if upload failed
+        if not upload_succeeded and subtitle_future is not None:
+            subtitle_future.cancel()
+        if subtitle_executor is not None:
+            subtitle_executor.shutdown(wait=False)
 
     # ── Step 4.5: Subtitle processing (join background + upload) ──
     record.stage = "subtitle"
@@ -349,7 +358,6 @@ def process_video(url: str, credential=None) -> ProcessResult:
             subtitle_data: dict | None = None
             if subtitle_future:
                 subtitle_data = subtitle_future.result()
-                subtitle_executor.shutdown(wait=False)
 
             if not subtitle_data:
                 raise RuntimeError("YouTube 上未找到匹配的字幕语言")
