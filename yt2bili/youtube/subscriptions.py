@@ -115,6 +115,90 @@ def sort_videos(videos: Iterable[VideoItem]) -> list[VideoItem]:
     return unique_by_video_id(sorted_items)
 
 
+def resolve_channel_handle_ytdlp(handle_or_url: str) -> tuple[str, str]:
+    """
+    Resolve a YouTube @handle or channel URL to ``(channel_id, channel_title)``
+    using yt-dlp (no API key required).
+
+    Accepts:
+      - ``@Handle``
+      - ``https://www.youtube.com/@Handle``
+      - ``https://www.youtube.com/channel/UC...``
+      - Raw channel ID (starts with ``UC``, 24 chars)
+
+    Returns ``(channel_id, channel_title)``.
+    Raises ``ValueError`` if resolution fails.
+    """
+    import yt_dlp
+
+    raw = handle_or_url.strip().rstrip("/")
+
+    # Already a channel ID?
+    if raw.startswith("UC") and len(raw) >= 24:
+        # Let yt-dlp confirm and give us the title
+        url = f"https://www.youtube.com/channel/{raw[:24]}"
+    elif raw.startswith("@"):
+        url = f"https://www.youtube.com/{raw}"
+    elif "youtube.com/" in raw:
+        url = raw
+    else:
+        url = f"https://www.youtube.com/@{raw.lstrip('@')}"
+
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "playlistend": 1,
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            raise ValueError(f"无法解析 YouTube 频道: {handle_or_url} ({exc})") from exc
+
+        channel_id = info.get("channel_id", "")
+        channel_title = info.get("channel", "") or info.get("uploader", "") or ""
+
+        if not channel_id:
+            raise ValueError(f"无法获取 channel_id: {handle_or_url}")
+
+        return channel_id, channel_title
+
+
+def resolve_channel_handle_api(youtube, handle: str) -> tuple[str, str]:
+    """
+    Resolve a YouTube @handle to ``(channel_id, channel_title)``
+    using the YouTube Data API.
+
+    *youtube* must be an authenticated service from ``get_youtube_service()``.
+    """
+    handle = handle.strip().lstrip("@").rstrip("/")
+    if "youtube.com/@" in handle:
+        handle = handle.split("@")[-1].split("/")[0]
+    elif "youtube.com/channel/" in handle:
+        channel_id = handle.split("channel/")[-1].split("/")[0]
+        # Look up the title
+        request = youtube.channels().list(part="snippet", id=channel_id, maxResults=1)
+        response = execute_youtube_request(request)
+        items = response.get("items", [])
+        if items:
+            return items[0]["id"], items[0]["snippet"]["title"]
+        raise ValueError(f"Channel not found: {channel_id}")
+
+    request = youtube.channels().list(
+        part="snippet",
+        forHandle=handle,
+        maxResults=1,
+    )
+    response = execute_youtube_request(request)
+    items = response.get("items", [])
+    if not items:
+        raise ValueError(f"Cannot resolve YouTube handle: @{handle}")
+
+    return items[0]["id"], items[0]["snippet"]["title"]
+
+
 def require_file(path: Path, purpose: str) -> None:
     if not path.exists():
         raise SystemExit(

@@ -3,16 +3,22 @@ Bilibili video uploader using bilibili-api-python.
 Uploads videos with copyright=2 (转载/repost).
 """
 
+from __future__ import annotations
+
 import asyncio
 import tempfile
 from pathlib import Path
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from bilibili_api import video_uploader
 
 from yt2bili import config
 from yt2bili.bilibili import auth
 from yt2bili.media.cover import image_size, is_valid_image
+
+if TYPE_CHECKING:
+    from bilibili_api import Credential
 
 # HTTP status codes that indicate credential / authentication issues
 _AUTH_ERROR_CODES = (401, 403)
@@ -77,8 +83,14 @@ def _format_tid(tid: int) -> str:
     return str(tid)
 
 
-def _build_credential():
-    """Get Bilibili Credential (auto-login via QR if first time)."""
+def _build_credential(credential: Credential | None = None):
+    """Get Bilibili Credential (auto-login via QR if first time).
+
+    When *credential* is provided it is used directly;
+    otherwise the active profile's credential is resolved via auth.
+    """
+    if credential is not None:
+        return credential
     return auth.get_credential()
 
 
@@ -163,6 +175,7 @@ async def _upload_async(
     tid: int | None = None,
     source_url: str = "",
     cover_path: str | None = None,
+    credential: Credential | None = None,
 ) -> UploadResult:
     """
     Async upload a video to Bilibili (single or multi-part).
@@ -181,7 +194,7 @@ async def _upload_async(
     """
     from bilibili_api.exceptions.NetworkException import NetworkException
 
-    credential = _build_credential()
+    cred = _build_credential(credential)
 
     # Truncate description to B站 byte-length limit (2000 bytes in UTF-8).
     # This is a last-resort safety net; _build_description already ensures
@@ -232,7 +245,7 @@ async def _upload_async(
     uploader = video_uploader.VideoUploader(
         pages=pages,
         meta=vu_meta,
-        credential=credential,
+        credential=cred,
     )
 
     # Add progress listeners. bilibili-api-python passes one event_data
@@ -313,6 +326,7 @@ def upload_video(
     tags: list[str] | None = None,
     tid: int | None = None,
     cover_path: str | None = None,
+    credential: Credential | None = None,
 ) -> UploadResult:
     """
     Upload a video to Bilibili (synchronous wrapper).
@@ -326,6 +340,7 @@ def upload_video(
         tags: Tags list
         tid: Category ID
         cover_path: Optional cover image path
+        credential: Optional pre-built Credential (uses active profile when omitted)
 
     Returns:
         UploadResult
@@ -366,12 +381,12 @@ def upload_video(
             import nest_asyncio
             nest_asyncio.apply()
         result = loop.run_until_complete(
-            _upload_async(file_paths, title, desc, tags, tid, original_url, cover)
+            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, credential)
         )
     except RuntimeError:
         # No event loop running, use asyncio.run
         result = asyncio.run(
-            _upload_async(file_paths, title, desc, tags, tid, original_url, cover)
+            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, credential)
         )
 
     return result

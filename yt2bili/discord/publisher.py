@@ -173,14 +173,11 @@ def _build_dynamic_text(translated: str, msg: DiscordMessage) -> str:
 
 async def _post_dynamic(text: str, image_paths: list[str]) -> str:
     """Post a Bilibili dynamic with text and images. Returns dynamic_id or empty string."""
-    from bilibili_api import Credential
     from bilibili_api.dynamic import BuildDynamic
 
-    credential = Credential(
-        sessdata=config.BILI_SESSDATA,
-        bili_jct=config.BILI_BILI_JCT,
-        buvid3=config.BILI_BUVID3,
-    )
+    # Use auth module so it respects the active profile
+    from yt2bili.bilibili import auth
+    credential = auth.get_credential()
 
     post = BuildDynamic.empty()
 

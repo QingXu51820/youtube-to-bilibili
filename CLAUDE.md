@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Identity
 
-yt2bili — YouTube → Bilibili automated repost pipeline. Downloads YouTube videos (≤1080p MP4), translates titles to Chinese, generates 1920×1080 cover images, and uploads to Bilibili as 转载 (repost, copyright=2). Also supports polling YouTube subscriptions for automatic ingestion.
+yt2bili — YouTube → Bilibili automated repost pipeline. Downloads YouTube videos (≤1080p MP4), translates titles to Chinese, generates 1920×1080 cover images, and uploads to Bilibili as 转载 (repost, copyright=2). Also supports polling YouTube subscriptions for automatic ingestion, and multi-account Bilibili profiles.
 
 ## Essential Commands
 
@@ -31,6 +31,25 @@ python main.py --refresh-youtube-cookies
 python youtube_subscriptions.py --source api --limit 50
 python youtube_subscriptions.py --source rss --limit 50
 
+# ── Multi-account (profiles) ──────────────────────────────────
+# List configured profiles
+python main.py --list-profiles
+
+# Login to a specific profile
+python main.py --login --profile snap
+
+# Process a video with a specific profile
+python main.py --profile snap "https://youtube.com/watch?v=xxx"
+
+# Monitor specific profile's channels (RSS-based, no API quota)
+python main.py --monitor --profile snap
+
+# Monitor all profiles in round-robin sequence
+python main.py --monitor --all-profiles --once
+
+# Resolve YouTube @handle to channel ID
+python main.py --resolve-channel "@MarvelSnap"
+
 # Build Windows EXE
 tools\build_exe.bat
 ```
@@ -39,7 +58,9 @@ tools\build_exe.bat
 
 ## Configuration
 
-All settings in `config/.env` (copy from `config/.env.example`). Read by `yt2bili/config.py` via `python-dotenv`. Key groups:
+All settings in `config/.env` (copy from `config/.env.example`). Read by `yt2bili/config.py` via `python-dotenv`.
+
+**Multi-account**: Create `config/profiles.json` (copy from `config/profiles.json.example`) to manage multiple Bilibili accounts. Each profile bundles Bilibili credentials, a YouTube channel list, and optional setting overrides. Use `--profile <name>` to select one, or `--all-profiles` with `--monitor` to cycle through all.
 
 - **Bilibili credentials**: `BILI_SESSDATA`, `BILI_BILI_JCT` — auto-populated by QR login
 - **Translation**: `TRANSLATE_PROVIDER` (deepseek/openai/google), API keys, model selection, `TRANSLATION_PRESERVE_TERMS`
@@ -64,15 +85,16 @@ Each stage is a separate `try/except` block. Failure at any stage records the er
 |---|---|
 | `main.py`, `youtube_subscriptions.py` | Root compatibility CLI wrappers |
 | `yt2bili/main.py` | CLI entry, arg parsing, pipeline orchestrator, run reports (`runs/`) |
-| `yt2bili/config.py` | `.env` reader with typed `_get()`/`_get_int()`, `validate()` checks credentials |
+| `yt2bili/config.py` | `.env` reader with typed `_get()`/`_get_int()`, `validate()` checks credentials, `apply_profile_overrides()` |
+| `yt2bili/profile.py` | Multi-account profile system — `profiles.json` load/save, active profile state, state/cache path resolution |
 | `yt2bili/youtube/downloader.py` | yt-dlp Python API, cookie fallback chain, slow-speed detection + restart, ffprobe probing |
 | `yt2bili/translation/translator.py` | `BaseTranslator` → `GoogleTranslator` / `OpenAITranslator` / `DeepSeekTranslator`, term preservation, 80-char truncation |
 | `yt2bili/media/cover.py` | Pillow-based: validate → EXIF transpose → crop or contain → resize to 1920×1080 JPEG |
-| `yt2bili/bilibili/uploader.py` | Async `bilibili-api-python` wrapped synchronously, multi-part (分P) support, fallback 1×1 JPEG cover |
-| `yt2bili/bilibili/auth.py` | Bilibili QR login flow, auto-saves credentials to `config/.env` |
+| `yt2bili/bilibili/uploader.py` | Async `bilibili-api-python` wrapped synchronously, multi-part (分P) support, fallback 1×1 JPEG cover, optional `credential` param |
+| `yt2bili/bilibili/auth.py` | Bilibili QR login flow, auto-saves credentials to profiles.json or .env, profile-aware `get_credential()` |
 | `yt2bili/media/video_splitter.py` | ffmpeg `-c copy` lossless segmenting at keyframes |
-| `yt2bili/youtube/monitor.py` | Polling loop: fetch subs → deduplicate → sort queue → process → retry → persist state |
-| `yt2bili/youtube/subscriptions.py` | Standalone sub fetcher (API + RSS), custom `YouTubeClient` (requests-based, avoids httplib2 proxy issues) |
+| `yt2bili/youtube/monitor.py` | Polling loop: fetch subs → deduplicate → sort queue → process → retry → persist state; multi-profile round-robin support |
+| `yt2bili/youtube/subscriptions.py` | Standalone sub fetcher (API + RSS), custom `YouTubeClient` (requests-based, avoids httplib2 proxy issues), channel handle resolution |
 | `yt2bili/frozen_paths.py` | `is_frozen()` + `user_data_dir()` — EXE-relative paths when PyInstaller-bundled, project root in dev |
 
 ### Monitor State Flow

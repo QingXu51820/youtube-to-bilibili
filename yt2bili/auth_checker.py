@@ -109,33 +109,52 @@ def _status_icon(status: str) -> str:
 
 # ── Individual checkers ────────────────────────────────────────────────────
 
-async def check_bilibili_auth() -> dict[str, Any]:
+async def check_bilibili_auth(
+    profile_name: str = "",
+    sessdata: str = "",
+    bili_jct: str = "",
+    buvid3: str = "",
+    login_time_str: str = "",
+) -> dict[str, Any]:
     """Check Bilibili credential validity via API + local heuristics.
 
+    Args:
+        profile_name: Profile label (for display only).
+        sessdata, bili_jct, buvid3, login_time_str: Credential values.
+            When all empty, falls back to config.BILI_* (legacy .env).
+
     Returns:
-        dict with keys: status, days_since_login, login_time, detail
+        dict with keys: status, days_since_login, login_time, detail, profile
     """
     result: dict[str, Any] = {
         "status": "missing",
         "days_since_login": None,
         "login_time": None,
         "detail": "",
+        "profile": profile_name or "default",
     }
+
+    # Fall back to .env if no explicit credential provided
+    if not sessdata and not bili_jct:
+        sessdata = config.BILI_SESSDATA
+        bili_jct = config.BILI_BILI_JCT
+        buvid3 = config.BILI_BUVID3
+        login_time_str = login_time_str or config.BILI_LOGIN_TIME
 
     # Check if credentials are configured at all
     bogus = ("your_sessdata_here", "your_bili_jct_here", "")
-    if (not config.BILI_SESSDATA
-            or config.BILI_SESSDATA.lower() in bogus
-            or not config.BILI_BILI_JCT
-            or config.BILI_BILI_JCT.lower() in bogus):
+    if (not sessdata
+            or sessdata.lower() in bogus
+            or not bili_jct
+            or bili_jct.lower() in bogus):
         result["detail"] = "Bilibili 凭据未配置或为占位符，请运行 --login"
         return result
 
     # Parse login time
     login_time = None
-    if config.BILI_LOGIN_TIME:
+    if login_time_str:
         try:
-            login_time = datetime.fromisoformat(config.BILI_LOGIN_TIME)
+            login_time = datetime.fromisoformat(login_time_str)
             result["login_time"] = login_time.isoformat()
             result["days_since_login"] = (
                 datetime.now(timezone.utc) - login_time
@@ -148,9 +167,9 @@ async def check_bilibili_auth() -> dict[str, Any]:
         from bilibili_api import Credential
 
         cred = Credential(
-            sessdata=config.BILI_SESSDATA,
-            bili_jct=config.BILI_BILI_JCT,
-            buvid3=config.BILI_BUVID3 or None,
+            sessdata=sessdata,
+            bili_jct=bili_jct,
+            buvid3=buvid3 or None,
         )
 
         is_valid = await cred.check_valid()
@@ -170,7 +189,7 @@ async def check_bilibili_auth() -> dict[str, Any]:
                 result["detail"] = f"凭据有效{ago}"
         else:
             result["status"] = "expired"
-            result["detail"] = "凭据已过期，请运行 python main.py --login 重新登录"
+            result["detail"] = "请运行 python main.py --login 重新登录"
     except Exception as exc:
         result["status"] = "error"
         result["detail"] = f"无法验证凭据（网络错误或 API 异常）: {exc}"
@@ -401,27 +420,34 @@ def run_auth_check() -> int:
     print("=" * 60)
     print()
 
-    # Run checks (Bilibili check is async, the rest are sync)
-    bili_result = asyncio.run(check_bilibili_auth())
+    any_issues = False
+
+    # ── Bilibili: check profiles (multi-account) or .env (legacy) ──
+    from yt2bili import profile as profile_mod
+
+    if profile_mod.is_multi_profile():
+        profiles = profile_mod.load_profiles()
+        for pname, prof in profiles.items():
+            result = asyncio.run(check_bilibili_auth(
+                profile_name=pname,
+                sessdata=prof.bilibili.sessdata,
+                bili_jct=prof.bilibili.bili_jct,
+                buvid3=prof.bilibili.buvid3,
+                login_time_str=prof.bilibili.login_time,
+            ))
+            _print_bilibili_result(result, label=f"Bilibili ({pname})")
+            if result["status"] in ("expired", "missing", "error"):
+                any_issues = True
+    else:
+        result = asyncio.run(check_bilibili_auth())
+        _print_bilibili_result(result, label="Bilibili 凭据 (上传)")
+        if result["status"] in ("expired", "missing", "error"):
+            any_issues = True
+
+    # ── YouTube OAuth / Cookies ──────────────────────────────
     yt_oauth_result = check_youtube_oauth()
     yt_cookie_result = check_youtube_cookies()
 
-    any_issues = False
-
-    # ── Bilibili ──
-    print("  ┌─ Bilibili 凭据 (上传)")
-    icon = _status_icon(bili_result["status"])
-    print(f"  │ {icon} 状态: {bili_result['status']}")
-    if bili_result.get("days_since_login") is not None:
-        print(f"  │   登录时间: {bili_result['days_since_login']} 天前 ({bili_result.get('login_time', '?')})")
-    print(f"  │   {bili_result['detail']}")
-    print("  └─")
-    print()
-
-    if bili_result["status"] in ("expired", "missing", "error"):
-        any_issues = True
-
-    # ── YouTube OAuth ──
     print("  ┌─ YouTube OAuth (订阅监控)")
     icon = _status_icon(yt_oauth_result["status"])
     print(f"  │ {icon} 状态: {yt_oauth_result['status']}")
@@ -437,7 +463,6 @@ def run_auth_check() -> int:
     if yt_oauth_result["status"] in ("expired", "missing", "error"):
         any_issues = True
 
-    # ── YouTube Cookies ──
     print("  ┌─ YouTube Cookies (下载)")
     icon = _status_icon(yt_cookie_result["status"])
     print(f"  │ {icon} 状态: {yt_cookie_result['status']}")
@@ -465,3 +490,15 @@ def run_auth_check() -> int:
     print()
 
     return 1 if any_issues else 0
+
+
+def _print_bilibili_result(result: dict[str, Any], label: str = "Bilibili 凭据") -> None:
+    """Print a single Bilibili auth check result."""
+    icon = _status_icon(result["status"])
+    print(f"  ┌─ {label}")
+    print(f"  │ {icon} 状态: {result['status']}")
+    if result.get("days_since_login") is not None:
+        print(f"  │   登录时间: {result['days_since_login']} 天前 ({result.get('login_time', '?')})")
+    print(f"  │   {result['detail']}")
+    print("  └─")
+    print()

@@ -1,0 +1,49 @@
+{
+  "profiles": {
+    "snap": {
+      "_comment": "── Marvel SNAP 搬运账号 ──",
+      "bilibili": {
+        "sessdata": "",
+        "bili_jct": "",
+        "buvid3": "",
+        "login_time": ""
+      },
+      "youtube": {
+        "channels": [
+          {"channel_id": "UCgsbO683Z1-_FknDdKmyrMA", "channel_title": "MarvelSnap"}
+        ],
+        "monitor_source": "rss",
+        "monitor_state": "",
+        "subscriptions_cache": ""
+      },
+      "settings": {
+        "default_tid": 172,
+        "default_tags": "转载,YouTube,Marvel SNAP",
+        "content_filter_enabled": true,
+        "content_filter_keywords": "Marvel SNAP"
+      }
+    },
+    "deadlock": {
+      "_comment": "── Deadlock 搬运账号 ──",
+      "bilibili": {
+        "sessdata": "",
+        "bili_jct": "",
+        "buvid3": "",
+        "login_time": ""
+      },
+      "youtube": {
+        "channels": [
+          {"channel_id": "UC_DEADLOCK_CHANNEL_ID", "channel_title": "Deadlock Official"}
+        ],
+        "monitor_source": "rss",
+        "monitor_state": "",
+        "subscriptions_cache": ""
+      },
+      "settings": {
+        "default_tid": 171,
+        "default_tags": "转载,YouTube,Deadlock",
+        "content_filter_enabled": false
+      }
+    }
+  }
+}

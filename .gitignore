@@ -38,3 +38,4 @@ venv/
 Thumbs.db
 .DS_Store
 
+/config/profiles.json
