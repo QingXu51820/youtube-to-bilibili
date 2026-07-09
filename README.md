@@ -21,6 +21,10 @@
 - 超长视频（>10h）自动使用 ffmpeg 无损分割为分 P 上传
 - **竖屏过滤**：自动跳过 YouTube Shorts 等竖屏视频（可配置）
 - **超长视频永久跳过**：超过指定时长的视频直接标记跳过，不再排队
+- **多账号管理**：支持多个 Bilibili 账号轮询不同频道列表，独立记录状态
+- **字幕下载与翻译**：自动下载 YouTube 字幕，通过 DeepSeek 批量翻译为中文，上传为 B站软字幕
+- **持久化去重**：`state/upload_log.json` 永久记录上传历史，状态丢失后可恢复
+- **并行处理**：字幕翻译多线程并行，字幕处理与视频上传同时进行
 - 启动时自动检测 ffmpeg / ffprobe / Node.js 可用性并给出明确提示
 
 ## Quick Start
@@ -111,6 +115,72 @@ python main.py --monitor
 python main.py --monitor --once --dry-run
 ```
 
+## 多账号管理
+
+创建 `config/profiles.json`（参考 `config/profiles.json.example`）配置多个 Bilibili 账号，每个账号绑定独立的 YouTube 频道列表和设置：
+
+```bash
+# 列出所有配置的账号
+python main.py --list-profiles
+
+# 为指定账号执行扫码登录
+python main.py --login --profile snap
+python main.py --login --profile deadlock
+
+# 用指定账号处理视频
+python main.py --profile snap "https://youtube.com/watch?v=xxx"
+
+# 监控指定账号的频道
+python main.py --monitor --profile snap
+
+# 轮询所有配置账号（无间隔等待）
+python main.py --monitor --all-profiles --once
+
+# 持续轮询所有账号
+python main.py --monitor --all-profiles
+```
+
+多账号模式下，每个账号的状态文件独立存储在 `state/<profile_name>/processed_videos.json`。
+
+## 字幕功能
+
+自动下载 YouTube 视频的英文字幕，通过 DeepSeek 批量翻译为中文，上传到 Bilibili 作为软字幕。
+
+字幕处理与视频上传**并行进行**，不会增加总耗时。翻译支持多线程（默认 3 线程，可通过 `SUBTITLE_TRANSLATE_WORKERS` 调整）。
+
+相关配置：
+
+```env
+SUBTITLE_ENABLED=true              # 启用字幕功能
+SUBTITLE_SOURCE_LANGS=en.*,ja,ko   # 优先匹配的字幕语言
+SUBTITLE_TARGET_LANG=zh-CN         # 目标翻译语言
+SUBTITLE_TRANSLATE_BATCH_SIZE=80   # 每次 API 调用翻译条数
+SUBTITLE_TRANSLATE_WORKERS=3       # 并行翻译线程数
+SUBTITLE_UPLOAD_TO_BILIBILI=true   # 翻译后自动上传到 B站
+```
+
+## 内容筛选
+
+可配置关键词过滤或 AI 分类器，筛选只与指定主题相关的视频：
+
+```env
+CONTENT_FILTER_ENABLED=true
+CONTENT_FILTER_KEYWORDS=Marvel SNAP,SNAP,marvelsnap
+```
+
+工作流程：
+1. 先用关键词匹配标题和简介 — 命中即放行
+2. 未命中时调用 DeepSeek AI 分类 — 传入频道名作为上下文辅助判断
+3. 被筛选掉的视频记录为 `skipped_content`，永久跳过
+
+## 凭据状态检查
+
+```bash
+python main.py --check-auth
+```
+
+检查 Bilibili 登录凭据、YouTube OAuth Token、YouTube Cookie 的状态和过期时间，支持多账号。
+
 ## 配置
 
 所有配置通过 `config/.env` 设置，详见 **[配置参考 →](docs/CONFIG.md)**
@@ -177,6 +247,7 @@ https://youtu.be/yyyyy
 - `config/cookies.txt`
 - `config/client_secret.json`
 - `config/youtube_token.json`
+- `config/profiles.json`
 - `config/subscriptions_cache.json`
 - `config/urls.txt`
 - `downloads/`
@@ -187,7 +258,7 @@ https://youtu.be/yyyyy
 如果这些文件已经被 Git 跟踪，请先从索引中移除：
 
 ```bash
-git rm --cached config/.env config/cookies.txt config/client_secret.json config/youtube_token.json config/subscriptions_cache.json
+git rm --cached config/.env config/cookies.txt config/client_secret.json config/youtube_token.json config/profiles.json config/subscriptions_cache.json
 git rm --cached -r downloads runs state .idea
 ```
 
@@ -200,6 +271,7 @@ YouTube URL
   -> Pillow 校验并生成 1920x1080 封面
   -> bilibili-api-python 上传为转载
   -> 写入 runs 结果记录
+  -> [并行] 下载字幕 -> DeepSeek 批量翻译 -> B站软字幕上传
 ```
 
 ## 启动工具检查
@@ -237,6 +309,10 @@ YouTube URL
 **分区投错怎么办？**
 
 检查 `config/.env` 中的 `DEFAULT_TID`。例如 `172` 是游戏-手机游戏，`28` 是音乐-原创音乐。
+
+**RSS 模式下超长视频不会跳过？**
+
+RSS 模式无法提前获取视频时长，但下载器会在获取元数据后检查 `YOUTUBE_SKIP_LONG_VIDEO_MINUTES` 并拦截——设置后 RSS 和 API 模式均生效。
 
 ## License
 
