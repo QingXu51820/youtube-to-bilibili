@@ -681,7 +681,9 @@ def _download_with_progress(url: str, output_template: str, info: dict | None = 
 
         ydl_opts = {
             "format": (
+                f"bestvideo[height<={config.MAX_HEIGHT}][vcodec^=avc1]+bestaudio/"
                 f"bestvideo[height<={config.MAX_HEIGHT}]+bestaudio/"
+                f"best[height<={config.MAX_HEIGHT}][vcodec^=avc1]/"
                 f"best[height<={config.MAX_HEIGHT}]"
             ),
             "merge_output_format": "mp4",
