@@ -112,6 +112,12 @@ from yt2bili.translation.translator import translate
 from yt2bili.bilibili.uploader import upload_video
 from yt2bili.media.video_splitter import split_video
 from yt2bili.bilibili import auth
+from yt2bili.subtitles.downloader import download_subtitles
+from yt2bili.subtitles.parser import parse_subtitle
+from yt2bili.subtitles.translator import translate_cues
+from yt2bili.subtitles.writer import write_srt
+from yt2bili.subtitles.bilibili_format import cues_to_bilibili_json
+from yt2bili.bilibili.subtitle import wait_for_cid, submit_subtitle
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -135,6 +141,12 @@ class ProcessResult:
     thumbnail_path: str = ""
     cover_path: str = ""
     video_resolution: str = ""
+    # Subtitle fields
+    subtitle_source_path: str = ""
+    subtitle_translated_path: str = ""
+    subtitle_status: str = ""       # success | skipped_multi_part | skipped_disabled | cid_timeout | upload_failed | failed | no_source
+    subtitle_error: str = ""
+    subtitle_cid: int = 0
 
 
 def _remove_file(path: str, label: str) -> None:
@@ -279,6 +291,96 @@ def process_video(url: str) -> ProcessResult:
     record.stage = "complete"
     record.bvid = result.bvid
     record.aid = result.aid
+
+    # ── Step 4.5: Subtitle processing ──────────────────────────
+    record.stage = "subtitle"
+    is_multi_part = len(video_files_for_upload) > 1
+
+    if is_multi_part:
+        print(f"\n[字幕] 多分P视频，跳过自动字幕上传")
+        record.subtitle_status = "skipped_multi_part"
+    elif not config.SUBTITLE_ENABLED:
+        print(f"\n[字幕] 字幕功能已禁用")
+        record.subtitle_status = "skipped_disabled"
+    else:
+        try:
+            # 4.5a: Download source subtitles
+            record.stage = "subtitle_download"
+            subtitle_path = download_subtitles(video.original_url, video.video_id)
+            if not subtitle_path:
+                raise RuntimeError("YouTube 上未找到匹配的字幕语言")
+            record.subtitle_source_path = str(subtitle_path)
+            print(f"[字幕] 源字幕: {Path(subtitle_path).name}")
+
+            # 4.5b: Parse SRT cues
+            record.stage = "subtitle_parse"
+            cues = parse_subtitle(subtitle_path)
+            if not cues:
+                raise RuntimeError("字幕文件解析为空")
+            print(f"[字幕] 解析: {len(cues)} 条字幕")
+
+            # 4.5c: Translate via DeepSeek batch
+            record.stage = "subtitle_translate"
+            translated = translate_cues(cues, batch_size=config.SUBTITLE_TRANSLATE_BATCH_SIZE)
+            if not translated:
+                raise RuntimeError("翻译后字幕为空")
+            print(f"[字幕] 翻译完成: {len(translated)} 条字幕")
+
+            # 4.5d: Write translated SRT file
+            record.stage = "subtitle_write"
+            subtitle_dir = Path(config.SUBTITLE_DIR)
+            subtitle_dir.mkdir(parents=True, exist_ok=True)
+            translated_filename = f"{video.video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
+            translated_path = str(subtitle_dir / translated_filename)
+            write_srt(translated, translated_path)
+            record.subtitle_translated_path = translated_path
+            print(f"[字幕] 已保存: {translated_filename}")
+
+            # 4.5e: Upload to Bilibili (if enabled and we have bvid)
+            if config.SUBTITLE_UPLOAD_TO_BILIBILI and record.bvid and record.aid:
+                record.stage = "subtitle_upload"
+                try:
+                    cid = wait_for_cid(
+                        bvid=record.bvid,
+                        aid=record.aid,
+                        timeout=config.SUBTITLE_WAIT_CID_SECONDS,
+                        interval=config.SUBTITLE_WAIT_CID_INTERVAL,
+                    )
+                    record.subtitle_cid = cid
+                    subtitle_json = cues_to_bilibili_json(translated)
+                    submit_subtitle(
+                        aid=record.aid,
+                        cid=cid,
+                        subtitle_json=subtitle_json,
+                        lan="zh",
+                    )
+                    record.subtitle_status = "success"
+                    print(f"[字幕] [OK] 已上传到 B站 (cid={cid})")
+                except TimeoutError as e:
+                    record.subtitle_error = str(e)
+                    record.subtitle_status = "cid_timeout"
+                    print(f"[字幕] [WARN] {e}")
+                except Exception as e:
+                    record.subtitle_error = str(e)
+                    record.subtitle_status = "upload_failed"
+                    print(f"[字幕] [WARN] B站字幕上传失败: {e}")
+            else:
+                record.subtitle_status = (
+                    "success" if not config.SUBTITLE_UPLOAD_TO_BILIBILI
+                    else "skipped_upload_disabled"
+                )
+                print(f"[字幕] 已生成翻译字幕，未上传到 B站")
+
+        except Exception as e:
+            record.subtitle_error = str(e)
+            record.subtitle_status = "failed"
+            if config.SUBTITLE_REQUIRED:
+                record.error = str(e)
+                record.stage = "subtitle"
+                record.success = False
+                print(f"\n[FAIL] 字幕处理失败（必需）: {e}")
+                return record
+            print(f"[字幕] [WARN] {e}（非致命，继续）")
 
     # ── Step 5: Report result ─────────────────────────────────
     print()
