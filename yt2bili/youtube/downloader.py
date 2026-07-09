@@ -480,6 +480,78 @@ def _probe_video_duration(file_path: Path) -> float:
         return 0.0
 
 
+def _convert_webm_to_mp4(webm_path: Path) -> Path:
+    """Convert a WebM video to H.264+AAC MP4 using ffmpeg.
+
+    Returns the path to the converted MP4 file, or the original path
+    if conversion fails (caller should handle the original gracefully).
+    """
+    mp4_path = webm_path.with_suffix(".mp4")
+    print(f"[下载] 转换 WebM → MP4 (H.264/AAC)...")
+    file_size_mb = webm_path.stat().st_size / 1024 / 1024
+    print(f"[下载] 源文件: {file_size_mb:.1f} MB，可能需要几分钟...")
+
+    command = [
+        "ffmpeg",
+        "-y",                       # overwrite output
+        "-i", str(webm_path),
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
+        "-progress", "pipe:1",       # machine-readable progress
+        "-nostats",
+        str(mp4_path),
+    ]
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        # Show progress from ffmpeg's machine-readable output
+        duration_sec = 0.0
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time_ms="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    sec = us / 1_000_000
+                    pct = min(100, int(sec / max(duration_sec, 1) * 100)) if duration_sec > 0 else 0
+                    bar = "█" * (pct // 5) + "░" * (20 - pct // 5)
+                    print(f"\r  [{bar}] {pct:3d}%", end="", flush=True)
+                except (ValueError, IndexError):
+                    pass
+            elif line.startswith("out_time="):
+                try:
+                    parts = line.split("=", 1)[1].strip().split(":")
+                    if len(parts) == 3:
+                        duration_sec = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                except (ValueError, IndexError):
+                    pass
+        proc.wait(timeout=7200)  # 2h max
+        print()  # newline after progress bar
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, command)
+
+        if mp4_path.exists() and mp4_path.stat().st_size > 0:
+            new_size_mb = mp4_path.stat().st_size / 1024 / 1024
+            print(f"[下载] 转换完成: {mp4_path.name} ({new_size_mb:.1f} MB)")
+            # Remove original WebM
+            webm_path.unlink(missing_ok=True)
+            return mp4_path
+        else:
+            raise RuntimeError("ffmpeg 完成但未生成 MP4 文件")
+    except Exception as e:
+        print(f"\n[下载] ⚠️ WebM→MP4 转换失败: {e}，将尝试直接上传原始文件")
+        return webm_path
+
+
 def _download_thumbnail(video_id: str, download_dir: Path) -> str:
     """
     Download YouTube thumbnail for a video.
@@ -850,6 +922,10 @@ def download_video(url: str) -> VideoInfo:
     # Sanity check
     if not file_path or not file_path.exists():
         raise RuntimeError(f"下载完成但找不到视频文件: {actual_path}")
+
+    # Convert WebM to MP4 (Bilibili rejects VP9/WebM with HTTP 406)
+    if file_path.suffix.lower() == ".webm":
+        file_path = _convert_webm_to_mp4(file_path)
 
     # Find thumbnail (same stem as video file, different extension)
     thumbnail_path = ""
