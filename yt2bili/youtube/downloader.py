@@ -642,17 +642,23 @@ def _download_with_progress(url: str, output_template: str, info: dict | None = 
         """Run one yt-dlp download attempt with cookie fallback."""
         def _download_operation(ydl):
             if info:
-                # Filter formats to respect MAX_HEIGHT before passing to process_info
+                # Filter formats to respect MAX_HEIGHT and prefer H.264
                 filtered = deepcopy(info)
                 formats = filtered.get("formats") or []
                 if formats:
+                    # Prefer H.264 (avc1) ≤ MAX_HEIGHT (MP4-compatible, Bilibili-ready)
                     kept = [f for f in formats
                             if f.get("vcodec") != "none"
-                            and int(f.get("height") or 0) <= config.MAX_HEIGHT]
+                            and int(f.get("height") or 0) <= config.MAX_HEIGHT
+                            and (f.get("vcodec") or "").startswith("avc1")]
+                    if not kept:
+                        # Fall back: any codec ≤ MAX_HEIGHT
+                        kept = [f for f in formats
+                                if f.get("vcodec") != "none"
+                                and int(f.get("height") or 0) <= config.MAX_HEIGHT]
                     if kept:
                         filtered["formats"] = kept
                     else:
-                        # No formats under height limit — fall back to original list
                         print(f"[下载] ⚠️ 无 ≤{config.MAX_HEIGHT}p 格式可用，使用全部格式")
                 print("[下载] 复用已解析的视频格式，准备请求媒体流...")
                 return ydl.process_info(filtered)
