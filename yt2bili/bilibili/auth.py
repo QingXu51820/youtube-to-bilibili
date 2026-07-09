@@ -6,31 +6,72 @@ with the B站 app, then saves credentials to .env automatically.
 
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from yt2bili import config
 
 
-def get_credential():
-    """Returns a bilibili_api Credential, triggering QR login if needed."""
+def get_credential(profile_name: str = "default"):
+    """
+    Returns a bilibili_api Credential, triggering QR login if needed.
+
+    When *profile_name* is anything other than ``"default"``, or when
+    ``config/profiles.json`` exists, credentials are read from / written to
+    the profile system.  Otherwise the legacy ``.env`` flow is used.
+
+    If *profile_name* is ``"default"`` and a different profile has been
+    activated (e.g. by ``--all-profiles`` monitor), the active profile's
+    credentials are returned automatically.
+    """
     from bilibili_api import Credential
     from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents, QrCodeLoginChannel
 
-    # Check if credentials are already configured
-    issues = config.validate()
-    missing_bili = any("BILI_SESSDATA" in i or "BILI_BILI_JCT" in i for i in issues)
+    # ── Lazy import to avoid circular dependency ──────────────
+    from yt2bili.profile import (
+        is_multi_profile,
+        resolve_profile,
+        profile_exists,
+        save_profile,
+        get_active_profile_name,
+    )
 
-    if not missing_bili:
-        # Use existing credentials from .env
-        return Credential(
-            sessdata=config.BILI_SESSDATA,
-            bili_jct=config.BILI_BILI_JCT,
-            buvid3=config.BILI_BUVID3 or None,
-        )
+    # Respect the active profile when no explicit profile is requested
+    if profile_name == "default":
+        active = get_active_profile_name()
+        if active != "default":
+            profile_name = active
+
+    # Decide whether to use the new profile system
+    use_profile = is_multi_profile() or profile_name != "default"
+
+    if not use_profile:
+        # ── Legacy path: .env ────────────────────────────────
+        issues = config.validate()
+        missing_bili = any("BILI_SESSDATA" in i or "BILI_BILI_JCT" in i for i in issues)
+
+        if not missing_bili:
+            return Credential(
+                sessdata=config.BILI_SESSDATA,
+                bili_jct=config.BILI_BILI_JCT,
+                buvid3=config.BILI_BUVID3 or None,
+            )
+    else:
+        # ── Profile path ─────────────────────────────────────
+        profile = resolve_profile(profile_name)
+        if profile and profile.bilibili.sessdata and profile.bilibili.bili_jct:
+            return Credential(
+                sessdata=profile.bilibili.sessdata,
+                bili_jct=profile.bilibili.bili_jct,
+                buvid3=profile.bilibili.buvid3 or None,
+            )
 
     # ── First-time setup: QR code login ───────────────────────
     print()
     print("=" * 60)
-    print("  首次使用 — B站 扫码登录")
+    if use_profile:
+        print(f"  B站 扫码登录 — 账号: {profile_name}")
+    else:
+        print("  首次使用 — B站 扫码登录")
     print("=" * 60)
     print()
     print("  请使用 Bilibili 手机客户端扫描下方二维码：")
@@ -40,11 +81,14 @@ def get_credential():
     import asyncio
     credential = asyncio.run(_qr_login_flow())
 
-    # Save to .env
-    _save_credential_to_env(credential)
+    # Save
+    _save_credential(credential, profile_name)
 
     print()
-    print("✅ 登录成功！凭据已自动保存到 .env 文件。")
+    if use_profile:
+        print(f"✅ 登录成功！凭据已保存到账号 '{profile_name}'。")
+    else:
+        print("✅ 登录成功！凭据已自动保存到 .env 文件。")
     print("   下次运行将跳过扫码，直接使用已保存的凭据。")
     print()
 
@@ -167,7 +211,6 @@ def _save_credential_to_env(credential) -> None:
             elif key == "BILI_BUVID3":
                 new_lines.append(f"BILI_BUVID3={credential.buvid3 or ''}")
             elif key == "BILI_LOGIN_TIME":
-                from datetime import datetime, timezone
                 new_lines.append(f"BILI_LOGIN_TIME={datetime.now(timezone.utc).isoformat()}")
         else:
             new_lines.append(line)
@@ -180,7 +223,6 @@ def _save_credential_to_env(credential) -> None:
     if "BILI_BUVID3" not in seen_keys and credential.buvid3:
         new_lines.append(f"BILI_BUVID3={credential.buvid3}")
     if "BILI_LOGIN_TIME" not in seen_keys:
-        from datetime import datetime, timezone
         new_lines.append(f"BILI_LOGIN_TIME={datetime.now(timezone.utc).isoformat()}")
 
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
@@ -195,18 +237,54 @@ def _save_credential_to_env(credential) -> None:
     config.BILI_BUVID3 = os.getenv("BILI_BUVID3", "")
 
 
-def login_interactive() -> bool:
+def _save_credential(credential, profile_name: str = "default") -> None:
+    """
+    Save credential to profiles.json (multi-account) or .env (legacy).
+
+    When *profile_name* is not ``"default"``, or profiles.json already exists,
+    the credential is written into the profile system.  Otherwise the legacy
+    ``.env`` path is used.
+    """
+    from yt2bili.profile import (
+        is_multi_profile,
+        resolve_profile,
+        save_profile,
+    )
+
+    if is_multi_profile() or profile_name not in ("", "default"):
+        # ── Profile path ─────────────────────────────────────
+        profile = resolve_profile(profile_name)
+        if profile is None:
+            # Create a new profile on the fly
+            from yt2bili.profile import Profile
+            profile = Profile(name=profile_name)
+        profile.bilibili.sessdata = credential.sessdata
+        profile.bilibili.bili_jct = credential.bili_jct
+        profile.bilibili.buvid3 = credential.buvid3 or ""
+        profile.bilibili.login_time = datetime.now(timezone.utc).isoformat()
+        save_profile(profile)
+    else:
+        # ── Legacy path ──────────────────────────────────────
+        _save_credential_to_env(credential)
+
+
+def login_interactive(profile_name: str = "default") -> bool:
     """
     Explicit login command — force re-login even if credentials exist.
+
+    Pass *profile_name* to log into a specific profile.
     Returns True if login was successful.
     """
     print()
     print("=" * 60)
-    print("  B站 重新登录")
+    if profile_name and profile_name != "default":
+        print(f"  B站 重新登录 — 账号: {profile_name}")
+    else:
+        print("  B站 重新登录")
     print("=" * 60)
 
     try:
-        credential = get_credential()
+        credential = get_credential(profile_name=profile_name)
         return credential is not None
     except KeyboardInterrupt:
         print("\n\n  ⚠️ 用户取消登录")
