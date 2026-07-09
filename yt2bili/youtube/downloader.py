@@ -784,6 +784,7 @@ def download_video(url: str) -> VideoInfo:
     title = info.get("title", "").strip()
     description = info.get("description", "").strip()
     video_id = info.get("id", "")
+    channel_title = info.get("channel") or info.get("uploader", "") or ""
 
     if not video_id:
         raise RuntimeError("无法获取视频 ID")
@@ -795,7 +796,7 @@ def download_video(url: str) -> VideoInfo:
     if config.CONTENT_FILTER_ENABLED:
         from yt2bili.translation.translator import classify_content
         print(f"[筛选] 检查内容相关性（关键词: {config.CONTENT_FILTER_KEYWORDS}）...")
-        if not classify_content(title, description, config.CONTENT_FILTER_KEYWORDS):
+        if not classify_content(title, description, config.CONTENT_FILTER_KEYWORDS, channel_title=channel_title):
             raise RuntimeError(
                 f"内容筛选已跳过（与 {config.CONTENT_FILTER_KEYWORDS} 无关）: {title}"
             )
@@ -817,6 +818,16 @@ def download_video(url: str) -> VideoInfo:
         if best_h > 0 and best_w > 0 and best_h > best_w:
             raise RuntimeError(
                 f"检测到竖屏视频 {best_w}x{best_h}，已跳过"
+            )
+
+    # Reject videos longer than YOUTUBE_SKIP_LONG_VIDEO_MINUTES before downloading
+    skip_long_minutes = config.YOUTUBE_SKIP_LONG_VIDEO_MINUTES
+    if skip_long_minutes > 0:
+        duration_seconds = info.get("duration") or 0
+        if duration_seconds >= skip_long_minutes * 60:
+            hours = duration_seconds / 3600
+            raise RuntimeError(
+                f"视频超过最大时长限制（{hours:.1f}h ≥ {skip_long_minutes} 分钟），已跳过"
             )
 
     available_resolution = _best_available_resolution(info)

@@ -208,20 +208,40 @@ def translate_cues(
     if bs < 1:
         bs = 80
 
+    workers = max(1, int(getattr(config, "SUBTITLE_TRANSLATE_WORKERS", 3) or 3))
+
     # Split into batches
     batches: list[list[Cue]] = []
     for i in range(0, len(cues), bs):
         batches.append(cues[i:i + bs])
 
     total = len(batches)
-    print(f"[字幕] 共 {len(cues)} 条字幕，分 {total} 批翻译")
+    print(f"[字幕] 共 {len(cues)} 条字幕，分 {total} 批翻译 ({workers} 线程并行)")
 
-    client = _build_client()
     translated: list[Cue] = []
 
-    for i, batch in enumerate(batches, start=1):
-        result = _translate_batch(client, batch, i, total)
-        translated.extend(result)
+    if total <= 1 or workers <= 1:
+        # Single batch or single worker — sequential
+        client = _build_client()
+        for i, batch in enumerate(batches, start=1):
+            result = _translate_batch(client, batch, i, total)
+            translated.extend(result)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _do_batch(batch: list[Cue], num: int) -> list[Cue]:
+            """Each thread gets its own client (not safe to share across threads)."""
+            client = _build_client()
+            return _translate_batch(client, batch, num, total)
+
+        with ThreadPoolExecutor(max_workers=min(workers, total)) as executor:
+            futures = {
+                executor.submit(_do_batch, batch, i): i
+                for i, batch in enumerate(batches, start=1)
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                translated.extend(result)
 
     # Sort by original index to ensure correct ordering
     translated.sort(key=lambda c: c.index)

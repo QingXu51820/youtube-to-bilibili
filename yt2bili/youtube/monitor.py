@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 from yt2bili import config
 from yt2bili.youtube.subscriptions import (
+    Subscription,
     VideoItem,
     YouTubeNetworkError,
     chunked,
@@ -49,6 +50,10 @@ VERTICAL_SKIP_MARKERS = (
 )
 CONTENT_SKIP_MARKERS = (
     "内容筛选已跳过",
+)
+LONG_SKIP_MARKERS = (
+    "视频超过最大时长限制",
+    "超长视频",
 )
 # ── Per-video retry ────────────────────────────────────────────────
 _VIDEO_RETRY_MAX = max(0, int(getattr(config, "YOUTUBE_VIDEO_RETRY_MAX", None) or 2))
@@ -168,11 +173,12 @@ def fetch_video_queue_details(
 def queue_defer_reason(detail: dict[str, Any], threshold_minutes: int) -> str:
     if not detail:
         return ""
+    if threshold_minutes <= 0:
+        return ""  # defer feature is disabled
     if detail.get("is_live_archive"):
         return "直播回放"
     duration_seconds = int(detail.get("duration_seconds") or 0)
-    threshold_seconds = max(1, threshold_minutes) * 60
-    if duration_seconds >= threshold_seconds:
+    if duration_seconds >= threshold_minutes * 60:
         return f"超长视频≥{threshold_minutes}分钟"
     return ""
 
@@ -291,6 +297,102 @@ def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
     return seeded
 
 
+# ── Persistent upload log (never cleaned, durable dedup fallback) ──────
+
+def _upload_log_path() -> Path:
+    """Return path to the persistent upload log (global, not per-profile)."""
+    return project_path("state") / "upload_log.json"
+
+
+def _load_upload_log() -> list[dict[str, Any]]:
+    """Read the persistent upload log. Returns a list of entries."""
+    path = _upload_log_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(data, list):
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return []
+
+
+def _save_upload_log(log_entries: list[dict[str, Any]]) -> None:
+    """Atomically write the persistent upload log."""
+    path = _upload_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(log_entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def append_upload_log_entry(video: VideoItem, result: Any) -> None:
+    """Record a successful upload to the persistent upload log."""
+    log_entries = _load_upload_log()
+    video_id = video.video_id
+    existing_idx = None
+    for i, entry in enumerate(log_entries):
+        if entry.get("video_id") == video_id:
+            existing_idx = i
+            break
+
+    entry = {
+        "video_id": video_id,
+        "url": video.url,
+        "title": video.title,
+        "channel_title": video.channel_title,
+        "bvid": getattr(result, "bvid", ""),
+        "aid": getattr(result, "aid", 0),
+        "translated_title": getattr(result, "translated_title", ""),
+        "uploaded_at": utc_now(),
+    }
+
+    if existing_idx is not None:
+        log_entries[existing_idx] = entry
+    else:
+        log_entries.append(entry)
+
+    _save_upload_log(log_entries)
+
+
+def seed_state_from_upload_log(state: dict[str, Any]) -> int:
+    """Import successful uploads from the persistent upload log as dedup fallback."""
+    log_entries = _load_upload_log()
+    if not log_entries:
+        return 0
+
+    seeded = 0
+    videos = state["videos"]
+    for entry in log_entries:
+        video_id = entry.get("video_id", "")
+        if not video_id:
+            continue
+        existing = videos.get(video_id, {})
+        if existing.get("status") == STATUS_UPLOADED:
+            continue
+        videos[video_id] = {
+            "video_id": video_id,
+            "url": entry.get("url", ""),
+            "title": entry.get("title", ""),
+            "channel_title": entry.get("channel_title", ""),
+            "published_at": "",
+            "status": STATUS_UPLOADED,
+            "stage": "complete",
+            "bvid": entry.get("bvid", ""),
+            "aid": entry.get("aid", 0),
+            "translated_title": entry.get("translated_title", ""),
+            "attempt_count": 1,
+            "first_seen_at": entry.get("uploaded_at", utc_now()),
+            "last_attempt_at": entry.get("uploaded_at", utc_now()),
+            "last_success_at": entry.get("uploaded_at", utc_now()),
+            "error": "",
+            "source": "upload_log",
+        }
+        seeded += 1
+    return seeded
+
+
 def fetch_subscription_videos(
     *,
     source: str,
@@ -300,21 +402,40 @@ def fetch_subscription_videos(
     token_file: Path,
     cache_file: Path,
     channels_file: Path | None = None,
+    channels: list[Subscription] | None = None,
 ) -> list[VideoItem]:
+    """
+    Fetch recent videos from YouTube subscriptions or an explicit channel list.
+
+    When *channels* is provided it takes priority — no subscription list fetch
+    or cache read is performed.  This is used by profile-based monitor mode.
+    """
     source = source.lower()
-    if source == "api":
+
+    # ── Resolve subscription list ─────────────────────────────
+    youtube = None
+    if channels is not None:
+        # Explicit channel list (from profile or --channels-file)
+        subscriptions = channels
+    elif source == "api":
         youtube = get_youtube_service(client_secret_file, token_file)
         subscriptions = fetch_subscriptions_api(youtube)
         save_subscriptions_cache(cache_file, subscriptions)
-        videos = fetch_recent_videos_api(youtube, subscriptions, max_videos_per_channel)
     elif source == "rss":
         if channels_file:
             subscriptions = load_channels_file(channels_file)
         else:
             subscriptions = load_subscriptions_cache(cache_file)
-        videos = fetch_recent_videos_rss(subscriptions, max_videos_per_channel)
     else:
         raise SystemExit("YOUTUBE_MONITOR_SOURCE / --monitor-source must be api or rss")
+
+    # ── Fetch videos ──────────────────────────────────────────
+    if source == "api":
+        if youtube is None:
+            youtube = get_youtube_service(client_secret_file, token_file)
+        videos = fetch_recent_videos_api(youtube, subscriptions, max_videos_per_channel)
+    else:
+        videos = fetch_recent_videos_rss(subscriptions, max_videos_per_channel)
 
     return sort_videos(videos)[:limit]
 
@@ -338,6 +459,13 @@ def is_content_skip_result(result: Any) -> bool:
         return False
     error = str(getattr(result, "error", "")).lower()
     return any(marker.lower() in error for marker in CONTENT_SKIP_MARKERS)
+
+
+def is_long_skip_result(result: Any) -> bool:
+    if getattr(result, "stage", "") != "download":
+        return False
+    error = str(getattr(result, "error", "")).lower()
+    return any(marker.lower() in error for marker in LONG_SKIP_MARKERS)
 
 
 def should_skip_video(state: dict[str, Any], video: VideoItem) -> tuple[bool, str]:
@@ -408,6 +536,8 @@ def record_failure(state: dict[str, Any], video: VideoItem, result: Any) -> None
         status = STATUS_SKIPPED_VERTICAL
     elif is_content_skip_result(result):
         status = STATUS_SKIPPED_CONTENT
+    elif is_long_skip_result(result):
+        status = STATUS_SKIPPED_LONG
     else:
         status = STATUS_FAILED
     entry = _base_entry(state, video, status)
@@ -436,12 +566,16 @@ def run_monitor_cycle(
     token_file: Path,
     cache_file: Path,
     channels_file: Path | None = None,
+    channels: list[Subscription] | None = None,
     dry_run: bool = False,
 ) -> list[Any]:
     state = load_state(state_path)
     seeded = seed_state_from_runs(state, project_path(config.RUNS_DIR))
     if seeded:
         print(f"[订阅] 已从 runs 导入 {seeded} 条历史成功记录")
+    seeded_log = seed_state_from_upload_log(state)
+    if seeded_log:
+        print(f"[订阅] 已从 upload_log 导入 {seeded_log} 条历史成功记录")
 
     videos = fetch_subscription_videos(
         source=source,
@@ -451,6 +585,7 @@ def run_monitor_cycle(
         token_file=token_file,
         cache_file=cache_file,
         channels_file=channels_file,
+        channels=channels,
     )
 
     candidates: list[VideoItem] = []
@@ -476,8 +611,8 @@ def run_monitor_cycle(
         skip_minutes = max(0, int(getattr(config, "YOUTUBE_SKIP_LONG_VIDEO_MINUTES", 0) or 0))
         if defer_minutes > 0 or skip_minutes > 0:
             print(
-                "[订阅] ⚠️ RSS 模式无法获取视频时长，"
-                "YOUTUBE_DEFER_LONG_VIDEO_MINUTES / YOUTUBE_SKIP_LONG_VIDEO_MINUTES 不生效"
+                "[订阅] ⚠️ RSS 模式无法提前获取视频时长，"
+                "YOUTUBE_DEFER_LONG_VIDEO_MINUTES 不生效（超长视频将在下载前由下载器检查 YOUTUBE_SKIP_LONG_VIDEO_MINUTES）"
             )
 
     if source == "api" and candidates:
@@ -576,8 +711,8 @@ def run_monitor_cycle(
             if stage not in _RETRYABLE_STAGES:
                 break
 
-            # Permanent skips (vertical/live/content) — don't retry
-            if is_live_skip_result(result) or is_vertical_skip_result(result) or is_content_skip_result(result):
+            # Permanent skips (vertical/live/content/long) — don't retry
+            if is_live_skip_result(result) or is_vertical_skip_result(result) or is_content_skip_result(result) or is_long_skip_result(result):
                 break
 
             # Auth errors (401/403) won't self-resolve — don't retry
@@ -604,6 +739,10 @@ def run_monitor_cycle(
         results.append(result)
         if getattr(result, "success", False):
             record_success(state, video, result)
+            try:
+                append_upload_log_entry(video, result)
+            except Exception as exc:
+                print(f"[订阅] ⚠️ 写入 upload_log 失败（非致命）: {exc}")
         else:
             record_failure(state, video, result)
         save_state(state_path, state)
@@ -625,14 +764,75 @@ def run_monitor_loop(
     interval_seconds: int,
     once: bool,
     dry_run: bool,
+    profiles: list[Any] | None = None,  # list of yt2bili.profile.Profile (lazy import)
     **cycle_kwargs: Any,
 ) -> int:
+    """
+    Run the subscription monitor loop.
+
+    When *profiles* is a non-empty list, each interval cycles to the next
+    profile in round-robin order.  Each profile's channels and credentials
+    are activated before its cycle runs.
+    """
     if interval_seconds <= 0:
         raise SystemExit("--monitor-interval must be positive")
 
     monitor_max_retries = max(0, int(getattr(config, "YOUTUBE_MONITOR_MAX_RETRIES", 5)))
     monitor_retry_base = max(10.0, float(getattr(config, "YOUTUBE_MONITOR_RETRY_DELAY", 30)))
 
+    # ── Multi-profile mode ────────────────────────────────────
+    if profiles:
+        from yt2bili import profile as profile_mod
+
+        while True:
+            for profile in profiles:
+                profile_mod.set_active_profile(profile.name)
+                config.apply_profile_overrides(profile.name)
+
+                print("=" * 60)
+                print(f"[多账号] 账号: {profile.name} — {beijing_now()}")
+                print("=" * 60)
+
+                profile_channels = [
+                    Subscription(c.channel_id, c.channel_title)
+                    for c in profile.youtube.channels
+                ]
+
+                profile_state = profile_mod.get_state_file_path(profile)
+                profile_cache = profile_mod.get_cache_file_path(profile)
+                profile_source = profile.youtube.monitor_source or cycle_kwargs.get("source", "rss")
+
+                # Ensure state directory exists
+                profile_state.parent.mkdir(parents=True, exist_ok=True)
+
+                try:
+                    run_monitor_cycle(
+                        process_video=process_video,
+                        write_run_report=write_run_report,
+                        state_path=profile_state,
+                        source=profile_source,
+                        channels=profile_channels,
+                        dry_run=dry_run,
+                        **{k: v for k, v in cycle_kwargs.items()
+                           if k not in ("state_path", "source", "channels", "cache_file")},
+                        cache_file=profile_cache,
+                    )
+                except YouTubeNetworkError as exc:
+                    print(f"\n[订阅] ⚠️ 网络错误 ({profile.name}): {exc}")
+                    # For multi-profile, don't let one profile's error stop others
+                    continue
+
+            if once:
+                return 0
+
+            print(f"\n[多账号] 已处理全部 {len(profiles)} 个账号，等待 {interval_seconds} 秒后进行下一轮，按 Ctrl+C 停止。")
+            try:
+                time.sleep(interval_seconds)
+            except KeyboardInterrupt:
+                print("\n[订阅] 已停止轮询。")
+                return 0
+
+    # ── Single-profile / legacy mode ──────────────────────────
     consecutive_failures = 0
     while True:
         print("=" * 60)

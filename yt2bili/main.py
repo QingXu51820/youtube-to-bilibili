@@ -97,6 +97,7 @@ import argparse
 import sys
 import os
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -105,6 +106,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from yt2bili import config
+from yt2bili import profile as profile_mod
 from yt2bili.config import validate
 from yt2bili.media.cover import image_size, prepare_cover
 from yt2bili.youtube.downloader import download_video
@@ -182,9 +184,14 @@ def _cleanup_after_success(video, cover_path: str, extra_video_paths: list[str] 
         _remove_file(cover_path, "封面")
 
 
-def process_video(url: str) -> ProcessResult:
+def process_video(url: str, credential=None) -> ProcessResult:
     """
     Process a single YouTube URL through the full pipeline.
+
+    Args:
+        url: YouTube video URL.
+        credential: Optional pre-built bilibili_api Credential.
+                    When omitted the active profile is used.
 
     Returns:
         ProcessResult with success/failure details
@@ -259,8 +266,42 @@ def process_video(url: str) -> ProcessResult:
 
     record.cover_path = cover_path
 
-    # ── Step 4: Upload to Bilibili ────────────────────────────
+    # ── Step 4: Upload to Bilibili (parallel with subtitle download+translate) ──
     record.stage = "upload"
+    is_multi_part = len(video_files_for_upload) > 1
+
+    # Launch subtitle processing in background BEFORE starting the upload
+    subtitle_future = None
+    should_process_subtitles = (
+        not is_multi_part and config.SUBTITLE_ENABLED
+    )
+    if should_process_subtitles:
+        def _process_subtitles_background() -> dict | None:
+            """Background: download, parse, translate, write SRT while video uploads."""
+            sp = download_subtitles(video.original_url, video.video_id)
+            if not sp:
+                return None
+            cues_bg = parse_subtitle(sp)
+            if not cues_bg:
+                return None
+            translated_bg = translate_cues(cues_bg, batch_size=config.SUBTITLE_TRANSLATE_BATCH_SIZE)
+            if not translated_bg:
+                return None
+            subtitle_dir_bg = Path(config.SUBTITLE_DIR)
+            subtitle_dir_bg.mkdir(parents=True, exist_ok=True)
+            translated_filename_bg = f"{video.video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
+            translated_path_bg = str(subtitle_dir_bg / translated_filename_bg)
+            write_srt(translated_bg, translated_path_bg)
+            return {
+                "subtitle_path": sp,
+                "cues": cues_bg,
+                "translated": translated_bg,
+                "translated_path": translated_path_bg,
+            }
+
+        subtitle_executor = ThreadPoolExecutor(max_workers=1)
+        subtitle_future = subtitle_executor.submit(_process_subtitles_background)
+
     print()
     try:
         result = upload_video(
@@ -270,6 +311,7 @@ def process_video(url: str) -> ProcessResult:
             original_description=video.description,
             original_title=video.title,
             cover_path=cover_path,
+            credential=credential,
         )
         if not result.success:
             raise RuntimeError(result.message)
@@ -292,9 +334,8 @@ def process_video(url: str) -> ProcessResult:
     record.bvid = result.bvid
     record.aid = result.aid
 
-    # ── Step 4.5: Subtitle processing ──────────────────────────
+    # ── Step 4.5: Subtitle processing (join background + upload) ──
     record.stage = "subtitle"
-    is_multi_part = len(video_files_for_upload) > 1
 
     if is_multi_part:
         print(f"\n[字幕] 多分P视频，跳过自动字幕上传")
@@ -304,39 +345,26 @@ def process_video(url: str) -> ProcessResult:
         record.subtitle_status = "skipped_disabled"
     else:
         try:
-            # 4.5a: Download source subtitles
-            record.stage = "subtitle_download"
-            subtitle_path = download_subtitles(video.original_url, video.video_id)
-            if not subtitle_path:
+            # Join background thread (may already be done if upload was slow)
+            subtitle_data: dict | None = None
+            if subtitle_future:
+                subtitle_data = subtitle_future.result()
+                subtitle_executor.shutdown(wait=False)
+
+            if not subtitle_data:
                 raise RuntimeError("YouTube 上未找到匹配的字幕语言")
-            record.subtitle_source_path = str(subtitle_path)
-            print(f"[字幕] 源字幕: {Path(subtitle_path).name}")
 
-            # 4.5b: Parse SRT cues
-            record.stage = "subtitle_parse"
-            cues = parse_subtitle(subtitle_path)
-            if not cues:
-                raise RuntimeError("字幕文件解析为空")
+            record.subtitle_source_path = str(subtitle_data["subtitle_path"])
+            cues = subtitle_data["cues"]
+            translated = subtitle_data["translated"]
+            record.subtitle_translated_path = subtitle_data["translated_path"]
+
+            print(f"[字幕] 源字幕: {Path(subtitle_data['subtitle_path']).name}")
             print(f"[字幕] 解析: {len(cues)} 条字幕")
-
-            # 4.5c: Translate via DeepSeek batch
-            record.stage = "subtitle_translate"
-            translated = translate_cues(cues, batch_size=config.SUBTITLE_TRANSLATE_BATCH_SIZE)
-            if not translated:
-                raise RuntimeError("翻译后字幕为空")
             print(f"[字幕] 翻译完成: {len(translated)} 条字幕")
+            print(f"[字幕] 已保存: {Path(subtitle_data['translated_path']).name}")
 
-            # 4.5d: Write translated SRT file
-            record.stage = "subtitle_write"
-            subtitle_dir = Path(config.SUBTITLE_DIR)
-            subtitle_dir.mkdir(parents=True, exist_ok=True)
-            translated_filename = f"{video.video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
-            translated_path = str(subtitle_dir / translated_filename)
-            write_srt(translated, translated_path)
-            record.subtitle_translated_path = translated_path
-            print(f"[字幕] 已保存: {translated_filename}")
-
-            # 4.5e: Upload to Bilibili (if enabled and we have bvid)
+            # Upload to Bilibili (if enabled and we have bvid)
             if config.SUBTITLE_UPLOAD_TO_BILIBILI and record.bvid and record.aid:
                 record.stage = "subtitle_upload"
                 try:
@@ -402,10 +430,12 @@ def process_video(url: str) -> ProcessResult:
     return record
 
 
-def _cleanup_old_runs(runs_dir: Path, *, keep_days: int = 3) -> int:
+def _cleanup_old_runs(runs_dir: Path, *, keep_days: int | None = None) -> int:
     """Delete run reports older than `keep_days`. Returns count of deleted files."""
     if not runs_dir.exists():
         return 0
+    if keep_days is None:
+        keep_days = config.RUNS_RETENTION_DAYS
     cutoff = datetime.now() - timedelta(days=keep_days)
     deleted = 0
     for f in runs_dir.glob("*.json"):
@@ -448,6 +478,25 @@ def _write_run_report(results: list[ProcessResult]) -> Path:
 
 def _ensure_credentials():
     """Check B站 credentials, trigger QR login if missing. Returns True if OK."""
+    profile_name = profile_mod.get_active_profile_name()
+
+    if profile_name != "default" or profile_mod.is_multi_profile():
+        # ── Profile-aware check ────────────────────────────────
+        prof = profile_mod.resolve_profile(profile_name)
+        if prof is None:
+            print(f"❌ 账号 '{profile_name}' 不存在。")
+            sys.exit(1)
+        if not prof.bilibili.sessdata or not prof.bilibili.bili_jct:
+            print(f"⚠️  账号 '{profile_name}' 未检测到 B站 登录凭据，需要先扫码登录。")
+            try:
+                auth.get_credential(profile_name=profile_name)
+            except KeyboardInterrupt:
+                print("\n用户取消登录，退出。")
+                sys.exit(1)
+            print("✅ 登录成功！\n")
+        return
+
+    # ── Legacy .env path ───────────────────────────────────────
     all_issues = validate()
     cred_issues = [i for i in all_issues if "SESSDATA" in i.upper() or "BILI_JCT" in i.upper()]
     other_issues = [i for i in all_issues if i not in cred_issues]
@@ -475,11 +524,72 @@ def _ensure_credentials():
 
 def _login_interactive() -> None:
     """Refresh B站 credentials through the QR login flow."""
-    from yt2bili import config as cfg
-    cfg.BILI_SESSDATA = ""
-    cfg.BILI_BILI_JCT = ""
-    auth.login_interactive()
+    profile_name = profile_mod.get_active_profile_name()
+
+    if profile_name != "default" or profile_mod.is_multi_profile():
+        auth.login_interactive(profile_name=profile_name)
+    else:
+        from yt2bili import config as cfg
+        cfg.BILI_SESSDATA = ""
+        cfg.BILI_BILI_JCT = ""
+        auth.login_interactive()
     print("\n凭据已更新。下次运行将使用新的凭据。\n")
+
+
+def _list_profiles() -> None:
+    """Print all configured profiles and exit."""
+    if not profile_mod.is_multi_profile():
+        print("📋 未检测到多账号配置（config/profiles.json 不存在）。")
+        print("   当前使用默认账号（.env 中的 BILI_* 凭据）。")
+        print()
+        print("   创建多账号配置: 复制 config/profiles.json.example → config/profiles.json")
+        return
+
+    profiles = profile_mod.load_profiles()
+    if not profiles:
+        print("📋 没有配置任何账号。")
+        return
+
+    print(f"📋 共 {len(profiles)} 个账号配置:\n")
+    for name, p in profiles.items():
+        channel_count = len(p.youtube.channels)
+        has_creds = bool(p.bilibili.sessdata and p.bilibili.bili_jct)
+        status = "✅ 已登录" if has_creds else "⚠️  未登录"
+        tags = p.settings.default_tags or config.DEFAULT_TAGS
+        tid = p.settings.default_tid or config.DEFAULT_TID
+        print(f"  [{name}]  {status}")
+        print(f"         分区: {tid}, 标签: {tags}")
+        print(f"         YouTube 频道: {channel_count} 个")
+        if p.youtube.channels:
+            for c in p.youtube.channels:
+                print(f"           - {c.channel_title} ({c.channel_id})")
+        if p.youtube.monitor_source:
+            print(f"         源: {p.youtube.monitor_source}")
+        print()
+    print("用法: python main.py --profile <账号名> [其他参数]")
+
+
+def setup_profile(args) -> None:
+    """Initialize the profile system from CLI args. Call once at startup."""
+    if args.list_profiles:
+        _list_profiles()
+        sys.exit(0)
+
+    if args.profile:
+        profile = profile_mod.resolve_profile(args.profile)
+        if profile is None:
+            print(f"❌ 账号 '{args.profile}' 不存在。")
+            print(f"   可用账号: {', '.join(profile_mod.load_profiles().keys()) or '(无)'}")
+            print(f"   使用 --list-profiles 查看所有账号。")
+            sys.exit(1)
+        profile_mod.set_active_profile(args.profile)
+        config.apply_profile_overrides(args.profile)
+    elif profile_mod.is_multi_profile():
+        # profiles.json exists but no --profile flag: use "default" if present
+        if profile_mod.profile_exists("default"):
+            profile_mod.set_active_profile("default")
+            config.apply_profile_overrides("default")
+        # Otherwise stay in legacy .env mode
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -527,6 +637,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-speed-protection",
         action="store_true",
         help="禁用下载低速保护（不限制最低下载速度）",
+    )
+    parser.add_argument(
+        "--profile", default="",
+        help="选择 B站 账号配置（config/profiles.json 中定义的名称），留空使用默认账号（.env）",
+    )
+    parser.add_argument(
+        "--list-profiles", action="store_true",
+        help="列出 config/profiles.json 中所有可用账号配置",
+    )
+    parser.add_argument(
+        "--all-profiles", action="store_true",
+        help="与 --monitor 配合，轮流处理所有配置了频道的账号",
+    )
+    parser.add_argument(
+        "--channels-file", type=Path, default=None,
+        help="指定 YouTube 频道列表文件（每行一个 channel_id,频道名称），覆盖 profile 的 channels",
+    )
+    parser.add_argument(
+        "--resolve-channel", type=str, default=None,
+        help="解析 YouTube 频道 @句柄 或 URL 为 Channel ID（用于配置 profiles.json）",
     )
     return parser
 
@@ -612,6 +742,27 @@ def main():
     if args.no_speed_protection:
         config.DOWNLOAD_MIN_SPEED_KIB = 0
 
+    # ── Profile setup (before credential checks) ───────────────
+    setup_profile(args)
+
+    # ── --resolve-channel helper ───────────────────────────────
+    if args.resolve_channel:
+        from yt2bili.youtube.subscriptions import resolve_channel_handle_ytdlp
+        try:
+            cid, title = resolve_channel_handle_ytdlp(args.resolve_channel)
+            print(f"✅ 频道解析成功:")
+            print(f"   Channel ID : {cid}")
+            print(f"   频道名称   : {title}")
+            print()
+            print(f"   将以下内容添加到 config/profiles.json 的 channels 列表中:")
+            print(f'   {{"channel_id": "{cid}", "channel_title": "{title}"}}')
+        except Exception as e:
+            print(f"❌ 解析失败: {e}")
+            return 1
+        return 0
+
+    # ── --list-profiles is handled in setup_profile ────────────
+
     if args.check_auth:
         from yt2bili.auth_checker import run_auth_check
 
@@ -632,6 +783,33 @@ def main():
         _login_interactive()
         if not args.monitor and not args.file and not args.urls:
             return 0
+
+    # ── Resolve monitor channels from profile / args ───────────
+    from yt2bili.youtube.subscriptions import Subscription, load_channels_file
+
+    monitor_channels: list[Subscription] | None = None
+    if args.monitor:
+        # 1) --channels-file takes top priority
+        if args.channels_file:
+            channels_path = Path(args.channels_file)
+            if not channels_path.is_absolute():
+                channels_path = config.PROJECT_ROOT / channels_path
+            monitor_channels = load_channels_file(channels_path)
+            print(f"[频道] 从文件加载 {len(monitor_channels)} 个频道: {args.channels_file}")
+        # 2) Profile with explicit channels
+        elif args.profile or profile_mod.is_multi_profile():
+            prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
+            if prof and prof.youtube.channels:
+                monitor_channels = [
+                    Subscription(c.channel_id, c.channel_title)
+                    for c in prof.youtube.channels
+                ]
+                print(f"[频道] 从账号 '{prof.name}' 加载 {len(monitor_channels)} 个频道")
+                # Default to RSS when using profile channels to avoid API quota
+                if not args.monitor_source and not prof.youtube.monitor_source:
+                    args.monitor_source = "rss"
+                elif not args.monitor_source:
+                    args.monitor_source = prof.youtube.monitor_source or args.monitor_source
 
     # ── Both YouTube + Discord monitors (parallel) ──────────────
     if args.monitor and args.discord:
@@ -666,10 +844,47 @@ def main():
             client_secret_file=project_path(config.YOUTUBE_CLIENT_SECRET_FILE),
             token_file=project_path(config.YOUTUBE_TOKEN_FILE),
             cache_file=project_path(config.YOUTUBE_SUBSCRIPTIONS_CACHE),
+            channels=monitor_channels,
+        )
+
+    # ── Handle --all-profiles ──────────────────────────────────
+    if args.monitor and args.all_profiles:
+        profiles = profile_mod.load_profiles()
+        profile_list = [p for p in profiles.values() if p.youtube.channels]
+        if not profile_list:
+            print("❌ 没有配置了频道的账号。请先在 profiles.json 中为账号添加 channels。")
+            return 1
+        if not args.dry_run:
+            _ensure_credentials()
+        from yt2bili.youtube.monitor import project_path, run_monitor_loop
+
+        return run_monitor_loop(
+            process_video=process_video,
+            write_run_report=None if args.dry_run else _write_run_report,
+            interval_seconds=args.monitor_interval,
+            once=args.once,
+            dry_run=args.dry_run,
+            profiles=profile_list,
+            state_path=project_path(args.monitor_state),
+            source=args.monitor_source,
+            limit=args.monitor_limit,
+            max_videos_per_channel=args.max_videos_per_channel,
+            client_secret_file=project_path(config.YOUTUBE_CLIENT_SECRET_FILE),
+            token_file=project_path(config.YOUTUBE_TOKEN_FILE),
+            cache_file=project_path(config.YOUTUBE_SUBSCRIPTIONS_CACHE),
         )
 
     # ── YouTube monitor only ──────────────────────────────────
     if args.monitor:
+        # Per-profile state file
+        monitor_state = args.monitor_state
+        if monitor_channels and not args.channels_file:
+            prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
+            if prof:
+                monitor_state = profile_mod.get_state_file_path(prof)
+                # Ensure state directory exists
+                monitor_state.parent.mkdir(parents=True, exist_ok=True)
+
         if args.monitor_source not in ("api", "rss"):
             raise SystemExit("--monitor-source must be api or rss")
         if args.monitor_limit <= 0:
@@ -686,13 +901,14 @@ def main():
             interval_seconds=args.monitor_interval,
             once=args.once,
             dry_run=args.dry_run,
-            state_path=project_path(args.monitor_state),
+            state_path=project_path(monitor_state),
             source=args.monitor_source,
             limit=args.monitor_limit,
             max_videos_per_channel=args.max_videos_per_channel,
             client_secret_file=project_path(config.YOUTUBE_CLIENT_SECRET_FILE),
             token_file=project_path(config.YOUTUBE_TOKEN_FILE),
             cache_file=project_path(config.YOUTUBE_SUBSCRIPTIONS_CACHE),
+            channels=monitor_channels,
         )
 
     if args.once or args.dry_run:
@@ -716,19 +932,29 @@ def main():
     # Step 0: Ensure logged in (QR code flow on first run)
     _ensure_credentials()
 
+    # Build credential for active profile (used in batch/single mode)
+    batch_credential = None
+    profile_name = profile_mod.get_active_profile_name()
+    if profile_name != "default" or profile_mod.is_multi_profile():
+        batch_credential = auth.get_credential(profile_name=profile_name)
+
     # Step 1: Gather URLs
     urls = _gather_urls(args)
 
     if not urls:
         print("未提供任何链接，退出。")
         print("用法：")
-        print("  python main.py <youtube_url>      单个视频")
-        print("  python main.py --file urls.txt    从文件批量读取")
-        print("  python main.py --monitor          每小时检查订阅更新")
-        print("  python main.py --monitor --once --dry-run  只检查一次，不下载上传")
-        print("  python main.py                    自动读取 urls.txt 或交互输入")
-        print("  python main.py --login            重新扫码登录")
-        print("  python main.py --refresh-youtube-cookies  自动刷新 YouTube Cookie")
+        print("  python main.py <youtube_url>                 单个视频")
+        print("  python main.py --file urls.txt               从文件批量读取")
+        print("  python main.py --monitor                     每小时检查订阅更新")
+        print("  python main.py --monitor --once --dry-run     只检查一次，不下载上传")
+        print("  python main.py --monitor --profile snap       使用指定账号监控")
+        print("  python main.py --monitor --all-profiles       轮流监控所有账号")
+        print("  python main.py --login                        重新扫码登录")
+        print("  python main.py --login --profile snap         登录指定账号")
+        print("  python main.py --list-profiles                列出所有账号")
+        print("  python main.py --resolve-channel @Handle      解析频道句柄")
+        print("  python main.py                                自动读取 urls.txt 或交互输入")
         return 0
 
     # Step 2: Process all URLs
@@ -738,7 +964,7 @@ def main():
         if len(urls) > 1:
             print(f"\n[{i + 1}/{len(urls)}]")
 
-        results.append(process_video(url))
+        results.append(process_video(url, credential=batch_credential))
 
     # Summary
     success_count = sum(1 for r in results if r.success)

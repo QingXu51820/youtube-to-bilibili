@@ -96,6 +96,7 @@ YOUTUBE_MONITOR_MAX_RETRIES = _get_int("YOUTUBE_MONITOR_MAX_RETRIES", 5)
 YOUTUBE_MONITOR_RETRY_DELAY = _get_int("YOUTUBE_MONITOR_RETRY_DELAY", 30)
 YOUTUBE_VIDEO_RETRY_MAX = _get_int("YOUTUBE_VIDEO_RETRY_MAX", 2)
 YOUTUBE_VIDEO_RETRY_DELAY = _get_int("YOUTUBE_VIDEO_RETRY_DELAY", 30)
+RUNS_RETENTION_DAYS = _get_int("RUNS_RETENTION_DAYS", 90)
 YOUTUBE_MONITOR_STATE = _get(
     "YOUTUBE_MONITOR_STATE",
     str(PROJECT_ROOT / "state" / "processed_videos.json"),
@@ -132,12 +133,49 @@ SUBTITLE_REQUIRED = _get("SUBTITLE_REQUIRED", "false").lower() == "true"
 SUBTITLE_SOURCE_LANGS = _get("SUBTITLE_SOURCE_LANGS", "en.*,ja,ko")
 SUBTITLE_TARGET_LANG = _get("SUBTITLE_TARGET_LANG", "zh-CN")
 SUBTITLE_TRANSLATE_BATCH_SIZE = _get_int("SUBTITLE_TRANSLATE_BATCH_SIZE", 80)
+SUBTITLE_TRANSLATE_WORKERS = _get_int("SUBTITLE_TRANSLATE_WORKERS", 3)  # parallel API threads
 SUBTITLE_UPLOAD_TO_BILIBILI = _get("SUBTITLE_UPLOAD_TO_BILIBILI", "true").lower() == "true"
 SUBTITLE_LAN = _get("SUBTITLE_LAN", "zh")
 SUBTITLE_LAN_DOC = _get("SUBTITLE_LAN_DOC", "中文（简体）")
 SUBTITLE_WAIT_CID_SECONDS = _get_int("SUBTITLE_WAIT_CID_SECONDS", 300)
 SUBTITLE_WAIT_CID_INTERVAL = _get_int("SUBTITLE_WAIT_CID_INTERVAL", 10)
 SUBTITLE_DIR = _get("SUBTITLE_DIR", str(Path(DOWNLOAD_DIR) / "subtitles"))
+
+
+def apply_profile_overrides(profile_name: str = "default") -> None:
+    """
+    Overlay profile-specific settings onto module-level config variables.
+
+    Call once at startup after the active profile has been selected.
+    Only overrides settings that are explicitly set in the profile (non-None).
+    Has no effect when profiles.json doesn't exist and profile_name is "default".
+    """
+    from yt2bili.profile import resolve_profile, is_multi_profile
+
+    if profile_name == "default" and not is_multi_profile():
+        return  # nothing to override — using .env directly
+
+    profile = resolve_profile(profile_name)
+    if profile is None:
+        return
+
+    s = profile.settings
+
+    if s.default_tid is not None:
+        global DEFAULT_TID
+        DEFAULT_TID = s.default_tid
+
+    if s.default_tags is not None:
+        global DEFAULT_TAGS
+        DEFAULT_TAGS = s.default_tags
+
+    if s.content_filter_enabled is not None:
+        global CONTENT_FILTER_ENABLED
+        CONTENT_FILTER_ENABLED = s.content_filter_enabled
+
+    if s.content_filter_keywords is not None:
+        global CONTENT_FILTER_KEYWORDS
+        CONTENT_FILTER_KEYWORDS = s.content_filter_keywords
 
 
 def validate() -> list[str]:

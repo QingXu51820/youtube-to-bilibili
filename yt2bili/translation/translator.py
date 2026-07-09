@@ -390,17 +390,32 @@ def translate(text: str, source_lang: str = "auto", target_lang: str = "zh-CN") 
     return get_translator().translate(text, source_lang, target_lang)
 
 
-def classify_content(title: str, description: str, keywords: str) -> bool:
-    """Return True if the video is relevant to the given keywords (via DeepSeek)."""
+def classify_content(title: str, description: str, keywords: str, *, channel_title: str = "") -> bool:
+    """Return True if the video is relevant to the given keywords (via DeepSeek).
+
+    Args:
+        title: Video title
+        description: Video description
+        keywords: Comma-separated content filter keywords
+        channel_title: YouTube channel name (added as AI context when available)
+    """
     source_text = f"{title or ''}\n{description or ''}"
     matched_keyword = _match_content_keyword(source_text, keywords)
     if matched_keyword:
-        print(f"[筛选] 关键词命中“{matched_keyword}”，跳过 AI 分类")
+        print(f"[筛选] 关键词命中\"{matched_keyword}\"，跳过 AI 分类")
         return True
+
+    channel_hint = ""
+    if channel_title:
+        channel_hint = (
+            f"\n注意：此视频来自频道 \"{channel_title}\"，该频道是已知的 {keywords} 相关内容创作者。"
+            f"请根据频道和内容综合判断。"
+        )
 
     prompt = (
         "你是一个内容审核助手。根据视频标题和简介，判断该视频是否与以下主题相关。\n"
         f"主题：{keywords}\n"
+        f"{channel_hint}"
         "如果相关，只回复 YES；如果不相关，只回复 NO。不要回复其他内容。"
     )
 
