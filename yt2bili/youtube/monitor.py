@@ -715,8 +715,13 @@ def run_monitor_cycle(
             if is_live_skip_result(result) or is_vertical_skip_result(result) or is_content_skip_result(result) or is_long_skip_result(result):
                 break
 
-            # Auth errors (401/403) won't self-resolve — don't retry
+            # B站 406 (格式/大小不兼容) — permanent, don't retry
             error = getattr(result, "error", "")
+            if "406" in error and "状态码" in error:
+                print(f"\n[订阅] ⚠️ B站拒绝该文件（406），跳过重试（可能需要转换格式或压缩）")
+                break
+
+            # Auth errors (401/403) won't self-resolve — don't retry
             if "请重新扫码登录" in error:
                 print(f"\n[订阅] 🔐 B站登录凭据已过期，跳过重试（请运行 --login 重新登录）")
                 break
