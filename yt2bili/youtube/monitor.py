@@ -402,6 +402,83 @@ def seed_state_from_upload_log(state: dict[str, Any]) -> int:
     return seeded
 
 
+def _rss_fallback_cache_path(cache_file: Path) -> Path:
+    """Per-profile cache of channels whose RSS feeds are dead (need API fallback)."""
+    return cache_file.parent / f"{cache_file.stem}_rss_fallback.json"
+
+
+def _load_rss_fallback_cache(cache_file: Path) -> set[str]:
+    """Load set of channel IDs that need API fallback."""
+    path = _rss_fallback_cache_path(cache_file)
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        if isinstance(data, list):
+            return set(data)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return set()
+
+
+def _save_rss_fallback_cache(cache_file: Path, channel_ids: set[str]) -> None:
+    """Save set of channel IDs needing API fallback."""
+    path = _rss_fallback_cache_path(cache_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(sorted(channel_ids), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _fetch_rss_with_fallback(
+    subscriptions: list[Subscription],
+    max_videos_per_channel: int,
+    client_secret_file: Path,
+    token_file: Path,
+    cache_file: Path,
+) -> tuple[list, list[Subscription]]:
+    """Fetch videos via RSS, falling back to API for channels without RSS feeds.
+
+    Returns (videos, failed_channels).
+    """
+    known_dead = _load_rss_fallback_cache(cache_file)
+
+    # Split: channels known to need API vs try RSS
+    rss_subs = [s for s in subscriptions if s.channel_id not in known_dead]
+    api_subs = [s for s in subscriptions if s.channel_id in known_dead]
+
+    videos: list = []
+    rss_failed: list[Subscription] = []
+
+    # Try RSS for channels not yet known to be dead
+    if rss_subs:
+        failed: list[Subscription] = []
+        videos.extend(
+            fetch_recent_videos_rss(rss_subs, max_videos_per_channel, failed_channels=failed)
+        )
+        # Update cache with newly discovered dead feeds
+        if failed:
+            for sub in failed:
+                known_dead.add(sub.channel_id)
+                rss_failed.append(sub)
+            _save_rss_fallback_cache(cache_file, known_dead)
+
+    # Fetch API-fallback channels (known dead + just discovered)
+    all_api_subs = api_subs + rss_failed
+    if all_api_subs:
+        try:
+            youtube = get_youtube_service(client_secret_file, token_file)
+            videos.extend(
+                fetch_recent_videos_api(youtube, all_api_subs, max_videos_per_channel)
+            )
+        except YouTubeNetworkError as e:
+            print(f"[订阅] ⚠️ API 回退获取失败: {e}")
+            # On API failure, keep RSS-failed channels for next retry
+            # (don't lose them from the cache)
+
+    return videos, rss_failed
+
+
 def fetch_subscription_videos(
     *,
     source: str,
@@ -444,7 +521,15 @@ def fetch_subscription_videos(
             youtube = get_youtube_service(client_secret_file, token_file)
         videos = fetch_recent_videos_api(youtube, subscriptions, max_videos_per_channel)
     else:
-        videos = fetch_recent_videos_rss(subscriptions, max_videos_per_channel)
+        # RSS mode with per-channel API fallback
+        videos, rss_failed = _fetch_rss_with_fallback(
+            subscriptions, max_videos_per_channel,
+            client_secret_file, token_file, cache_file,
+        )
+        if rss_failed:
+            # Clear cached subscriptions to force re-save with updated data
+            # (channels with dead RSS will be remembered via fallback cache)
+            pass
 
     return sort_videos(videos)[:limit]
 

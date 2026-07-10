@@ -621,7 +621,18 @@ def load_channels_file(path: Path) -> list[Subscription]:
 def fetch_recent_videos_rss(
     subscriptions: list[Subscription],
     max_videos_per_channel: int,
+    *,
+    failed_channels: list[Subscription] | None = None,
 ) -> list[VideoItem]:
+    """
+    Fetch recent videos via YouTube RSS feeds.
+
+    Args:
+        subscriptions: Channels to fetch.
+        max_videos_per_channel: Max entries per channel.
+        failed_channels: If provided, channels that return 404/410 are appended
+            here so the caller can retry them via API.
+    """
     try:
         import feedparser
     except ImportError as exc:
@@ -646,6 +657,8 @@ def fetch_recent_videos_rss(
                 if status in (404, 410):
                     # Channel RSS feed no longer exists — skip, don't retry
                     print(f"[RSS] 跳过: {sub.channel_title}（RSS feed 不可用，HTTP {status}）")
+                    if failed_channels is not None:
+                        failed_channels.append(sub)
                     response = None
                     break
                 last_error = exc
