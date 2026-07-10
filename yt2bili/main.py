@@ -337,11 +337,16 @@ def process_video(url: str, credential=None) -> ProcessResult:
         record.bvid = result.bvid
         record.aid = result.aid
     finally:
-        # Always cancel background subtitle thread if upload failed
-        if not upload_succeeded and subtitle_future is not None:
-            subtitle_future.cancel()
         if subtitle_executor is not None:
-            subtitle_executor.shutdown(wait=False)
+            if not upload_succeeded:
+                # Upload failed — cancel and drain subtitle thread to prevent
+                # thread/fd accumulation across failed videos
+                if subtitle_future is not None:
+                    subtitle_future.cancel()
+                subtitle_executor.shutdown(wait=True)
+            else:
+                # Upload succeeded — release pool, thread will be joined below
+                subtitle_executor.shutdown(wait=False)
 
     # ── Step 4.5: Subtitle processing (join background + upload) ──
     record.stage = "subtitle"
