@@ -845,6 +845,9 @@ def run_monitor_cycle(
         else:
             record_failure(state, video, result)
         save_state(state_path, state)
+        # Release yt-dlp connection pools to prevent fd exhaustion
+        import gc
+        gc.collect()
 
     if results and write_run_report:
         report_path = write_run_report(results)

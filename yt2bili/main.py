@@ -94,6 +94,7 @@ YouTube → Bilibili 自动转载流水线 / Discord → Bilibili 动态搬运
 """
 
 import argparse
+import gc
 import sys
 import os
 import json
@@ -420,6 +421,8 @@ def process_video(url: str, credential=None) -> ProcessResult:
         video, cover_path,
         extra_video_paths=video_files_for_upload if len(video_files_for_upload) > 1 else None,
     )
+    # Force release of yt-dlp connection pools to prevent fd exhaustion
+    gc.collect()
     return record
 
 
