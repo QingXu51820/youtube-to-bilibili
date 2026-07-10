@@ -357,6 +357,7 @@ def upload_pending_subtitles() -> int:
     from yt2bili.subtitles.parser import parse_subtitle
     from yt2bili.subtitles.bilibili_format import cues_to_bilibili_json
 
+    print(f"[字幕] 检查 {len(entries)} 条待上传字幕...")
     remaining: list[dict] = []
     uploaded = 0
 
