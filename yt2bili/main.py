@@ -98,7 +98,6 @@ import gc
 import sys
 import os
 import json
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -266,89 +265,42 @@ def process_video(url: str, credential=None) -> ProcessResult:
 
     record.cover_path = cover_path
 
-    # ── Step 4: Upload to Bilibili (parallel with subtitle download+translate) ──
+    # ── Step 4: Upload to Bilibili ────────────────────────────
     record.stage = "upload"
     is_multi_part = len(video_files_for_upload) > 1
 
-    # Launch subtitle processing in background BEFORE starting the upload
-    subtitle_future = None
-    subtitle_executor = None
-    should_process_subtitles = (
-        not is_multi_part and config.SUBTITLE_ENABLED
-    )
-    if should_process_subtitles:
-        def _process_subtitles_background() -> dict | None:
-            """Background: download, parse, translate, write SRT while video uploads."""
-            sp = download_subtitles(video.original_url, video.video_id)
-            if not sp:
-                return None
-            cues_bg = parse_subtitle(sp)
-            if not cues_bg:
-                return None
-            translated_bg = translate_cues(cues_bg, batch_size=config.SUBTITLE_TRANSLATE_BATCH_SIZE)
-            if not translated_bg:
-                return None
-            subtitle_dir_bg = Path(config.SUBTITLE_DIR)
-            subtitle_dir_bg.mkdir(parents=True, exist_ok=True)
-            translated_filename_bg = f"{video.video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
-            translated_path_bg = str(subtitle_dir_bg / translated_filename_bg)
-            write_srt(translated_bg, translated_path_bg)
-            return {
-                "subtitle_path": sp,
-                "cues": cues_bg,
-                "translated": translated_bg,
-                "translated_path": translated_path_bg,
-            }
-
-        subtitle_executor = ThreadPoolExecutor(max_workers=1)
-        subtitle_future = subtitle_executor.submit(_process_subtitles_background)
-
-    upload_succeeded = False
+    print()
     try:
-        print()
-        try:
-            result = upload_video(
-                file_paths=video_files_for_upload,
-                title=translated_title,
-                original_url=video.original_url,
-                original_description=video.description,
-                original_title=video.title,
-                cover_path=cover_path,
-                credential=credential,
-            )
-            if not result.success:
-                raise RuntimeError(result.message)
-        except RuntimeError as e:
-            msg = str(e)
-            record.error = msg
-            if "请重新扫码登录" in msg:
-                print(f"\n🔐 {msg}")
-            else:
-                print(f"\n❌ 上传失败: {e}")
-            return record
-        except Exception as e:
-            record.error = str(e)
+        result = upload_video(
+            file_paths=video_files_for_upload,
+            title=translated_title,
+            original_url=video.original_url,
+            original_description=video.description,
+            original_title=video.title,
+            cover_path=cover_path,
+            credential=credential,
+        )
+        if not result.success:
+            raise RuntimeError(result.message)
+    except RuntimeError as e:
+        msg = str(e)
+        record.error = msg
+        if "请重新扫码登录" in msg:
+            print(f"\n🔐 {msg}")
+        else:
             print(f"\n❌ 上传失败: {e}")
-            return record
+        return record
+    except Exception as e:
+        record.error = str(e)
+        print(f"\n❌ 上传失败: {e}")
+        return record
 
-        upload_succeeded = True
-        record.success = True
-        record.stage = "complete"
-        record.bvid = result.bvid
-        record.aid = result.aid
-    finally:
-        if subtitle_executor is not None:
-            if not upload_succeeded:
-                # Upload failed — cancel and drain subtitle thread to prevent
-                # thread/fd accumulation across failed videos
-                if subtitle_future is not None:
-                    subtitle_future.cancel()
-                subtitle_executor.shutdown(wait=True)
-            else:
-                # Upload succeeded — release pool, thread will be joined below
-                subtitle_executor.shutdown(wait=False)
+    record.success = True
+    record.stage = "complete"
+    record.bvid = result.bvid
+    record.aid = result.aid
 
-    # ── Step 4.5: Subtitle processing (join background + upload) ──
+    # ── Step 4.5: Subtitle processing (synchronous, after upload) ──
     record.stage = "subtitle"
 
     if is_multi_part:
@@ -359,30 +311,44 @@ def process_video(url: str, credential=None) -> ProcessResult:
         record.subtitle_status = "skipped_disabled"
     else:
         try:
-            # Join background thread (may already be done if upload was slow)
-            subtitle_data: dict | None = None
-            if subtitle_future:
-                subtitle_data = subtitle_future.result()
-
-            if not subtitle_data:
+            # Download source subtitles
+            record.stage = "subtitle_download"
+            subtitle_path = download_subtitles(video.original_url, video.video_id)
+            if not subtitle_path:
                 raise RuntimeError("YouTube 上未找到匹配的字幕语言")
+            record.subtitle_source_path = str(subtitle_path)
+            print(f"[字幕] 源字幕: {Path(subtitle_path).name}")
 
-            record.subtitle_source_path = str(subtitle_data["subtitle_path"])
-            cues = subtitle_data["cues"]
-            translated = subtitle_data["translated"]
-            record.subtitle_translated_path = subtitle_data["translated_path"]
-
-            print(f"[字幕] 源字幕: {Path(subtitle_data['subtitle_path']).name}")
+            # Parse SRT cues
+            record.stage = "subtitle_parse"
+            cues = parse_subtitle(subtitle_path)
+            if not cues:
+                raise RuntimeError("字幕文件解析为空")
             print(f"[字幕] 解析: {len(cues)} 条字幕")
+
+            # Translate via DeepSeek batch
+            record.stage = "subtitle_translate"
+            translated = translate_cues(cues, batch_size=config.SUBTITLE_TRANSLATE_BATCH_SIZE)
+            if not translated:
+                raise RuntimeError("翻译后字幕为空")
             print(f"[字幕] 翻译完成: {len(translated)} 条字幕")
-            print(f"[字幕] 已保存: {Path(subtitle_data['translated_path']).name}")
+
+            # Write translated SRT file
+            record.stage = "subtitle_write"
+            subtitle_dir = Path(config.SUBTITLE_DIR)
+            subtitle_dir.mkdir(parents=True, exist_ok=True)
+            translated_filename = f"{video.video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
+            translated_path = str(subtitle_dir / translated_filename)
+            write_srt(translated, translated_path)
+            record.subtitle_translated_path = translated_path
+            print(f"[字幕] 已保存: {translated_filename}")
 
             # Defer subtitle upload (Bilibili CID may not be ready for hours)
             if config.SUBTITLE_UPLOAD_TO_BILIBILI and record.bvid and record.aid:
                 save_pending_subtitle(
                     bvid=record.bvid,
                     aid=record.aid,
-                    translated_path=subtitle_data["translated_path"],
+                    translated_path=translated_path,
                 )
                 record.subtitle_status = "pending_upload"
                 print(f"[字幕] 已加入延迟上传队列，等待 B站 CID 就绪后自动上传")
