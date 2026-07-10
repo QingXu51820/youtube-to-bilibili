@@ -387,8 +387,13 @@ def upload_pending_subtitles() -> int:
             submit_subtitle(aid=aid, cid=cid, subtitle_json=subtitle_json, lan="zh")
             uploaded += 1
         except Exception as e:
-            print(f"[字幕] [WARN] 延迟上传失败 ({bvid}): {e}")
-            remaining.append(entry)
+            err_str = str(e)
+            # Permanent Bilibili errors — don't retry
+            if "79006" in err_str or "79014" in err_str or "79019" in err_str:
+                print(f"[字幕] [WARN] 永久失败，放弃 ({bvid}): {e}")
+            else:
+                print(f"[字幕] [WARN] 延迟上传失败 ({bvid}): {e}")
+                remaining.append(entry)
 
     if remaining:
         tmp = path.with_suffix(path.suffix + ".tmp")
