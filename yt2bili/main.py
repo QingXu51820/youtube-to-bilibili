@@ -118,8 +118,7 @@ from yt2bili.subtitles.downloader import download_subtitles
 from yt2bili.subtitles.parser import parse_subtitle
 from yt2bili.subtitles.translator import translate_cues
 from yt2bili.subtitles.writer import write_srt
-from yt2bili.subtitles.bilibili_format import cues_to_bilibili_json
-from yt2bili.bilibili.subtitle import wait_for_cid, submit_subtitle
+from yt2bili.bilibili.subtitle import save_pending_subtitle
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -377,34 +376,15 @@ def process_video(url: str, credential=None) -> ProcessResult:
             print(f"[字幕] 翻译完成: {len(translated)} 条字幕")
             print(f"[字幕] 已保存: {Path(subtitle_data['translated_path']).name}")
 
-            # Upload to Bilibili (if enabled and we have bvid)
+            # Defer subtitle upload (Bilibili CID may not be ready for hours)
             if config.SUBTITLE_UPLOAD_TO_BILIBILI and record.bvid and record.aid:
-                record.stage = "subtitle_upload"
-                try:
-                    cid = wait_for_cid(
-                        bvid=record.bvid,
-                        aid=record.aid,
-                        timeout=config.SUBTITLE_WAIT_CID_SECONDS,
-                        interval=config.SUBTITLE_WAIT_CID_INTERVAL,
-                    )
-                    record.subtitle_cid = cid
-                    subtitle_json = cues_to_bilibili_json(translated)
-                    submit_subtitle(
-                        aid=record.aid,
-                        cid=cid,
-                        subtitle_json=subtitle_json,
-                        lan="zh",
-                    )
-                    record.subtitle_status = "success"
-                    print(f"[字幕] [OK] 已上传到 B站 (cid={cid})")
-                except TimeoutError as e:
-                    record.subtitle_error = str(e)
-                    record.subtitle_status = "cid_timeout"
-                    print(f"[字幕] [WARN] {e}")
-                except Exception as e:
-                    record.subtitle_error = str(e)
-                    record.subtitle_status = "upload_failed"
-                    print(f"[字幕] [WARN] B站字幕上传失败: {e}")
+                save_pending_subtitle(
+                    bvid=record.bvid,
+                    aid=record.aid,
+                    translated_path=subtitle_data["translated_path"],
+                )
+                record.subtitle_status = "pending_upload"
+                print(f"[字幕] 已加入延迟上传队列，等待 B站 CID 就绪后自动上传")
             else:
                 record.subtitle_status = (
                     "success" if not config.SUBTITLE_UPLOAD_TO_BILIBILI

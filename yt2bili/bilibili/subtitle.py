@@ -7,6 +7,7 @@ that are not covered by ``bilibili-api-python``.
 
 import json
 import time
+from pathlib import Path
 import httpx
 from yt2bili import config
 
@@ -301,3 +302,100 @@ def submit_subtitle(
         )
 
     return data
+
+
+# ── Deferred subtitle upload ────────────────────────────────────────────
+
+def _pending_subtitles_path() -> Path:
+    return Path(config.PROJECT_ROOT) / "state" / "pending_subtitles.json"
+
+
+def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
+    """Record a subtitle that needs deferred upload (Bilibili CID not ready yet)."""
+    path = _pending_subtitles_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    entries: list[dict] = []
+    if path.exists():
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(entries, list):
+                entries = []
+        except (json.JSONDecodeError, OSError):
+            entries = []
+
+    existing = {e.get("bvid", ""): i for i, e in enumerate(entries)}
+    entry = {
+        "bvid": bvid,
+        "aid": aid,
+        "translated_path": translated_path,
+        "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if bvid in existing:
+        entries[existing[bvid]] = entry
+    else:
+        entries.append(entry)
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def upload_pending_subtitles() -> int:
+    """Try to upload pending subtitles. Returns count of successfully uploaded."""
+    path = _pending_subtitles_path()
+    if not path.exists():
+        return 0
+
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(entries, list) or not entries:
+            return 0
+    except (json.JSONDecodeError, OSError):
+        return 0
+
+    from yt2bili.subtitles.parser import parse_subtitle
+    from yt2bili.subtitles.bilibili_format import cues_to_bilibili_json
+
+    remaining: list[dict] = []
+    uploaded = 0
+
+    for entry in entries:
+        bvid = entry.get("bvid", "")
+        aid = entry.get("aid", 0)
+        translated_path = entry.get("translated_path", "")
+
+        if not bvid or not translated_path:
+            continue
+
+        try:
+            cid = wait_for_cid(bvid=bvid, aid=aid, timeout=30, interval=5)
+        except TimeoutError:
+            remaining.append(entry)
+            continue
+        except Exception:
+            remaining.append(entry)
+            continue
+
+        try:
+            cues = parse_subtitle(translated_path)
+            if not cues:
+                remaining.append(entry)
+                continue
+            subtitle_json = cues_to_bilibili_json(cues)
+            submit_subtitle(aid=aid, cid=cid, subtitle_json=subtitle_json, lan="zh")
+            uploaded += 1
+        except Exception as e:
+            print(f"[字幕] [WARN] 延迟上传失败 ({bvid}): {e}")
+            remaining.append(entry)
+
+    if remaining:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(remaining, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    elif path.exists():
+        path.unlink()
+
+    if uploaded:
+        print(f"[字幕] 延迟上传完成: {uploaded} 条，剩余 {len(remaining)} 条待处理")
+    return uploaded

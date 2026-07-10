@@ -36,6 +36,15 @@ STATUS_SKIPPED_LIVE = "skipped_live"
 STATUS_SKIPPED_LONG = "skipped_long"
 STATUS_SKIPPED_VERTICAL = "skipped_vertical"
 STATUS_SKIPPED_CONTENT = "skipped_content"
+def _try_deferred_subtitles() -> None:
+    """Attempt to upload pending subtitles (non-blocking, short timeout)."""
+    try:
+        from yt2bili.bilibili.subtitle import upload_pending_subtitles
+        upload_pending_subtitles()
+    except Exception as e:
+        print(f"[字幕] 延迟上传检查失败（非致命）: {e}")
+
+
 LIVE_SKIP_MARKERS = (
     "不是可下载的普通视频",
     "正在直播",
@@ -822,9 +831,10 @@ def run_monitor_loop(
                            if k not in ("state_path", "source", "channels", "cache_file")},
                         cache_file=profile_cache,
                     )
+                    # Try deferred subtitle uploads (CID may be ready by now)
+                    _try_deferred_subtitles()
                 except YouTubeNetworkError as exc:
                     print(f"\n[订阅] ⚠️ 网络错误 ({profile.name}): {exc}")
-                    # For multi-profile, don't let one profile's error stop others
                     continue
 
             if once:
@@ -851,6 +861,7 @@ def run_monitor_loop(
                 dry_run=dry_run,
                 **cycle_kwargs,
             )
+            _try_deferred_subtitles()
             consecutive_failures = 0  # reset on success
         except YouTubeNetworkError as exc:
             consecutive_failures += 1
