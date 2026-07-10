@@ -641,6 +641,22 @@ def fetch_recent_videos_rss(
                 response = session.get(feed_url, timeout=timeout)
                 response.raise_for_status()
                 break
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status in (404, 410):
+                    # Channel RSS feed no longer exists — skip, don't retry
+                    print(f"[RSS] 跳过: {sub.channel_title}（RSS feed 不可用，HTTP {status}）")
+                    response = None
+                    break
+                last_error = exc
+                if attempt >= _API_MAX_RETRIES:
+                    raise _api_network_error(exc) from exc
+                delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
+                print(
+                    f"[RSS] 网络错误，{delay:.0f}s 后重试 "
+                    f"({attempt + 1}/{_API_MAX_RETRIES}): {exc}"
+                )
+                _time.sleep(delay)
             except requests.exceptions.RequestException as exc:
                 last_error = exc
                 if attempt >= _API_MAX_RETRIES:
@@ -652,6 +668,8 @@ def fetch_recent_videos_rss(
                 )
                 _time.sleep(delay)
 
+        if response is None:
+            continue  # RSS feed skipped (404/410)
         feed = feedparser.parse(response.content)
         channel_title = sub.channel_title or getattr(feed.feed, "title", "")
 
