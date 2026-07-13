@@ -90,6 +90,8 @@ YOUTUBE_SKIP_LONG_VIDEO_MINUTES = _get_int("YOUTUBE_SKIP_LONG_VIDEO_MINUTES", 0)
 YOUTUBE_SKIP_VERTICAL_VIDEOS = _get("YOUTUBE_SKIP_VERTICAL_VIDEOS", "true").lower() == "true"
 CONTENT_FILTER_ENABLED = _get("CONTENT_FILTER_ENABLED", "false").lower() == "true"
 CONTENT_FILTER_KEYWORDS = _get("CONTENT_FILTER_KEYWORDS", "Marvel SNAP")
+# Title keyword filter for monitor mode (empty = disabled, case-insensitive substring match)
+TITLE_FILTER_KEYWORD = _get("TITLE_FILTER_KEYWORD", "")
 YOUTUBE_API_MAX_RETRIES = _get_int("YOUTUBE_API_MAX_RETRIES", 3)
 YOUTUBE_API_RETRY_DELAY = _get_int("YOUTUBE_API_RETRY_DELAY", 2)
 YOUTUBE_MONITOR_MAX_RETRIES = _get_int("YOUTUBE_MONITOR_MAX_RETRIES", 5)
@@ -123,6 +125,14 @@ SNAP_GLOSSARY_CACHE = _get(
     str(PROJECT_ROOT / "data" / "snap_glossary.json"),
 )
 SNAP_GLOSSARY_TTL = _get_int("SNAP_GLOSSARY_TTL", 86400)  # 1 day
+
+# ── Deadlock Glossary ────────────────────────────────────────────────
+DEADLOCK_GLOSSARY_ENABLED = _get("DEADLOCK_GLOSSARY_ENABLED", "false").lower() == "true"
+DEADLOCK_GLOSSARY_CACHE = _get(
+    "DEADLOCK_GLOSSARY_CACHE",
+    str(PROJECT_ROOT / "data" / "deadlock_glossary.json"),
+)
+DEADLOCK_GLOSSARY_TTL = _get_int("DEADLOCK_GLOSSARY_TTL", 86400)  # 1 day
 
 # ── Source Language ───────────────────────────────────────────────
 SOURCE_LANG = _get("SOURCE_LANG", "auto")  # source language for translation
