@@ -54,11 +54,38 @@ def _content_keyword_patterns(keyword: str) -> list[re.Pattern[str]]:
 
 
 def _match_content_keyword(text: str, keywords: str) -> str:
-    """Return the matched configured keyword, or an empty string."""
+    """Return the matched configured keyword, or an empty string.
+
+    Also checks Deadlock glossary entries (EN names and CN names) if enabled,
+    so hero names in video titles count as keyword hits for content filtering.
+    """
     haystack = text or ""
+
+    # 1. Check configured keywords
     for keyword in _content_filter_keywords(keywords):
         if any(pattern.search(haystack) for pattern in _content_keyword_patterns(keyword)):
             return keyword
+
+    # 2. Check Deadlock glossary entries as additional keywords
+    if config.DEADLOCK_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_deadlock_glossary
+            dl_glossary = get_deadlock_glossary()
+        except Exception:
+            dl_glossary = {}
+
+        if dl_glossary:
+            # Check both EN names (keys) and CN names (values)
+            # Longest-match-first to avoid partial matches
+            all_terms = sorted(
+                list(dl_glossary.keys()) + list(dl_glossary.values()),
+                key=len,
+                reverse=True,
+            )
+            for term in all_terms:
+                if any(pattern.search(haystack) for pattern in _content_keyword_patterns(term)):
+                    return term
+
     return ""
 
 
@@ -120,6 +147,14 @@ def _preserve_terms() -> list[str]:
         except Exception:
             pass
 
+    if config.DEADLOCK_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_deadlock_glossary
+            dl_glossary = get_deadlock_glossary()
+            terms.extend(dl_glossary.values())
+        except Exception:
+            pass
+
     return sorted(dict.fromkeys(terms), key=len, reverse=True)
 
 
@@ -174,6 +209,21 @@ def _apply_glossary(text: str) -> str:
         # Only match standalone words (not parts of other words)
         pattern = re.compile(rf"\b{re.escape(en)}\b", re.IGNORECASE)
         result = pattern.sub(cn, result)
+
+    # Also apply Deadlock glossary if enabled
+    if config.DEADLOCK_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_deadlock_glossary
+            dl_glossary = get_deadlock_glossary()
+        except Exception:
+            dl_glossary = {}
+
+        if dl_glossary:
+            dl_sorted = sorted(dl_glossary.items(), key=lambda x: len(x[0]), reverse=True)
+            for en, cn in dl_sorted:
+                pattern = re.compile(rf"\b{re.escape(en)}\b", re.IGNORECASE)
+                result = pattern.sub(cn, result)
+
     return result
 
 
