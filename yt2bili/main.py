@@ -596,6 +596,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="每个订阅频道抓取最近多少条视频",
     )
     parser.add_argument(
+        "--title-filter",
+        type=str,
+        default="",
+        help="仅处理标题包含指定关键词的视频（不区分大小写，与 --monitor 配合）",
+    )
+    parser.add_argument(
         "--no-speed-protection",
         action="store_true",
         help="禁用下载低速保护（不限制最低下载速度）",
@@ -703,6 +709,9 @@ def main():
 
     if args.no_speed_protection:
         config.DOWNLOAD_MIN_SPEED_KIB = 0
+
+    if args.title_filter:
+        config.TITLE_FILTER_KEYWORD = args.title_filter
 
     # ── Profile setup (before credential checks) ───────────────
     setup_profile(args)

@@ -697,6 +697,26 @@ def run_monitor_cycle(
         f"待处理 {len(candidates)} 条"
     )
 
+    # ── Title keyword filter (soft filter, not persisted to state) ──
+    title_filter = (getattr(config, "TITLE_FILTER_KEYWORD", "") or "").strip()
+    if title_filter:
+        kept: list[VideoItem] = []
+        keyword = title_filter.lower()
+        for video in candidates:
+            if keyword in (video.title or "").lower():
+                kept.append(video)
+            else:
+                print(
+                    f"[订阅] 跳过: {video.channel_title} | {video.title}"
+                    f"（标题不含「{title_filter}」）"
+                )
+        if len(kept) < len(candidates):
+            print(
+                f"[订阅] 标题筛选「{title_filter}」"
+                f"跳过 {len(candidates) - len(kept)} 条"
+            )
+            candidates = kept
+
     queue_details: dict[str, dict[str, Any]] = {}
 
     # ── RSS mode: warn if duration-based features are configured ──
