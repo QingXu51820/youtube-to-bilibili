@@ -77,8 +77,10 @@ def _list_languages(video_url: str) -> tuple[dict, dict]:
     """
     Extract video info to inspect available subtitle languages.
 
-    Tries cookie-authenticated extraction first; falls back to bare
-    yt-dlp if the authenticated path fails (e.g. network issues).
+    Tries bare yt-dlp first — cookie-authenticated requests often fail
+    for subtitle metadata (YouTube returns "Requested format is not
+    available").  Falls back to cookies only if bare extraction returns
+    no subtitle tracks at all.
 
     Returns:
         Tuple of ``(subtitles, automatic_captions)`` dicts keyed by language code.
@@ -91,25 +93,37 @@ def _list_languages(video_url: str) -> tuple[dict, dict]:
         "skip_download": True,
         "noplaylist": True,
     }
-    # Do NOT include network opts — throttledratelimit and format-related
-    # options can interfere with metadata-only extraction.
     base_opts["socket_timeout"] = max(
         1, int(getattr(config, "YOUTUBE_HTTP_TIMEOUT", 60) or 60)
     )
     base_opts["retries"] = 3
 
-    def _extract(ydl):
-        return ydl.extract_info(video_url, download=False)
-
-    # Try with cookies first, fall back to bare if it fails
+    # Phase 1: bare yt-dlp (avoids cookie-induced "format not available" errors)
     try:
-        ydl_opts = copy.deepcopy(base_opts)
-        _with_yt_dlp_cookies(ydl_opts, _extract, label="字幕语言检测")
-    except Exception as e:
-        print(f"[字幕] 带 Cookie 的字幕检测失败，尝试无 Cookie: {e}")
+        with YoutubeDL(base_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+    except Exception:
+        info = None
 
-    with YoutubeDL(base_opts) as ydl:
-        info = ydl.extract_info(video_url, download=False)
+    # Phase 2: retry with cookies only when bare gave us no subtitle tracks
+    subtitles = (info or {}).get("subtitles") or {}
+    auto_captions = (info or {}).get("automatic_captions") or {}
+    if not subtitles and not auto_captions:
+        try:
+            ydl_opts = copy.deepcopy(base_opts)
+            _with_yt_dlp_cookies(
+                ydl_opts,
+                lambda ydl: ydl.extract_info(video_url, download=False),
+                label="字幕语言检测",
+            )
+            # Re-extract with bare yt-dlp after cookie warm-up
+            with YoutubeDL(base_opts) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+        except Exception:
+            pass  # keep whatever we had from bare extraction
+
+    if not info:
+        return {}, {}
 
     subtitles = info.get("subtitles") or {}
     auto_captions = info.get("automatic_captions") or {}
@@ -165,16 +179,26 @@ def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str
             if expected.exists():
                 downloaded_path[0] = str(expected)
 
+    # Phase 1: try without cookies first (avoids "format not available" errors)
     try:
-        _with_yt_dlp_cookies(ydl_opts, _download, label="字幕下载")
-    except Exception as e:
-        print(f"[字幕] [WARN]yt-dlp 字幕下载异常: {e}")
-        # Fallback: try once more without cookie chain
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(video_url, download=True)
+    except Exception:
+        pass  # fall through to cookie-based retry
+
+    # Check if file was produced by bare download
+    if not downloaded_path[0]:
+        # Phase 2: fall back to cookie-authenticated download
         try:
-            with YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(video_url, download=True)
-        except Exception as e2:
-            print(f"[字幕] [WARN]字幕下载 fallback 也失败: {e2}")
+            _with_yt_dlp_cookies(ydl_opts, _download, label="字幕下载")
+        except Exception as e:
+            print(f"[字幕] [WARN]yt-dlp 字幕下载异常: {e}")
+            # Last resort: try once more without cookies
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    ydl.extract_info(video_url, download=True)
+            except Exception as e2:
+                print(f"[字幕] [WARN]字幕下载 fallback 也失败: {e2}")
 
     return downloaded_path[0]
 
