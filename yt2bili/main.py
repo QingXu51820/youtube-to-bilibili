@@ -562,8 +562,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--refresh-youtube-cookies", action="store_true", help="从浏览器自动生成/刷新 YouTube cookies.txt (config/)")
     parser.add_argument("--check-auth", action="store_true", help="检查所有凭据（Bilibili/YouTube OAuth/YouTube Cookie）的有效期和状态")
     parser.add_argument("--monitor", action="store_true", help="每小时检查 YouTube 订阅更新并自动上传")
+    parser.add_argument("--subtitle-only", action="store_true", help="仅轮询上传待处理字幕（不上传视频）")
+    parser.add_argument("--subtitle-interval", type=int, default=600, help="字幕轮询间隔秒数（默认 600=10分钟）")
     parser.add_argument("--discord", action="store_true", help="实时监听 Discord 频道消息并搬运到 B站动态")
-    parser.add_argument("--once", action="store_true", help="仅在 --monitor 模式下检查一次")
+    parser.add_argument("--once", action="store_true", help="仅执行一次（--monitor / --subtitle-only 模式下生效）")
     parser.add_argument("--dry-run", action="store_true", help="仅在 --monitor 模式下打印待处理视频")
     parser.add_argument(
         "--monitor-source",
@@ -738,7 +740,7 @@ def main():
         from yt2bili.auth_checker import run_auth_check
 
         exit_code = run_auth_check()
-        if not args.login and not args.monitor and not args.file and not args.urls and not args.refresh_youtube_cookies:
+        if not args.login and not args.monitor and not args.file and not args.urls and not args.refresh_youtube_cookies and not args.subtitle_only:
             return exit_code
 
     if args.refresh_youtube_cookies:
@@ -747,13 +749,37 @@ def main():
         cookie_path = refresh_youtube_cookies()
         if not cookie_path:
             return 1
-        if not args.login and not args.monitor and not args.file and not args.urls:
+        if not args.login and not args.monitor and not args.file and not args.urls and not args.subtitle_only:
             return 0
 
     if args.login:
         _login_interactive()
-        if not args.monitor and not args.file and not args.urls:
+        if not args.monitor and not args.file and not args.urls and not args.subtitle_only:
             return 0
+
+    # ── Subtitle-only mode ─────────────────────────────────────
+    if args.subtitle_only:
+        _ensure_credentials()
+        from yt2bili.bilibili.subtitle import upload_pending_subtitles
+
+        if args.once:
+            uploaded = upload_pending_subtitles()
+            if uploaded == 0 and not Path("state/pending_subtitles.json").exists():
+                print("[字幕] 没有待处理的字幕。")
+            return 0
+
+        interval = max(10, args.subtitle_interval)
+        print(f"[字幕] 字幕轮询模式启动，间隔 {interval}s，按 Ctrl+C 停止")
+        while True:
+            try:
+                upload_pending_subtitles()
+            except Exception as e:
+                print(f"[字幕] 轮询异常（非致命）: {e}")
+            try:
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                print("\n[字幕] 已停止。")
+                return 0
 
     # ── Resolve monitor channels from profile / args ───────────
     from yt2bili.youtube.subscriptions import Subscription, load_channels_file
