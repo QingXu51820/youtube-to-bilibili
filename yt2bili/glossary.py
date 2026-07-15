@@ -243,7 +243,7 @@ def _build_deadlock_glossary() -> dict[str, str]:
         glossary[en_name] = cn_name
 
     # 4. Game terms
-    glossary["Deadlock"] = "异锁"
+    glossary["Deadlock"] = "死锁"
     glossary["Hero Labs"] = "英雄实验室"
 
     return glossary
