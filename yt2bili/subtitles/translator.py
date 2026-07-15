@@ -9,6 +9,8 @@ Unlike the title translator (``yt2bili.translation.translator``), this module:
 - Always uses DeepSeek (not configurable per-provider).
 """
 
+import sys
+
 from openai import OpenAI
 
 from yt2bili import config
@@ -86,7 +88,8 @@ def _parse_batch_response(raw: str, expected_count: int) -> list[tuple[int, str]
     if len(result) != expected_count:
         print(
             f"[字幕] [WARN] 翻译批次返回 {len(result)} 条，"
-            f"预期 {expected_count} 条"
+            f"预期 {expected_count} 条",
+            flush=True, file=sys.stderr,
         )
 
     return result
@@ -174,7 +177,7 @@ def _retranslate_small_batch(
             extra_body=extra_body if extra_body else None,
         )
     except Exception as e:
-        print(f"  重试失败: {e}")
+        print(f"  重试失败: {e}", flush=True, file=sys.stderr)
         return [
             Cue(index=c.index, start=c.start, end=c.end, text=c.text)
             for c in cues
@@ -231,7 +234,8 @@ def _validate_and_retry(
     print(
         f"  [WARN] {n_failed} 条异常"
         + (f"（{n_oversized} 条合并, {n_untrans} 条未翻译）" if n_oversized else "")
-        + f"，逐个重试..."
+        + f"，逐个重试...",
+        flush=True, file=sys.stderr,
     )
 
     # Re-translate in very small groups (5 at a time) for speed
@@ -256,9 +260,9 @@ def _validate_and_retry(
                 corrected += 1
 
     if corrected > 0:
-        print(f"  重试修复 {corrected}/{n_failed} 条")
+        print(f"  重试修复 {corrected}/{n_failed} 条", flush=True, file=sys.stderr)
     else:
-        print(f"  重试未能修复，保留原文")
+        print(f"  重试未能修复，保留原文", flush=True, file=sys.stderr)
 
     return results
 
@@ -284,6 +288,15 @@ def _translate_batch(
     """
     target = config.SUBTITLE_TARGET_LANG
 
+    # Print BEFORE glossary/processing so user sees immediate feedback.
+    # (Glossary loads from network on first call — can take seconds.)
+    print(
+        f"[字幕] 翻译批次 {batch_num}/{total_batches} "
+        f"({len(batch)} 条) 开始...",
+        flush=True,
+        file=sys.stderr,
+    )
+
     # Apply SNAP glossary: pre-replace English card/location names with
     # official Chinese translations so DeepSeek uses the correct terms.
     batch_with_glossary: list[Cue] = []
@@ -302,13 +315,6 @@ def _translate_batch(
 
     max_tokens = max(4096, len(batch) * 150)
 
-    print(
-        f"[字幕] 翻译批次 {batch_num}/{total_batches} "
-        f"({len(batch)} 条) ... ",
-        end="",
-        flush=True,
-    )
-
     try:
         response = client.chat.completions.create(
             model=config.DEEPSEEK_MODEL,
@@ -321,7 +327,7 @@ def _translate_batch(
             extra_body=extra_body if extra_body else None,
         )
     except Exception as e:
-        print(f"失败: {e}")
+        print(f"失败: {e}", flush=True, file=sys.stderr)
         # Return cues with original text on API failure
         return [
             Cue(index=c.index, start=c.start, end=c.end, text=c.text)
@@ -344,7 +350,7 @@ def _translate_batch(
     translated_count = sum(1 for c in results if c.text != next(
         (orig.text for orig in batch if orig.index == c.index), c.text
     ))
-    print(f"完成 ({translated_count}/{len(batch)} 条已翻译)")
+    print(f"[字幕] 批次 {batch_num}/{total_batches} 完成 ({translated_count}/{len(batch)} 条已翻译)", flush=True, file=sys.stderr)
 
     # Validate and retry problematic cues
     results = _validate_and_retry(client, results, batch, batch_num, total_batches)
@@ -393,7 +399,7 @@ def translate_cues(
         batches.append(cues[i:i + bs])
 
     total = len(batches)
-    print(f"[字幕] 共 {len(cues)} 条字幕，分 {total} 批翻译 ({workers} 线程并行)")
+    print(f"[字幕] 共 {len(cues)} 条字幕，分 {total} 批翻译 ({workers} 线程并行)", flush=True, file=sys.stderr)
 
     translated: list[Cue] = []
 
@@ -423,5 +429,5 @@ def translate_cues(
     # Sort by original index to ensure correct ordering
     translated.sort(key=lambda c: c.index)
 
-    print(f"[字幕] 翻译完成: {len(translated)} 条")
+    print(f"[字幕] 翻译完成: {len(translated)} 条", flush=True, file=sys.stderr)
     return translated
