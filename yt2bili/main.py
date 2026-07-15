@@ -163,6 +163,25 @@ def _remove_file(path: str, label: str) -> None:
         print(f"[清理] ⚠️ 删除{label}失败: {e}")
 
 
+def _remove_orphan_intermediates(video_path: str, video_id: str) -> None:
+    """Remove yt-dlp format-ID intermediate files left over after merging.
+
+    When yt-dlp downloads ``bestvideo+bestaudio`` it fetches individual
+    streams first (e.g. ``{id}.f401.mp4``, ``{id}.f315.webm``), then
+    merges them into the final file.  If the process was interrupted the
+    intermediates may survive — clean them up here.
+    """
+    if not video_path or not video_id:
+        return
+    parent = Path(video_path).parent
+    for f in parent.glob(f"{video_id}.f*.*"):
+        try:
+            f.unlink()
+            print(f"[清理] 已删除残留中间文件: {f.name}")
+        except OSError:
+            pass
+
+
 def _cleanup_after_success(video, cover_path: str, extra_video_paths: list[str] | None = None) -> None:
     if not config.CLEANUP_AFTER_UPLOAD:
         return
@@ -182,6 +201,11 @@ def _cleanup_after_success(video, cover_path: str, extra_video_paths: list[str] 
     _remove_file(video.thumbnail_path, "缩略图")
     if cover_path and cover_path != video.thumbnail_path:
         _remove_file(cover_path, "封面")
+    # Clean up any leftover format-ID intermediate files from yt-dlp
+    # (e.g. {id}.f401.mp4). yt-dlp deletes these after merging, but
+    # they can persist if the merge was interrupted or glitched.
+    if video.video_id:
+        _remove_orphan_intermediates(video.file_path, video.video_id)
 
 
 def process_video(url: str, credential=None) -> ProcessResult:

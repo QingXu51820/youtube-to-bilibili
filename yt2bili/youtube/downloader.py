@@ -52,12 +52,28 @@ def _is_range_not_satisfiable(exc: BaseException) -> bool:
 
 
 def _clean_partial_files(download_dir: Path, video_id: str) -> None:
-    """Remove stale .part/.ytdl files for a given video ID so retry starts fresh."""
+    """Remove stale partial/intermediate files for a given video ID so retry starts fresh.
+
+    Covers:
+    - yt-dlp .part / .ytdl temporary files
+    - format-specific intermediate streams (e.g. ``{id}.f401.mp4``) that
+      yt-dlp downloads before merging and may leave behind on interruption
+    - orphan thumbnails written by ``writethumbnail`` before a failed download
+    """
     if not download_dir or not download_dir.exists():
         return
     if not video_id:
         return
-    for pattern in (f"*{video_id}*.part", f"*{video_id}*.ytdl"):
+    patterns = (
+        f"{video_id}*.part",         # yt-dlp partial files (all variants)
+        f"{video_id}*.ytdl",         # yt-dlp info files
+        f"{video_id}.f*.*",          # format-ID intermediates ({id}.f401.mp4, {id}.f315.webm, ...)
+        f"{video_id}.webp",          # orphan thumbnail (writethumbnail)
+        f"{video_id}.jpg",           # orphan thumbnail
+        f"{video_id}.jpeg",          # orphan thumbnail
+        f"{video_id}.png",           # orphan thumbnail
+    )
+    for pattern in patterns:
         for f in download_dir.glob(pattern):
             try:
                 f.unlink()
@@ -862,8 +878,12 @@ def download_video(url: str) -> VideoInfo:
         print(f"[下载] 检测到本地视频，跳过下载: {file_path.name}")
     else:
         print(f"[下载] 开始下载 (≤{config.MAX_HEIGHT}p)")
-        actual_path = _download_with_progress(url, output_template, info=info)
-        file_path = Path(actual_path) if actual_path else _find_downloaded_video(download_dir, video_id)
+        try:
+            actual_path = _download_with_progress(url, output_template, info=info)
+            file_path = Path(actual_path) if actual_path else _find_downloaded_video(download_dir, video_id)
+        except Exception:
+            _clean_partial_files(download_dir, video_id)
+            raise
 
     # Sanity check
     if not file_path or not file_path.exists():
