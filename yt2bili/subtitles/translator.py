@@ -24,11 +24,14 @@ subtitle segments from their source language to {target_lang}.
 Rules:
 1. Each line is formatted as NUMBER|TEXT. Translate ONLY the TEXT part.
 2. Keep the NUMBER| prefix exactly the same — do not change numbers.
-3. Return EXACTLY the same number of lines as the input.
-4. Preserve the original tone and style. Make the translation natural.
-5. Do NOT add explanations, notes, or extra text.
-6. If a line is already in the target language or is untranslatable \
-(sound effects, names), keep it as-is but still output NUMBER|TEXT."""
+3. Return EXACTLY the same number of lines as the input. NO EXCEPTIONS.
+4. ONE translation per line — never merge multiple segments into one line.
+5. Preserve the original tone and style. Make the translation natural.
+6. Do NOT add explanations, notes, or extra text.
+7. If a line is already in the target language or is untranslatable \
+(sound effects, names), keep it as-is but still output NUMBER|TEXT.
+8. CRITICAL: Every NUMBER from the input MUST appear once as a NUMBER| prefix in the output."""
+
 
 _USER_PREFIX = "Translate these subtitle segments to {target_lang}:\n\n"
 
@@ -87,6 +90,177 @@ def _parse_batch_response(raw: str, expected_count: int) -> list[tuple[int, str]
         )
 
     return result
+
+
+def _is_untranslated(text: str) -> bool:
+    """
+    Check if text appears to be untranslated (mostly ASCII alphabetic chars).
+
+    For Chinese-target translations, a cue that is mostly Latin letters
+    was likely not translated by the model.
+    """
+    if not text:
+        return False
+    alpha_chars = [c for c in text if c.isalpha()]
+    if not alpha_chars:
+        return False
+    ascii_alpha = sum(1 for c in alpha_chars if c.isascii())
+    return ascii_alpha / len(alpha_chars) > 0.7
+
+
+def _needs_retranslate(cue: Cue) -> bool:
+    """
+    Check if a translated cue needs re-translation.
+
+    Detects two failure modes from batch translation:
+    1. Oversized text (>200 chars) — model merged multiple translations.
+    2. Still in English — model skipped this cue.
+    """
+    if len(cue.text) > 200:
+        return True
+    if _is_untranslated(cue.text):
+        return True
+    return False
+
+
+def _retranslate_small_batch(
+    client: OpenAI,
+    cues: list[Cue],
+    batch_num: int,
+    total_batches: int,
+) -> list[Cue]:
+    """
+    Re-translate a small batch of problematic cues.
+
+    Uses a stricter prompt and very small batch to maximize format compliance.
+    Falls back to original text on any failure.
+    """
+    if not cues:
+        return []
+
+    target = config.SUBTITLE_TARGET_LANG
+
+    # Apply glossary
+    batch_with_glossary: list[Cue] = []
+    for cue in cues:
+        replaced_text = _apply_glossary(cue.text)
+        batch_with_glossary.append(
+            Cue(index=cue.index, start=cue.start, end=cue.end, text=replaced_text)
+        )
+
+    input_text = _format_batch(batch_with_glossary)
+    prompt = _USER_PREFIX.format(target_lang=target) + input_text
+
+    extra_body: dict = {}
+    if config.DEEPSEEK_THINKING == "enabled":
+        extra_body = {"thinking": {"type": "enabled"}}
+
+    max_tokens = max(1024, len(cues) * 200)
+
+    try:
+        response = client.chat.completions.create(
+            model=config.DEEPSEEK_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": _SYSTEM_PROMPT.format(target_lang=target)
+                    + "\nThis is a re-translation of previously failed segments. "
+                    + "Be EXTREMELY careful with the NUMBER|TEXT format.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,  # lower temperature for more deterministic output
+            max_tokens=max_tokens,
+            extra_body=extra_body if extra_body else None,
+        )
+    except Exception as e:
+        print(f"  重试失败: {e}")
+        return [
+            Cue(index=c.index, start=c.start, end=c.end, text=c.text)
+            for c in cues
+        ]
+
+    raw = response.choices[0].message.content or ""
+    parsed = _parse_batch_response(raw, len(cues))
+    trans_map: dict[int, str] = {idx: text for idx, text in parsed}
+
+    results: list[Cue] = []
+    for cue in cues:
+        translated = trans_map.get(cue.index, cue.text)
+        results.append(
+            Cue(index=cue.index, start=cue.start, end=cue.end, text=translated)
+        )
+
+    return results
+
+
+def _validate_and_retry(
+    client: OpenAI,
+    results: list[Cue],
+    original_batch: list[Cue],
+    batch_num: int,
+    total_batches: int,
+) -> list[Cue]:
+    """
+    Validate translated cues and re-translate any problematic ones.
+
+    Returns corrected list of cues (same length and order as *results*).
+    """
+    # Find cues that need re-translation
+    failed_indices: set[int] = set()
+    for i, cue in enumerate(results):
+        if _needs_retranslate(cue):
+            failed_indices.add(i)
+
+    if not failed_indices:
+        return results
+
+    # Collect original cues that failed
+    failed_cues: list[Cue] = []
+    for i in failed_indices:
+        if i < len(original_batch):
+            failed_cues.append(original_batch[i])
+
+    if not failed_cues:
+        return results
+
+    n_failed = len(failed_cues)
+    n_oversized = sum(1 for i in failed_indices if len(results[i].text) > 200)
+    n_untrans = n_failed - n_oversized
+
+    print(
+        f"  [WARN] {n_failed} 条异常"
+        + (f"（{n_oversized} 条合并, {n_untrans} 条未翻译）" if n_oversized else "")
+        + f"，逐个重试..."
+    )
+
+    # Re-translate in very small groups (5 at a time) for speed
+    retry_batch_size = 5
+    retry_map: dict[int, str] = {}
+
+    for start in range(0, len(failed_cues), retry_batch_size):
+        group = failed_cues[start:start + retry_batch_size]
+        retried = _retranslate_small_batch(client, group, batch_num, total_batches)
+        for cue in retried:
+            retry_map[cue.index] = cue.text
+
+    # Merge retry results back
+    corrected = 0
+    for cue in results:
+        if cue.index in retry_map:
+            new_text = retry_map[cue.index]
+            if not _needs_retranslate(
+                Cue(index=cue.index, start=0, end=0, text=new_text)
+            ):
+                cue.text = new_text
+                corrected += 1
+
+    if corrected > 0:
+        print(f"  重试修复 {corrected}/{n_failed} 条")
+    else:
+        print(f"  重试未能修复，保留原文")
+
+    return results
 
 
 def _translate_batch(
@@ -172,6 +346,9 @@ def _translate_batch(
     ))
     print(f"完成 ({translated_count}/{len(batch)} 条已翻译)")
 
+    # Validate and retry problematic cues
+    results = _validate_and_retry(client, results, batch, batch_num, total_batches)
+
     return results
 
 
@@ -206,7 +383,7 @@ def translate_cues(
 
     bs = batch_size if batch_size is not None else config.SUBTITLE_TRANSLATE_BATCH_SIZE
     if bs < 1:
-        bs = 80
+        bs = 30
 
     workers = max(1, int(getattr(config, "SUBTITLE_TRANSLATE_WORKERS", 3) or 3))
 
