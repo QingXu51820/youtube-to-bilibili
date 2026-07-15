@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+
+import tqdm
 from pathlib import Path
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -285,6 +287,34 @@ async def _upload_async(
                 print(f"[上传] ❌ 上传失败: {event_data}")
         else:
             print(f"[上传] ❌ 上传失败: {event_data}")
+
+    # ── upload progress bar (chunk-level) ──────────────────────────
+    _pbar_state: dict[str, tqdm.tqdm | None] = {"pbar": None}
+
+    @uploader.on(video_uploader.VideoUploaderEvents.AFTER_CHUNK.value)
+    async def _on_after_chunk(event_data=None):
+        if event_data is None:
+            return
+        if _pbar_state["pbar"] is None:
+            page = event_data.get("page")
+            filename = Path(page.path).name if page else "?"
+            total = event_data.get("total_chunk_count", 1)
+            _pbar_state["pbar"] = tqdm.tqdm(
+                total=total,
+                desc=f"  [上传] {filename}",
+                unit="chunk",
+                bar_format="{desc} {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}"
+                           " [{elapsed}<{remaining}, {rate_fmt}]",
+                ncols=100,
+            )
+        if _pbar_state["pbar"] is not None:
+            _pbar_state["pbar"].update(1)
+
+    @uploader.on(video_uploader.VideoUploaderEvents.AFTER_PAGE.value)
+    async def _on_after_page(event_data=None):
+        if _pbar_state["pbar"] is not None:
+            _pbar_state["pbar"].close()
+            _pbar_state["pbar"] = None
 
     try:
         result = await uploader.start()
