@@ -32,13 +32,15 @@ def _build_client(timeout: float = _DEFAULT_TIMEOUT) -> httpx.Client:
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/120.0.0.0 Safari/537.36"
         ),
-        "Referer": "https://www.bilibili.com",
+        "Referer": "https://member.bilibili.com",
+        "Origin": "https://member.bilibili.com",
     }
     cookies = {}
     if config.BILI_SESSDATA:
         cookies["SESSDATA"] = config.BILI_SESSDATA
     if config.BILI_BUVID3:
         cookies["buvid3"] = config.BILI_BUVID3
+    cookies["opus-goback"] = "1"
 
     return httpx.Client(
         headers=headers,
@@ -227,11 +229,11 @@ def _dedup_subtitles(aid: int, cid: int, lan: str) -> int:
 
 
 def submit_subtitle(
-    aid: int,
+    bvid: str,
     cid: int,
     subtitle_json: dict,
     lan: str = "zh",
-    lan_doc: str = "",
+    aid: int = 0,
 ) -> dict:
     """
     Submit soft subtitles to Bilibili for a specific video page.
@@ -239,12 +241,12 @@ def submit_subtitle(
     Uses the Bilibili CC subtitle draft/save API.
 
     Args:
-        aid: Video aid (AV number).
+        bvid: Bilibili BV ID (e.g. ``"BV1xxxx"``).
         cid: Video page cid.
         subtitle_json: Dict in Bilibili subtitle JSON format
             (see :func:`yt2bili.subtitles.bilibili_format.cues_to_bilibili_json`).
-        lan: Language code (default ``"zh"`` for Chinese).
-        lan_doc: Ignored — Bilibili derives this from ``lan``.
+        lan: Language code (default ``"zh-CN"`` for Chinese).
+        aid: Video aid (AV number), used only for dedup.
 
     Returns:
         JSON response dict from the Bilibili API.
@@ -259,35 +261,36 @@ def submit_subtitle(
 
     # Dedup: remove existing same-language subtitle before creating a new one.
     # Each draft/save creates a new track; we want exactly one per language.
-    _dedup_subtitles(aid, cid, lan)
+    if aid:
+        _dedup_subtitles(aid, cid, lan)
 
     # Serialize the subtitle body as JSON
     data_str = json.dumps(subtitle_json, ensure_ascii=False)
 
     form_data = {
-        "type": "1",                  # required: subtitle type
-        "oid": str(cid),              # cid is sent as "oid", not "cid"
-        "aid": str(aid),
-        "lan": lan,                   # e.g. "zh" not "zh-CN"
+        "type": 1,                    # subtitle type: 1=manual upload
+        "oid": cid,                   # cid is sent as "oid", not "cid"
+        "lan": lan,                   # language code, e.g. "zh"
         "data": data_str,             # URL-encoded JSON body
         "submit": "true",
-        "sign": "false",              # must be "false"
+        "sign": "false",
+        "bvid": bvid,
         "csrf": config.BILI_BILI_JCT,
+        "csrf_token": config.BILI_BILI_JCT,
     }
 
     # Debug: log the request (truncate data for readability)
-    debug_form = {k: (v[:80] + "...") if k == "data" and len(v) > 80 else v for k, v in form_data.items()}
+    debug_form = {k: (str(v)[:80] + "...") if k == "data" and len(str(v)) > 80 else v for k, v in form_data.items()}
     print(f"[字幕] 请求: POST {_BILIBILI_SUBTITLE_DRAFT_URL}")
-    print(f"[字幕] 参数: {json.dumps(debug_form, ensure_ascii=False)}")
+    print(f"[字幕] 参数: {json.dumps(debug_form, ensure_ascii=False, default=str)}")
 
     with _build_client(timeout=_UPLOAD_TIMEOUT) as client:
         try:
             resp = client.post(_BILIBILI_SUBTITLE_DRAFT_URL, data=form_data)
-            # Log raw response for debugging
+            # Log raw response (only when non-JSON Content-Type)
             ct = resp.headers.get("content-type", "")
             if "json" not in ct:
-                print(f"[字幕] [WARN] 响应非 JSON (Content-Type: {ct})")
-                print(f"[字幕] HTTP {resp.status_code}: {resp.text[:300]}")
+                print(f"[字幕] [DEBUG] HTTP {resp.status_code}: {resp.text[:300]}")
             data = _check_response(resp, "submit_subtitle")
         except httpx.RequestError as e:
             raise RuntimeError(f"B站字幕上传网络错误: {e}")
@@ -302,6 +305,35 @@ def submit_subtitle(
         )
 
     return data
+
+
+def _cleanup_subtitle_files(translated_path: str) -> None:
+    """
+    Delete subtitle files after successful upload to Bilibili.
+
+    Removes all ``.srt`` files with the same video ID prefix.
+    Controlled by ``config.CLEANUP_AFTER_UPLOAD``.
+    """
+    if not config.CLEANUP_AFTER_UPLOAD:
+        return
+
+    translated = Path(translated_path)
+    # Derive video_id by stripping the target lang suffix: {video_id}.{lang}.srt
+    # e.g. "hPXnQ-hO6S8.zh-CN.srt" → video_id = "hPXnQ-hO6S8"
+    stem = translated.name  # "hPXnQ-hO6S8.zh-CN.srt"
+    video_id = stem.split(".")[0]  # everything before the first dot
+    subtitle_dir = translated.parent
+
+    deleted = []
+    for f in subtitle_dir.glob(f"{video_id}.*.srt"):
+        try:
+            f.unlink()
+            deleted.append(str(f.name))
+        except OSError as e:
+            print(f"[字幕] [WARN] 无法删除字幕文件 {f.name}: {e}")
+
+    if deleted:
+        print(f"[字幕] 已清理: {', '.join(deleted)}")
 
 
 # ── Deferred subtitle upload ────────────────────────────────────────────
@@ -341,21 +373,141 @@ def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
     tmp.replace(path)
 
 
+def _recover_orphaned_subtitles(
+    existing_bvids: set[str],
+) -> list[dict]:
+    """
+    Scan subtitle directory for ``.zh-CN.srt`` files not in the pending queue.
+
+    Cross-references with ``upload_log.json`` to find BVID, queries Bilibili
+    to confirm no zh-CN subtitles exist yet, and returns entries worth retrying.
+    Also pre-fetches CID from the API response to avoid duplicate queries later.
+    """
+    subtitle_dir = Path(config.SUBTITLE_DIR)
+    if not subtitle_dir.exists():
+        return []
+
+    # Read upload_log mapping
+    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
+    try:
+        if not upload_log_path.exists():
+            return []
+        upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(upload_log, list):
+            return []
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    vid_to_entry: dict[str, dict] = {}
+    for item in upload_log:
+        vid = item.get("video_id")
+        bv = item.get("bvid")
+        aid = item.get("aid", 0)
+        if vid and bv:
+            vid_to_entry[vid] = {"bvid": bv, "aid": aid}
+
+    # Collect orphaned .zh-CN.srt files (skip ones already in pending)
+    orphaned: list[dict] = []
+    for srt in sorted(subtitle_dir.glob("*.zh-CN.srt")):
+        video_id = srt.name.split(".", 1)[0]
+        info = vid_to_entry.get(video_id)
+        if not info:
+            continue
+        bvid = info["bvid"]
+        if bvid in existing_bvids:
+            continue
+
+        orphaned.append({
+            "bvid": bvid,
+            "aid": info["aid"],
+            "translated_path": str(srt),
+        })
+
+    if not orphaned:
+        return []
+
+    print(f"[字幕] 发现 {len(orphaned)} 个被丢弃的字幕文件，检查B站状态...")
+    recoverable: list[dict] = []
+    skipped_has_sub = 0
+    client = _build_client(timeout=_DEFAULT_TIMEOUT)
+
+    for i, entry in enumerate(orphaned, 1):
+        bvid = entry["bvid"]
+        try:
+            resp = client.get(_BILIBILI_VIDEO_INFO_URL, params={"bvid": bvid})
+            time.sleep(0.3)  # avoid rate limiting
+            if resp.status_code != 200:
+                recoverable.append(entry)
+                if i % 10 == 0:
+                    print(f"[字幕]   已扫描 {i}/{len(orphaned)}...")
+                continue
+            data = resp.json()
+            if data.get("code") != 0:
+                # Some videos may be deleted / not visible
+                if i % 10 == 0:
+                    print(f"[字幕]   已扫描 {i}/{len(orphaned)}...")
+                continue  # skip unreachable videos
+
+            # Check if zh-CN subtitles already exist on Bilibili
+            subtitle_list = data.get("data", {}).get("subtitle", {}).get("list", [])
+            has_zh = any(s.get("lan", "").startswith("zh") for s in subtitle_list)
+            if has_zh:
+                skipped_has_sub += 1
+                continue  # already uploaded, skip
+
+            # Pre-extract CID so upload_pending_subtitles can skip wait_for_cid
+            pages = data.get("data", {}).get("pages", [])
+            if pages and pages[0].get("cid", 0) > 0:
+                entry["cid"] = int(pages[0]["cid"])
+
+            recoverable.append(entry)
+        except Exception:
+            recoverable.append(entry)  # err on the side of retrying, but no CID
+
+        if i % 10 == 0:
+            print(f"[字幕]   已扫描 {i}/{len(orphaned)}...")
+
+    client.close()
+
+    if recoverable:
+        with_cid = sum(1 for e in recoverable if e.get("cid"))
+        print(f"[字幕] {len(recoverable)} 个可重试（{with_cid} 已有 CID），"
+              f"{skipped_has_sub} 个B站已有，已加入上传队列")
+    elif skipped_has_sub > 0:
+        print(f"[字幕] 所有丢弃的字幕文件在B站已存在（{skipped_has_sub} 个），跳过")
+
+    return recoverable
+
+
 def upload_pending_subtitles() -> int:
     """Try to upload pending subtitles. Returns count of successfully uploaded."""
     path = _pending_subtitles_path()
-    if not path.exists():
-        return 0
 
-    try:
-        entries = json.loads(path.read_text(encoding="utf-8-sig"))
-        if not isinstance(entries, list) or not entries:
-            return 0
-    except (json.JSONDecodeError, OSError):
-        return 0
+    entries: list[dict] = []
+    if path.exists():
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8-sig"))
+            if not isinstance(entries, list):
+                entries = []
+        except (json.JSONDecodeError, OSError):
+            pass
 
     from yt2bili.subtitles.parser import parse_subtitle
     from yt2bili.subtitles.bilibili_format import cues_to_bilibili_json
+
+    # Recover orphaned subtitles (previously marked as permanent failures)
+    existing_bvids = {e.get("bvid", "") for e in entries}
+    recovered = _recover_orphaned_subtitles(existing_bvids)
+    if recovered:
+        entries.extend(recovered)
+        # Persist merged list
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+
+    if not entries:
+        return 0
 
     print(f"[字幕] 检查 {len(entries)} 条待上传字幕...")
     remaining: list[dict] = []
@@ -369,14 +521,19 @@ def upload_pending_subtitles() -> int:
         if not bvid or not translated_path:
             continue
 
-        try:
-            cid = wait_for_cid(bvid=bvid, aid=aid, timeout=30, interval=5)
-        except TimeoutError:
-            remaining.append(entry)
-            continue
-        except Exception:
-            remaining.append(entry)
-            continue
+        # Use CID from recovery scan if available; otherwise poll
+        cid = entry.get("cid", 0)
+        if cid and cid > 0:
+            print(f"[字幕] 使用缓存 CID={cid} (BV={bvid})")
+        else:
+            try:
+                cid = wait_for_cid(bvid=bvid, aid=aid, timeout=30, interval=5)
+            except TimeoutError:
+                remaining.append(entry)
+                continue
+            except Exception:
+                remaining.append(entry)
+                continue
 
         try:
             cues = parse_subtitle(translated_path)
@@ -384,12 +541,14 @@ def upload_pending_subtitles() -> int:
                 remaining.append(entry)
                 continue
             subtitle_json = cues_to_bilibili_json(cues)
-            submit_subtitle(aid=aid, cid=cid, subtitle_json=subtitle_json, lan="zh")
+            submit_subtitle(bvid=bvid, cid=cid, subtitle_json=subtitle_json, aid=aid)
             uploaded += 1
+            # Cleanup subtitle files after successful upload
+            _cleanup_subtitle_files(translated_path)
         except Exception as e:
             err_str = str(e)
             # Permanent Bilibili errors — don't retry
-            if "79006" in err_str or "79014" in err_str or "79019" in err_str:
+            if "79014" in err_str or "79019" in err_str:
                 print(f"[字幕] [WARN] 永久失败，放弃 ({bvid}): {e}")
             else:
                 print(f"[字幕] [WARN] 延迟上传失败 ({bvid}): {e}")
