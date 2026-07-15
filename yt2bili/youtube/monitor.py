@@ -886,6 +886,7 @@ def run_monitor_loop(
     interval_seconds: int,
     once: bool,
     dry_run: bool,
+    skip_subtitle_upload: bool = False,
     profiles: list[Any] | None = None,  # list of yt2bili.profile.Profile (lazy import)
     **cycle_kwargs: Any,
 ) -> int:
@@ -940,7 +941,8 @@ def run_monitor_loop(
                         cache_file=profile_cache,
                     )
                     # Try deferred subtitle uploads (CID may be ready by now)
-                    _try_deferred_subtitles()
+                    if not skip_subtitle_upload:
+                        _try_deferred_subtitles()
                 except YouTubeNetworkError as exc:
                     print(f"\n[订阅] ⚠️ 网络错误 ({profile.name}): {exc}")
                     continue
@@ -969,7 +971,8 @@ def run_monitor_loop(
                 dry_run=dry_run,
                 **cycle_kwargs,
             )
-            _try_deferred_subtitles()
+            if not skip_subtitle_upload:
+                _try_deferred_subtitles()
             consecutive_failures = 0  # reset on success
         except YouTubeNetworkError as exc:
             consecutive_failures += 1

@@ -98,6 +98,7 @@ import gc
 import sys
 import os
 import json
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -564,6 +565,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--monitor", action="store_true", help="每小时检查 YouTube 订阅更新并自动上传")
     parser.add_argument("--subtitle-only", action="store_true", help="仅轮询上传待处理字幕（不上传视频）")
     parser.add_argument("--subtitle-interval", type=int, default=600, help="字幕轮询间隔秒数（默认 600=10分钟）")
+    parser.add_argument("--no-subtitle-upload", action="store_true", help="跳过延迟字幕上传（仅下载+翻译，不提交到 B站）")
     parser.add_argument("--discord", action="store_true", help="实时监听 Discord 频道消息并搬运到 B站动态")
     parser.add_argument("--once", action="store_true", help="仅执行一次（--monitor / --subtitle-only 模式下生效）")
     parser.add_argument("--dry-run", action="store_true", help="仅在 --monitor 模式下打印待处理视频")
@@ -834,6 +836,7 @@ def main():
             interval_seconds=args.monitor_interval,
             once=False,
             dry_run=False,
+            skip_subtitle_upload=args.no_subtitle_upload,
             state_path=project_path(args.monitor_state),
             source=args.monitor_source,
             limit=args.monitor_limit,
@@ -861,6 +864,7 @@ def main():
             interval_seconds=args.monitor_interval,
             once=args.once,
             dry_run=args.dry_run,
+            skip_subtitle_upload=args.no_subtitle_upload,
             profiles=profile_list,
             state_path=project_path(args.monitor_state),
             source=args.monitor_source,
@@ -898,6 +902,7 @@ def main():
             interval_seconds=args.monitor_interval,
             once=args.once,
             dry_run=args.dry_run,
+            skip_subtitle_upload=args.no_subtitle_upload,
             state_path=project_path(monitor_state),
             source=args.monitor_source,
             limit=args.monitor_limit,
