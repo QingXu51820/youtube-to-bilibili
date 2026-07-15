@@ -9,6 +9,9 @@ data/snap_glossary.json
 /config/subscriptions_cache.json
 /config/urls.txt
 
+# Tools (auxiliary scripts)
+tools/
+
 # Downloaded videos
 downloads/
 runs/
