@@ -86,9 +86,22 @@ def _parse_batch_response(raw: str, expected_count: int) -> list[tuple[int, str]
             continue
 
     if len(result) != expected_count:
+        returned_indices = {idx for idx, _ in result}
+        expected_indices = set(range(1, expected_count + 1))
+        missing = expected_indices - returned_indices
+        extra = returned_indices - expected_indices
+        detail_parts: list[str] = []
+        if missing:
+            missing_list = sorted(missing)[:10]
+            detail_parts.append(f"缺失 #{missing_list}" + ("..." if len(missing) > 10 else ""))
+        if extra:
+            extra_list = sorted(extra)[:10]
+            detail_parts.append(f"多余 #{extra_list}" + ("..." if len(extra) > 10 else ""))
+        detail = "; ".join(detail_parts) if detail_parts else ""
         print(
             f"[字幕] [WARN] 翻译批次返回 {len(result)} 条，"
-            f"预期 {expected_count} 条",
+            f"预期 {expected_count} 条"
+            + (f"（{detail}）" if detail else ""),
             flush=True, file=sys.stderr,
         )
 
@@ -178,6 +191,11 @@ def _retranslate_small_batch(
         )
     except Exception as e:
         print(f"  重试失败: {e}", flush=True, file=sys.stderr)
+        for c in cues:
+            preview = c.text[:80].replace("\n", " ")
+            if len(c.text) > 80:
+                preview += "..."
+            print(f"    #{c.index} `{preview}`", flush=True, file=sys.stderr)
         return [
             Cue(index=c.index, start=c.start, end=c.end, text=c.text)
             for c in cues
@@ -231,12 +249,33 @@ def _validate_and_retry(
     n_oversized = sum(1 for i in failed_indices if len(results[i].text) > 200)
     n_untrans = n_failed - n_oversized
 
+    # Build detail lines showing the problematic subtitle content
+    detail_lines: list[str] = []
+    for i in failed_indices:
+        result_cue = results[i]
+        orig = original_batch[i] if i < len(original_batch) else None
+        reason = (
+            "oversized" if len(result_cue.text) > 200 else "untranslated"
+        )
+        preview = result_cue.text[:80].replace("\n", " ")
+        if len(result_cue.text) > 80:
+            preview += "..."
+        line = f"    #{result_cue.index} [{reason}] `{preview}`"
+        if orig and orig.text != result_cue.text:
+            orig_preview = orig.text[:60].replace("\n", " ")
+            if len(orig.text) > 60:
+                orig_preview += "..."
+            line += f"  ← orig: `{orig_preview}`"
+        detail_lines.append(line)
+
     print(
         f"  [WARN] {n_failed} 条异常"
         + (f"（{n_oversized} 条合并, {n_untrans} 条未翻译）" if n_oversized else "")
         + f"，逐个重试...",
         flush=True, file=sys.stderr,
     )
+    for line in detail_lines:
+        print(line, flush=True, file=sys.stderr)
 
     # Re-translate in very small groups (5 at a time) for speed
     retry_batch_size = 5
@@ -250,6 +289,7 @@ def _validate_and_retry(
 
     # Merge retry results back
     corrected = 0
+    still_bad: list[tuple[int, str]] = []
     for cue in results:
         if cue.index in retry_map:
             new_text = retry_map[cue.index]
@@ -258,11 +298,27 @@ def _validate_and_retry(
             ):
                 cue.text = new_text
                 corrected += 1
+            else:
+                preview = new_text[:80].replace("\n", " ")
+                if len(new_text) > 80:
+                    preview += "..."
+                still_bad.append((cue.index, preview))
 
     if corrected > 0:
-        print(f"  重试修复 {corrected}/{n_failed} 条", flush=True, file=sys.stderr)
+        msg = f"  重试修复 {corrected}/{n_failed} 条"
+        if still_bad:
+            msg += f"，仍异常 {len(still_bad)} 条:"
+        print(msg, flush=True, file=sys.stderr)
+        for idx, preview in still_bad:
+            print(f"    #{idx} `{preview}`", flush=True, file=sys.stderr)
     else:
-        print(f"  重试未能修复，保留原文", flush=True, file=sys.stderr)
+        print(f"  重试未能修复，保留原文:", flush=True, file=sys.stderr)
+        for cue in failed_cues:
+            text = retry_map.get(cue.index, cue.text)
+            preview = text[:80].replace("\n", " ")
+            if len(text) > 80:
+                preview += "..."
+            print(f"    #{cue.index} `{preview}`", flush=True, file=sys.stderr)
 
     return results
 

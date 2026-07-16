@@ -64,6 +64,16 @@ def _check_response(resp: httpx.Response, label: str = "Bilibili API") -> dict:
     code = data.get("code", -1)
     if code != 0:
         msg = data.get("message", str(data))
+        # Include detailed error data when available (e.g. subtitle line errors)
+        err_data = data.get("data")
+        if isinstance(err_data, list) and err_data:
+            details = "; ".join(
+                f"L{d.get('line', '?')}: {d.get('error_msg', str(d))}"
+                for d in err_data[:10]
+            )
+            if len(err_data) > 10:
+                details += f" ...(+{len(err_data) - 10} more)"
+            msg = f"{msg} [{details}]"
         raise RuntimeError(f"{label} 返回错误 (code={code}): {msg}")
 
     return data
@@ -536,11 +546,34 @@ def upload_pending_subtitles() -> int:
                 continue
 
         try:
+            # Check file still exists before attempting parse.
+            # If the file was already cleaned up (e.g. previous partial
+            # success), there is no point keeping it in the queue.
+            if not Path(translated_path).exists():
+                print(
+                    f"[字幕] [WARN] 永久失败，文件缺失 ({bvid}): {translated_path}",
+                    flush=True,
+                )
+                continue  # drop from queue — don't re-add to remaining
+
             cues = parse_subtitle(translated_path)
             if not cues:
                 remaining.append(entry)
                 continue
-            subtitle_json = cues_to_bilibili_json(cues)
+
+            # Fetch video duration to validate cue timestamps.
+            # Avoids 79014 "字幕时间点超过视频时间长度" rejections.
+            video_duration: float = 0.0
+            try:
+                pages = get_video_pages(bvid=bvid, aid=aid)
+                if pages and pages[0].get("duration", 0) > 0:
+                    video_duration = float(pages[0]["duration"])
+            except Exception:
+                pass  # duration is best-effort; proceed without it if unavailable
+
+            subtitle_json = cues_to_bilibili_json(
+                cues, video_duration=video_duration or None,
+            )
             submit_subtitle(bvid=bvid, cid=cid, subtitle_json=subtitle_json, aid=aid)
             uploaded += 1
             # Cleanup subtitle files after successful upload
@@ -548,7 +581,7 @@ def upload_pending_subtitles() -> int:
         except Exception as e:
             err_str = str(e)
             # Permanent Bilibili errors — don't retry
-            if "79014" in err_str or "79019" in err_str:
+            if any(code in err_str for code in ("79006", "79014", "79019")):
                 print(f"[字幕] [WARN] 永久失败，放弃 ({bvid}): {e}")
             else:
                 print(f"[字幕] [WARN] 延迟上传失败 ({bvid}): {e}")
