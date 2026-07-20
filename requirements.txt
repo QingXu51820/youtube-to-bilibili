@@ -14,9 +14,12 @@ Pillow>=10.0.0
 # Bilibili Upload
 bilibili-api-python>=16.0.0
 nest_asyncio>=1.5.0
+tqdm>=4.66.0
 
-# HTTP client (required by bilibili-api-python, choose one)
+# HTTP client
 aiohttp>=3.8.0
+httpx>=0.27.0
+requests>=2.31.0
 
 # Configuration
 python-dotenv>=1.0.0
