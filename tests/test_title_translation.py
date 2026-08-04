@@ -5,6 +5,7 @@ import types
 import unittest
 from unittest.mock import patch
 
+from yt2bili import config
 from yt2bili.translation import translator
 
 
@@ -254,6 +255,40 @@ class ContentFilterHelperTests(unittest.TestCase):
         )
         # 中英文之间的空格保留，纯 CJK 相邻的空格全部塌缩
         self.assertEqual(translator._cleanup_cjk_spaces("保持 英文 空格"), "保持英文空格")
+
+
+class GetTranslatorTests(unittest.TestCase):
+    """get_translator：按 TRANSLATE_PROVIDER 选择实现，单例缓存。"""
+
+    def setUp(self):
+        # 重置全局单例，避免测试间相互依赖
+        patcher = patch.object(translator, "_translator_instance", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_cached_instance_returned(self):
+        fake = object()
+        with patch.object(translator, "_translator_instance", fake):
+            self.assertIs(translator.get_translator(), fake)
+
+    def test_openai_provider(self):
+        with patch.object(config, "TRANSLATE_PROVIDER", "openai"), \
+             patch.object(config, "OPENAI_API_KEY", "fake-key"), \
+             patch.object(config, "OPENAI_BASE_URL", ""):
+            inst = translator.get_translator()
+        self.assertIsInstance(inst, translator.OpenAITranslator)
+
+    def test_deepseek_provider(self):
+        with patch.object(config, "TRANSLATE_PROVIDER", "deepseek"), \
+             patch.object(config, "DEEPSEEK_API_KEY", "fake-key"), \
+             patch.object(config, "DEEPSEEK_BASE_URL", ""):
+            inst = translator.get_translator()
+        self.assertIsInstance(inst, translator.DeepSeekTranslator)
+
+    def test_unknown_provider_falls_back_to_google(self):
+        with patch.object(config, "TRANSLATE_PROVIDER", "weird"):
+            inst = translator.get_translator()
+        self.assertIsInstance(inst, translator.GoogleTranslator)
 
 
 if __name__ == "__main__":

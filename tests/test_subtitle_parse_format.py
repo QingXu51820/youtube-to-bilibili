@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from yt2bili.subtitles import bilibili_format as bf
+from yt2bili.subtitles import writer
+from yt2bili.subtitles import parser as parser_mod
 from yt2bili.subtitles.parser import (
     Cue,
     _parse_srt_text,
@@ -226,6 +228,83 @@ class CuesToBilibiliJsonTests(unittest.TestCase):
         self.assertEqual(len(content), 81)  # 80 + "…"
         self.assertTrue(content.endswith("…"))
         self.assertIn("字幕过长", err.getvalue())
+
+
+class ParseSrtFileTests(unittest.TestCase):
+    """parse_srt 文件级包装（内部 _parse_srt_text 已测，这里测文件读取）。"""
+
+    def test_file_level_parse(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "a.srt"
+            p.write_text("1\n00:00:01,000 --> 00:00:02,500\nHi\n", encoding="utf-8")
+            cues = parser_mod.parse_srt(p)
+        self.assertEqual(len(cues), 1)
+        self.assertEqual(cues[0].text, "Hi")
+        self.assertAlmostEqual(cues[0].start, 1.0)
+
+    def test_bom_stripped_at_file_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "a.srt"
+            p.write_bytes(b"\xef\xbb\xbf1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+            cues = parser_mod.parse_srt(p)
+        self.assertEqual(len(cues), 1)
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            parser_mod.parse_srt("no/such.srt")
+
+    def test_parse_vtt_file_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "a.vtt"
+            p.write_text("WEBVTT\n\n00:01.000 --> 00:04.500\nHello VTT\n", encoding="utf-8")
+            cues = parser_mod.parse_vtt(p)
+        self.assertEqual(cues[0].text, "Hello VTT")
+        self.assertAlmostEqual(cues[0].start, 1.0)
+
+    def test_parse_vtt_missing_file_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            parser_mod.parse_vtt("no/such.vtt")
+
+
+class WriteSrtTests(unittest.TestCase):
+    """write_srt：写出标准 SRT 文件、序号重编号、时间戳格式化。"""
+
+    def test_writes_standard_srt_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.srt"
+            result = writer.write_srt([
+                Cue(index=5, start=1.0, end=2.5, text="第一行"),
+                Cue(index=9, start=10.0, end=11.0, text="第二行"),
+            ], out)
+            content = out.read_text(encoding="utf-8")
+        self.assertIn("00:00:01,000 --> 00:00:02,500", content)
+        self.assertIn("第一行", content)
+        self.assertIn("第二行", content)
+        # 序号按输出顺序重新编号，忽略输入 index
+        digits = [l for l in content.splitlines() if l.strip().isdigit()]
+        self.assertEqual(digits, ["1", "2"])
+        # 返回绝对路径
+        self.assertEqual(result, str(out.resolve()))
+
+    def test_creates_parent_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "sub" / "deep" / "out.srt"
+            writer.write_srt([Cue(index=1, start=0.0, end=1.0, text="x")], out)
+            self.assertTrue(out.exists())
+
+    def test_write_then_parse_roundtrip(self):
+        """写出的 SRT 能被 parse_srt 原样读回。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "rt.srt"
+            writer.write_srt([Cue(index=1, start=1.5, end=4.0, text="round trip")], out)
+            cues = parser_mod.parse_srt(out)
+        self.assertEqual(cues[0].text, "round trip")
+        self.assertAlmostEqual(cues[0].start, 1.5)
+        self.assertAlmostEqual(cues[0].end, 4.0)
+
+    def test_millisecond_overflow_clamped(self):
+        """1.9996s 的毫秒进位到 1000 时归零并进秒。"""
+        self.assertEqual(writer._seconds_to_srt_timestamp(1.9996), "00:00:02,000")
 
 
 if __name__ == "__main__":

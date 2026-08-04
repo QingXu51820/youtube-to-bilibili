@@ -378,5 +378,69 @@ class RunMonitorCycleTests(unittest.TestCase):
         self.assertIn("v1", called_url)
 
 
+class FetchVideoQueueDetailsTests(unittest.TestCase):
+    """fetch_video_queue_details：批量拉取时长/直播回放信息。"""
+
+    def _mock_service(self, response):
+        """youtube.videos().list(...) → request（execute() 返回 response）。"""
+        request = Mock()
+        request.execute.return_value = response
+        service = Mock()
+        service.videos.return_value.list.return_value = request
+        return service, service.videos.return_value.list
+
+    def test_empty_ids_returns_empty(self):
+        with patch.object(monitor, "get_youtube_service") as mock_gs:
+            result = monitor.fetch_video_queue_details(
+                video_ids=[], client_secret_file=Path("x"), token_file=Path("y"))
+        self.assertEqual(result, {})
+        mock_gs.assert_not_called()
+
+    def test_parses_duration_and_live_archive(self):
+        response = {"items": [
+            {"id": "v1",
+             "contentDetails": {"duration": "PT1H2M3S"},
+             "snippet": {"liveBroadcastContent": "none"},
+             "liveStreamingDetails": {}},
+            {"id": "v2",
+             "contentDetails": {"duration": "PT30M"},
+             "snippet": {"liveBroadcastContent": "live"},
+             "liveStreamingDetails": {
+                 "actualStartTime": "2026-01-01T00:00:00Z",
+                 "actualEndTime": "2026-01-01T01:00:00Z"}},
+        ]}
+        service, list_mock = self._mock_service(response)
+        with patch.object(monitor, "get_youtube_service", return_value=service):
+            result = monitor.fetch_video_queue_details(
+                video_ids=["v1", "v2"], client_secret_file=Path("x"), token_file=Path("y"))
+        self.assertEqual(result["v1"]["duration_seconds"], 3723)
+        self.assertFalse(result["v1"]["is_live_archive"])
+        self.assertEqual(result["v1"]["live_broadcast_content"], "none")
+        self.assertEqual(result["v2"]["duration_seconds"], 1800)
+        self.assertTrue(result["v2"]["is_live_archive"])
+        # 只请求了给定 id 列表
+        called_kwargs = list_mock.call_args.kwargs
+        self.assertEqual(called_kwargs["id"], "v1,v2")
+
+    def test_chunked_requests_above_50_ids(self):
+        """超过 50 个 id 时分批请求。"""
+        service, list_mock = self._mock_service({"items": []})
+        ids = [f"v{i}" for i in range(120)]
+        with patch.object(monitor, "get_youtube_service", return_value=service):
+            monitor.fetch_video_queue_details(
+                video_ids=ids, client_secret_file=Path("x"), token_file=Path("y"))
+        self.assertEqual(list_mock.call_count, 3)
+
+    def test_missing_duration_field_is_zero(self):
+        response = {"items": [{"id": "v1", "contentDetails": {},
+                               "snippet": {}, "liveStreamingDetails": {}}]}
+        service, _ = self._mock_service(response)
+        with patch.object(monitor, "get_youtube_service", return_value=service):
+            result = monitor.fetch_video_queue_details(
+                video_ids=["v1"], client_secret_file=Path("x"), token_file=Path("y"))
+        self.assertEqual(result["v1"]["duration_seconds"], 0)
+        self.assertFalse(result["v1"]["is_live_archive"])
+
+
 if __name__ == "__main__":
     unittest.main()

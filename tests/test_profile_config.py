@@ -1,8 +1,13 @@
 """自测：多账号 profile 解析（防御性）与 config 基础行为。"""
 
 import os
+import sys
 import tempfile
 import unittest
+
+# profile.py 失败路径打印 ⚠️ — 管道下 GBK stdout 无法编码，需与 main.py 相同处理
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 from pathlib import Path
 from unittest.mock import patch
 
@@ -138,6 +143,67 @@ class SaveLoadProfilesTests(unittest.TestCase):
         )
         loaded = profile_mod.load_profiles()
         self.assertEqual(set(loaded), {"good"})
+
+
+class ProfileRuntimeTests(unittest.TestCase):
+    """profile.py 运行时函数：活动 profile 状态、单条读写、解析。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.profiles_path = Path(self.tmp.name) / "profiles.json"
+        patcher = patch.object(profile_mod, "PROFILES_FILE", self.profiles_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # 不污染全局活动 profile 状态
+        self.addCleanup(profile_mod.set_active_profile, "default")
+
+    def test_active_profile_roundtrip(self):
+        profile_mod.set_active_profile("snap")
+        self.assertEqual(profile_mod.get_active_profile_name(), "snap")
+        profile_mod.set_active_profile("other")
+        self.assertEqual(profile_mod.get_active_profile_name(), "other")
+
+    def test_save_profile_then_get_and_exists(self):
+        profile_mod.save_profile(Profile(name="snap", bilibili=BiliCredentials(sessdata="s")))
+        self.assertEqual(profile_mod.get_profile("snap").bilibili.sessdata, "s")
+        self.assertTrue(profile_mod.profile_exists("snap"))
+        self.assertFalse(profile_mod.profile_exists("nope"))
+        self.assertIsNone(profile_mod.get_profile("nope"))
+
+    def test_save_profile_upserts_same_name(self):
+        profile_mod.save_profile(Profile(name="snap", bilibili=BiliCredentials(sessdata="s1")))
+        profile_mod.save_profile(Profile(name="snap", bilibili=BiliCredentials(sessdata="s2")))
+        self.assertEqual(profile_mod.get_profile("snap").bilibili.sessdata, "s2")
+
+    def test_save_profile_keeps_others(self):
+        profile_mod.save_profile(Profile(name="a"))
+        profile_mod.save_profile(Profile(name="b"))
+        self.assertEqual(set(profile_mod.load_profiles()), {"a", "b"})
+
+    def test_is_multi_profile_depends_on_file(self):
+        self.assertFalse(profile_mod.is_multi_profile())
+        self.profiles_path.write_text('{"profiles": {}}', encoding="utf-8")
+        self.assertTrue(profile_mod.is_multi_profile())
+
+    def test_resolve_profile_by_name(self):
+        profile_mod.save_profile(Profile(name="snap", bilibili=BiliCredentials(sessdata="s")))
+        self.assertEqual(profile_mod.resolve_profile("snap").bilibili.sessdata, "s")
+
+    def test_resolve_default_from_env_backward_compat(self):
+        """无 profiles.json 时，default 从 .env 凭证构造（向后兼容）。"""
+        with patch.object(config, "BILI_SESSDATA", "envs"), \
+             patch.object(config, "BILI_BILI_JCT", "envj"), \
+             patch.object(config, "BILI_BUVID3", "envb"), \
+             patch.object(config, "BILI_LOGIN_TIME", "t0"):
+            p = profile_mod.resolve_profile("default")
+        self.assertEqual(p.name, "default")
+        self.assertEqual(p.bilibili.sessdata, "envs")
+        self.assertEqual(p.bilibili.bili_jct, "envj")
+        self.assertEqual(p.bilibili.buvid3, "envb")
+
+    def test_resolve_nonexistent_non_default_returns_none(self):
+        self.assertIsNone(profile_mod.resolve_profile("ghost"))
 
 
 class StatePathTests(unittest.TestCase):
