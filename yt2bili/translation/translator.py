@@ -176,9 +176,12 @@ def _restore_terms(text: str, replacements: dict[str, str]) -> str:
     restored = text
     for placeholder, term in replacements.items():
         restored = re.sub(re.escape(placeholder), term, restored, flags=re.IGNORECASE)
-        # Some models insert spaces around underscores.
-        spaced = " ".join(placeholder)
-        restored = re.sub(re.escape(spaced), term, restored, flags=re.IGNORECASE)
+        # Some models insert spaces around underscores — match the placeholder
+        # with any whitespace between characters so a mangled one still restores.
+        spaced_pattern = re.compile(
+            r"\s*".join(re.escape(ch) for ch in placeholder), re.IGNORECASE
+        )
+        restored = spaced_pattern.sub(term, restored)
     return restored
 
 
@@ -278,7 +281,10 @@ def _extract_chat_content(response, provider: str) -> str:
 
     choice = response.choices[0]
     message = choice.message
-    result = clean_title(message.content or "")
+    # NOTE: 不要在这里做 80 字符截断 —— 此时占位符 __YT2BILI_TERM_N__
+    # 尚未恢复，截断会切坏占位符导致恢复失败，残留进最终标题。
+    # 截断推迟到 _restore_terms 之后由调用方的 clean_title 完成。
+    result = (message.content or "").strip()
     if result:
         return result
 
