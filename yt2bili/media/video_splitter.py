@@ -73,7 +73,13 @@ def split_video(
         print(f"[分割] ❌ 文件不存在: {source}")
         return []
 
-    seg_sec = segment_duration_seconds or int(config.MAX_VIDEO_DURATION_SECONDS)
+    # 显式传 0 表示"不分割"；只有 None 才回退到配置默认值。
+    # 注意不能用 `or` —— 0 会被当作未设置而回退到 36000s。
+    seg_sec = (
+        segment_duration_seconds
+        if segment_duration_seconds is not None
+        else int(config.MAX_VIDEO_DURATION_SECONDS)
+    )
     if seg_sec <= 0:
         return [str(source)]
 

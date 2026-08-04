@@ -225,7 +225,11 @@ def _save_credential_to_env(credential) -> None:
     if "BILI_LOGIN_TIME" not in seen_keys:
         new_lines.append(f"BILI_LOGIN_TIME={datetime.now(timezone.utc).isoformat()}")
 
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    # Atomic write: tmp + replace so an interrupted process can't truncate
+    # .env (which would break credential parsing on next startup).
+    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
+    tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    tmp.replace(env_path)
 
     # Reload config to pick up new values
     from dotenv import load_dotenv
@@ -235,6 +239,7 @@ def _save_credential_to_env(credential) -> None:
     config.BILI_SESSDATA = os.getenv("BILI_SESSDATA", "")
     config.BILI_BILI_JCT = os.getenv("BILI_BILI_JCT", "")
     config.BILI_BUVID3 = os.getenv("BILI_BUVID3", "")
+    config.BILI_LOGIN_TIME = os.getenv("BILI_LOGIN_TIME", "")
 
 
 def _save_credential(credential, profile_name: str = "default") -> None:

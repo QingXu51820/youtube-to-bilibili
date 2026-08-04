@@ -72,6 +72,14 @@ def _clean_partial_files(download_dir: Path, video_id: str) -> None:
         f"{video_id}.jpg",           # orphan thumbnail
         f"{video_id}.jpeg",          # orphan thumbnail
         f"{video_id}.png",           # orphan thumbnail
+        # Final-name files: with nopart=True, an interrupted download leaves
+        # the partial data directly at {id}.mp4. If kept, _find_downloaded_video
+        # would treat the truncated file as a completed download and it would
+        # be uploaded as-is. This function is only called on failure paths.
+        f"{video_id}.mp4",
+        f"{video_id}.mkv",
+        f"{video_id}.webm",
+        f"{video_id}.mov",
     )
     for pattern in patterns:
         for f in download_dir.glob(pattern):

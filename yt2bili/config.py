@@ -7,11 +7,19 @@ credentials are present before running the pipeline.
 """
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
+if getattr(sys, "frozen", False):
+    # PyInstaller bundle: __file__ points into the temp extraction dir
+    # (_MEIPASS). The project root is the directory next to the EXE.
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    # Dev mode: project root is the parent of the yt2bili/ package.
+    PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 # Load .env from the project root (if it exists)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent  # 项目根目录（yt2bili/ 的父目录）
 load_dotenv(PROJECT_ROOT / "config" / ".env")
 
 
@@ -49,7 +57,7 @@ TRANSLATION_EXTRA_PROMPT = _get("TRANSLATION_EXTRA_PROMPT", "")
 TRANSLATION_PROXY = _get("TRANSLATION_PROXY", "").strip()
 
 # ── Upload Settings ───────────────────────────────────────────────
-DEFAULT_TID = int(_get("DEFAULT_TID", "172"))  # 172 = 游戏-手机游戏
+DEFAULT_TID = _get_int("DEFAULT_TID", 172)  # 172 = 游戏-手机游戏
 DEFAULT_TAGS = _get("DEFAULT_TAGS", "转载,YouTube")  # comma-separated
 
 # ── Download Settings ─────────────────────────────────────────────
