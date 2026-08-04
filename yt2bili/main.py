@@ -279,11 +279,15 @@ def process_video(url: str, credential=None) -> ProcessResult:
     try:
         cover_path = prepare_cover(video.thumbnail_path, video.video_id)
         if not cover_path:
-            raise RuntimeError("没有可用的视频缩略图，无法生成 1920x1080 封面")
-        cover_size = image_size(cover_path)
-        print(f"[封面] 已生成: {cover_path}")
-        if cover_size:
-            print(f"[封面] 尺寸: {cover_size[0]}x{cover_size[1]}")
+            # Degrade gracefully — uploader._ensure_cover falls back to a
+            # 1x1 placeholder JPEG. A missing thumbnail must not abort an
+            # otherwise complete download+translate+upload pipeline.
+            print("[封面] ⚠️ 没有可用的视频缩略图，将使用占位封面")
+        else:
+            cover_size = image_size(cover_path)
+            print(f"[封面] 已生成: {cover_path}")
+            if cover_size:
+                print(f"[封面] 尺寸: {cover_size[0]}x{cover_size[1]}")
     except Exception as e:
         record.error = str(e)
         print(f"\n❌ 封面处理失败: {e}")
@@ -437,18 +441,20 @@ def _cleanup_old_runs(runs_dir: Path, *, keep_days: int | None = None) -> int:
         return 0
     if keep_days is None:
         keep_days = config.RUNS_RETENTION_DAYS
-    cutoff = datetime.now() - timedelta(days=keep_days)
+    cutoff = time.time() - keep_days * 86400
     deleted = 0
     for f in runs_dir.glob("*.json"):
         if f.name == "latest.json":
             continue
         try:
-            file_time = datetime.strptime(f.stem, "%Y%m%d-%H%M%S")
-            if file_time < cutoff:
+            # Compare by file mtime, not by parsing the filename — the
+            # timestamp format may gain millisecond precision (see
+            # _write_run_report), which would break strptime.
+            if f.stat().st_mtime < cutoff:
                 f.unlink()
                 deleted += 1
-        except (ValueError, OSError):
-            pass
+        except OSError:
+            continue
     return deleted
 
 
@@ -466,7 +472,9 @@ def _write_run_report(results: list[ProcessResult]) -> Path:
         "results": [asdict(r) for r in results],
     }
 
-    report_path = runs_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    # Millisecond precision: two batches finishing in the same second
+    # must not overwrite each other's report.
+    report_path = runs_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.json"
     latest_path = runs_dir / "latest.json"
     content = json.dumps(payload, ensure_ascii=False, indent=2)
     report_path.write_text(content + "\n", encoding="utf-8")
@@ -610,7 +618,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--monitor-source",
         choices=("api", "rss"),
-        default=config.YOUTUBE_MONITOR_SOURCE,
+        # default=None so we can distinguish "not given" from ".env value"
+        # — profile-level monitor_source (main.py:846) depends on it.
+        default=None,
         help="订阅来源，默认读取 YOUTUBE_MONITOR_SOURCE",
     )
     parser.add_argument(
@@ -804,7 +814,8 @@ def main():
 
         if args.once:
             uploaded = upload_pending_subtitles()
-            if uploaded == 0 and not Path("state/pending_subtitles.json").exists():
+            pending_path = Path(config.PROJECT_ROOT) / "state" / "pending_subtitles.json"
+            if uploaded == 0 and not pending_path.exists():
                 print("[字幕] 没有待处理的字幕。")
             return 0
 
@@ -876,13 +887,15 @@ def main():
             dry_run=False,
             skip_subtitle_upload=args.no_subtitle_upload,
             state_path=project_path(args.monitor_state),
-            source=args.monitor_source,
             limit=args.monitor_limit,
             max_videos_per_channel=args.max_videos_per_channel,
             client_secret_file=project_path(config.YOUTUBE_CLIENT_SECRET_FILE),
             token_file=project_path(config.YOUTUBE_TOKEN_FILE),
             cache_file=project_path(config.YOUTUBE_SUBSCRIPTIONS_CACHE),
             channels=monitor_channels,
+            # args.monitor_source may be None when no profile override exists
+            # (argparse default is None now); fall back to the .env value.
+            source=args.monitor_source or config.YOUTUBE_MONITOR_SOURCE,
         )
 
     # ── Handle --all-profiles ──────────────────────────────────
@@ -905,7 +918,7 @@ def main():
             skip_subtitle_upload=args.no_subtitle_upload,
             profiles=profile_list,
             state_path=project_path(args.monitor_state),
-            source=args.monitor_source,
+            source=args.monitor_source or config.YOUTUBE_MONITOR_SOURCE,
             limit=args.monitor_limit,
             max_videos_per_channel=args.max_videos_per_channel,
             client_secret_file=project_path(config.YOUTUBE_CLIENT_SECRET_FILE),
@@ -924,6 +937,9 @@ def main():
                 # Ensure state directory exists
                 monitor_state.parent.mkdir(parents=True, exist_ok=True)
 
+        # argparse default is None (so profile overrides at main.py:846 work);
+        # fall back to .env here for the non-profile path.
+        args.monitor_source = args.monitor_source or config.YOUTUBE_MONITOR_SOURCE
         if args.monitor_source not in ("api", "rss"):
             raise SystemExit("--monitor-source must be api or rss")
         if args.monitor_limit <= 0:
@@ -941,8 +957,10 @@ def main():
             once=args.once,
             dry_run=args.dry_run,
             skip_subtitle_upload=args.no_subtitle_upload,
+            # 与其他两个调用点保持一致 —— run_monitor_cycle 的 source 是
+            # 必需参数，漏传会在第一轮循环直接 TypeError。
+            source=args.monitor_source or config.YOUTUBE_MONITOR_SOURCE,
             state_path=project_path(monitor_state),
-            source=args.monitor_source,
             limit=args.monitor_limit,
             max_videos_per_channel=args.max_videos_per_channel,
             client_secret_file=project_path(config.YOUTUBE_CLIENT_SECRET_FILE),
@@ -951,8 +969,17 @@ def main():
             channels=monitor_channels,
         )
 
-    if args.once or args.dry_run:
-        print("⚠️  --once / --dry-run 只在 --monitor 模式下生效，当前按普通模式运行。")
+    if args.dry_run:
+        # dry-run means "do not perform real operations". Falling through
+        # to the normal batch path would download and upload for real —
+        # refuse instead.
+        print("⚠️  --dry-run 只在 --monitor 模式下生效。")
+        print("    已取消本次执行，不会下载/上传任何内容。")
+        print("    如需处理单个视频，请直接运行: python main.py <url>")
+        return 0
+
+    if args.once:
+        print("⚠️  --once 只在 --monitor 模式下生效，当前按普通模式运行。")
 
     if args.discord:
         if not config.DISCORD_BOT_TOKEN:
