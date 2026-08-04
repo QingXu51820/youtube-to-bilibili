@@ -119,6 +119,7 @@ from yt2bili.subtitles.downloader import download_subtitles
 from yt2bili.subtitles.parser import parse_subtitle
 from yt2bili.subtitles.translator import translate_cues
 from yt2bili.subtitles.writer import write_srt
+from yt2bili.subtitles.bilibili_format import clamp_cues_to_duration
 from yt2bili.bilibili.subtitle import save_pending_subtitle
 
 
@@ -357,6 +358,19 @@ def process_video(url: str, credential=None) -> ProcessResult:
             if not translated:
                 raise RuntimeError("翻译后字幕为空")
             print(f"[字幕] 翻译完成: {len(translated)} 条字幕")
+
+            # Clamp cue end times to the actual video duration (ffprobe).
+            # YouTube 自动字幕的最后一条有时会超出视频时长；B站会以
+            # 79014 "字幕时间点超过视频时间长度" 拒绝。留 0.5s 余量，
+            # 避免与 B站整数秒时长差几个毫秒仍被拒。
+            if video.duration > 0:
+                translated, dropped_n, clamped_n = clamp_cues_to_duration(
+                    translated, video.duration, margin=0.5
+                )
+                if dropped_n:
+                    print(f"[字幕] 已移除 {dropped_n} 条超出视频时长的字幕")
+                if clamped_n:
+                    print(f"[字幕] 已修正 {clamped_n} 条字幕的结束时间（不超过视频时长）")
 
             # Write translated SRT file
             record.stage = "subtitle_write"

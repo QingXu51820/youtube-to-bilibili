@@ -23,6 +23,42 @@ _MAX_CONTENT_CHARS = 80   # per-cue content length (Bilibili limit ≈100)
 _MAX_CUE_COUNT = 1000     # total cues (Bilibili limit, loosely enforced)
 
 
+def clamp_cues_to_duration(
+    cues: list[Cue],
+    duration: float,
+    *,
+    margin: float = 0.0,
+) -> tuple[list[Cue], int, int]:
+    """
+    Clamp cue timings so nothing exceeds *duration*.
+
+    Cues whose ``start`` is at or past the limit are dropped; cues whose
+    ``end`` straddles it have ``end`` clamped to ``duration - margin``.
+    *margin* guards against the source duration (e.g. ffprobe fractional
+    seconds) differing from Bilibili's integer-second duration, which
+    would otherwise trigger 79014 "字幕时间点超过视频时间长度".
+
+    Returns ``(kept_cues, dropped_count, clamped_count)``.
+    """
+    if duration is None or duration <= 0:
+        return cues, 0, 0
+
+    limit = duration - margin
+    kept: list[Cue] = []
+    dropped = 0
+    clamped = 0
+    for cue in cues:
+        if cue.start >= limit:
+            dropped += 1
+            continue
+        if cue.end > limit:
+            # Return a new Cue — don't mutate the caller's objects
+            cue = Cue(index=cue.index, start=cue.start, end=limit, text=cue.text)
+            clamped += 1
+        kept.append(cue)
+    return kept, dropped, clamped
+
+
 def cues_to_bilibili_json(
     cues: list[Cue],
     *,
@@ -33,6 +69,7 @@ def cues_to_bilibili_json(
     stroke: str = _DEFAULT_STROKE,
     location: int = _DEFAULT_LOCATION,
     video_duration: float | None = None,
+    margin: float = 0.0,
     warn_overlength: bool = True,
 ) -> dict:
     """
@@ -78,19 +115,13 @@ def cues_to_bilibili_json(
     clamped = 0
     truncated = 0
 
+    # ── Timestamp validation ─────────────────────────────────────
+    if video_duration is not None:
+        cues, trimmed, clamped = clamp_cues_to_duration(
+            list(cues), video_duration, margin=margin
+        )
+
     for cue in cues:
-        # ── Timestamp validation ──────────────────────────────────
-        start = cue.start
-        end = cue.end
-
-        if video_duration is not None and video_duration > 0:
-            if start >= video_duration:
-                trimmed += 1
-                continue  # cue starts after video ends → drop
-            if end > video_duration:
-                end = video_duration
-                clamped += 1
-
         # ── Content length validation ─────────────────────────────
         content = cue.text
         if len(content) > _MAX_CONTENT_CHARS:
@@ -104,8 +135,8 @@ def cues_to_bilibili_json(
                 )
 
         body.append({
-            "from": round(start, 3),
-            "to": round(end, 3),
+            "from": round(cue.start, 3),
+            "to": round(cue.end, 3),
             "location": location,
             "content": content,
         })

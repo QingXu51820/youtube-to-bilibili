@@ -572,7 +572,7 @@ def upload_pending_subtitles() -> int:
                 pass  # duration is best-effort; proceed without it if unavailable
 
             subtitle_json = cues_to_bilibili_json(
-                cues, video_duration=video_duration or None,
+                cues, video_duration=video_duration or None, margin=0.3,
             )
             submit_subtitle(bvid=bvid, cid=cid, subtitle_json=subtitle_json, aid=aid)
             uploaded += 1
