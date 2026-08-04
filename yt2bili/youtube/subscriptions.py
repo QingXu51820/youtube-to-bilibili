@@ -89,7 +89,14 @@ def parse_datetime(value: str) -> datetime:
         normalized = value.replace("Z", "+00:00")
         dt = datetime.fromisoformat(normalized)
     except ValueError:
-        dt = parsedate_to_datetime(value)
+        # parsedate_to_datetime returns None (not an exception) on garbage
+        try:
+            dt = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            dt = None
+    if dt is None:
+        # Bad date in one feed entry must not abort the whole round
+        return datetime.min.replace(tzinfo=timezone.utc)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
@@ -133,10 +140,12 @@ def resolve_channel_handle_ytdlp(handle_or_url: str) -> tuple[str, str]:
 
     raw = handle_or_url.strip().rstrip("/")
 
-    # Already a channel ID?
-    if raw.startswith("UC") and len(raw) >= 24:
+    # Already a channel ID? Only treat it as such when the length is
+    # exactly 24 — a longer UC-prefixed string would be silently truncated
+    # to 24 chars here and resolved as a (wrong) channel.
+    if raw.startswith("UC") and len(raw) == 24:
         # Let yt-dlp confirm and give us the title
-        url = f"https://www.youtube.com/channel/{raw[:24]}"
+        url = f"https://www.youtube.com/channel/{raw}"
     elif raw.startswith("@"):
         url = f"https://www.youtube.com/{raw}"
     elif "youtube.com/" in raw:
@@ -393,8 +402,11 @@ def _api_http_error(response: requests.Response) -> Exception:
         f"YouTube Data API request failed: HTTP {response.status_code}\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2) if isinstance(payload, dict) else payload}"
     )
-    # 5xx errors are transient — retryable
-    if response.status_code >= 500:
+    # 5xx errors are transient — retryable.
+    # 429 (rate limit) and 403 (quota exceeded) are also recoverable —
+    # treating them as SystemExit would kill the long-running monitor
+    # process on an everyday quota exhaustion.
+    if response.status_code >= 500 or response.status_code in (429, 403):
         return YouTubeNetworkError(message)
     return SystemExit(message)
 
@@ -623,6 +635,7 @@ def fetch_recent_videos_rss(
     max_videos_per_channel: int,
     *,
     failed_channels: list[Subscription] | None = None,
+    dead_channels: list[Subscription] | None = None,
 ) -> list[VideoItem]:
     """
     Fetch recent videos via YouTube RSS feeds.
@@ -630,8 +643,13 @@ def fetch_recent_videos_rss(
     Args:
         subscriptions: Channels to fetch.
         max_videos_per_channel: Max entries per channel.
-        failed_channels: If provided, channels that return 404/410 are appended
-            here so the caller can retry them via API.
+        failed_channels: If provided, channels that hit transient network
+            errors this round (retries exhausted) are appended here — the
+            caller may retry them via API this round, but must NOT treat
+            them as permanently dead.
+        dead_channels: If provided, channels whose feed truly no longer
+            exists (404/410) are appended here — the caller may record
+            them permanently and switch them to the API.
     """
     try:
         import feedparser
@@ -657,13 +675,19 @@ def fetch_recent_videos_rss(
                 if status in (404, 410):
                     # Channel RSS feed no longer exists — skip, don't retry
                     print(f"[RSS] 跳过: {sub.channel_title}（RSS feed 不可用，HTTP {status}）")
-                    if failed_channels is not None:
-                        failed_channels.append(sub)
+                    if dead_channels is not None:
+                        dead_channels.append(sub)
                     response = None
                     break
                 last_error = exc
                 if attempt >= _API_MAX_RETRIES:
-                    raise _api_network_error(exc) from exc
+                    # One dead channel must not abort the whole round —
+                    # skip it and keep fetching the remaining channels.
+                    print(f"[RSS] 跳过: {sub.channel_title}（连续网络错误，HTTP {status}）")
+                    if failed_channels is not None:
+                        failed_channels.append(sub)
+                    response = None
+                    break
                 delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
                 print(
                     f"[RSS] 网络错误，{delay:.0f}s 后重试 "
@@ -673,7 +697,11 @@ def fetch_recent_videos_rss(
             except requests.exceptions.RequestException as exc:
                 last_error = exc
                 if attempt >= _API_MAX_RETRIES:
-                    raise _api_network_error(exc) from exc
+                    print(f"[RSS] 跳过: {sub.channel_title}（连续网络错误）")
+                    if failed_channels is not None:
+                        failed_channels.append(sub)
+                    response = None
+                    break
                 delay = _API_RETRY_BASE_DELAY * (2 ** attempt)
                 print(
                     f"[RSS] 网络错误，{delay:.0f}s 后重试 "

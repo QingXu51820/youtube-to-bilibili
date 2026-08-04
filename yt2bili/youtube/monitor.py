@@ -233,6 +233,27 @@ def empty_state() -> dict[str, Any]:
     }
 
 
+def _recover_corrupt_state(path: Path, reason: str) -> dict[str, Any]:
+    """Back up a corrupt state file and rebuild an empty state.
+
+    A corrupt state must not kill the long-running monitor process with
+    SystemExit. We back the file up (nothing is silently lost) and return
+    an empty state — videos processed before the corruption may get
+    re-processed, which is preferable to the whole monitor dying.
+    """
+    backup = path.with_suffix(path.suffix + f".corrupt-{int(time.time())}")
+    try:
+        path.replace(backup)
+    except OSError:
+        pass
+    print(
+        f"[监控] [WARN] 状态文件损坏（{reason}），"
+        f"已备份到 {backup.name} 并重建空状态",
+        flush=True,
+    )
+    return empty_state()
+
+
 def load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return empty_state()
@@ -240,16 +261,16 @@ def load_state(path: Path) -> dict[str, Any]:
     try:
         state = json.loads(path.read_text(encoding="utf-8-sig"))
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"状态文件不是有效 JSON: {path}\n{exc}") from exc
+        return _recover_corrupt_state(path, f"不是有效 JSON: {exc}")
 
     if not isinstance(state, dict):
-        raise SystemExit(f"状态文件格式错误: {path}")
+        return _recover_corrupt_state(path, "格式错误")
 
     state.setdefault("version", STATE_VERSION)
     state.setdefault("generated_at", utc_now())
     state.setdefault("videos", {})
     if not isinstance(state["videos"], dict):
-        raise SystemExit(f"状态文件 videos 字段格式错误: {path}")
+        return _recover_corrupt_state(path, "videos 字段格式错误")
     return state
 
 
@@ -452,16 +473,26 @@ def _fetch_rss_with_fallback(
 
     # Try RSS for channels not yet known to be dead
     if rss_subs:
-        failed: list[Subscription] = []
+        failed: list[Subscription] = []  # transient network errors this round
+        dead: list[Subscription] = []    # 404/410 — feed truly gone
         videos.extend(
-            fetch_recent_videos_rss(rss_subs, max_videos_per_channel, failed_channels=failed)
+            fetch_recent_videos_rss(
+                rss_subs,
+                max_videos_per_channel,
+                failed_channels=failed,
+                dead_channels=dead,
+            )
         )
-        # Update cache with newly discovered dead feeds
-        if failed:
-            for sub in failed:
+        # Only feeds that are truly gone (404/410) go into the permanent
+        # cache. Transient network errors must not permanently switch a
+        # channel to the API — that would silently burn API quota.
+        if dead:
+            for sub in dead:
                 known_dead.add(sub.channel_id)
                 rss_failed.append(sub)
             _save_rss_fallback_cache(cache_file, known_dead)
+        if failed:
+            rss_failed.extend(failed)
 
     # Fetch API-fallback channels (known dead + just discovered)
     all_api_subs = api_subs + rss_failed
