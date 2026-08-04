@@ -42,3 +42,5 @@ Thumbs.db
 .DS_Store
 
 /config/profiles.json
+/.claude/settings.local.json
+/tmphhbvl3bj.tmp
