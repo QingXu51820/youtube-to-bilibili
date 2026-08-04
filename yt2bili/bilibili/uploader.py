@@ -196,7 +196,13 @@ async def _upload_async(
     """
     from bilibili_api.exceptions.NetworkException import NetworkException
 
-    cred = _build_credential(credential)
+    # Credential is built by the synchronous wrapper (upload_video) and
+    # passed in. Building it here is unsafe: auth.get_credential() may run
+    # QR login via asyncio.run(), which raises RuntimeError inside a
+    # running event loop (upload_video calls us via run_until_complete).
+    if credential is None:
+        raise RuntimeError("B站凭据缺失：请先运行 python main.py --login")
+    cred = credential
 
     # Truncate description to B站 byte-length limit (2000 bytes in UTF-8).
     # This is a last-resort safety net; _build_description already ensures
@@ -381,6 +387,10 @@ def upload_video(
     if not file_paths:
         return UploadResult(success=False, message="没有视频文件可上传")
 
+    # Build credential here (synchronous context) — QR login uses
+    # asyncio.run() and must not run inside the event loop below.
+    cred = _build_credential(credential)
+
     # Build description with source attribution
     desc = _build_description(original_description, title, original_title)
     cover = _ensure_cover(cover_path)
@@ -411,12 +421,12 @@ def upload_video(
             import nest_asyncio
             nest_asyncio.apply()
         result = loop.run_until_complete(
-            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, credential)
+            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, cred)
         )
     except RuntimeError:
         # No event loop running, use asyncio.run
         result = asyncio.run(
-            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, credential)
+            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, cred)
         )
 
     return result
