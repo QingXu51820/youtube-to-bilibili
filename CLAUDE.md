@@ -54,7 +54,23 @@ python main.py --resolve-channel "@MarvelSnap"
 tools\build_exe.bat
 ```
 
-**No tests exist** — verify changes by running `python main.py <url>` end-to-end or `python -c "import <module>"` for syntax checks.
+# ── Self-test (tests/) ───────────────────────────────────
+# Run the full suite (236 cases, no network required)
+python tools/run_self_test.py
+
+# Run only matching modules
+python tools/run_self_test.py --pattern test_cover.py
+
+# Equivalent unittest invocation
+python -m unittest discover -s tests -v
+
+**Tests exist under `tests/`** — pure-logic unit tests covering translation
+(placeholder protect/restore, truncation timing), subtitle parsing/formatting
+(batch format, duration clamp), glossary, profiles, cover processing, monitor
+state/skip logic, subscriptions parsing, uploader description/credential
+guards, run reports, and video splitting. All network calls are mocked.
+Verify changes by running `python tools/run_self_test.py`, then
+`python main.py <url>` end-to-end for integration.
 
 ## Configuration
 
@@ -95,7 +111,7 @@ Each stage is a separate `try/except` block. Failure at any stage records the er
 | `yt2bili/media/video_splitter.py` | ffmpeg `-c copy` lossless segmenting at keyframes |
 | `yt2bili/youtube/monitor.py` | Polling loop: fetch subs → deduplicate → sort queue → process → retry → persist state; multi-profile round-robin support |
 | `yt2bili/youtube/subscriptions.py` | Standalone sub fetcher (API + RSS), custom `YouTubeClient` (requests-based, avoids httplib2 proxy issues), channel handle resolution |
-| `yt2bili/frozen_paths.py` | `is_frozen()` + `user_data_dir()` — EXE-relative paths when PyInstaller-bundled, project root in dev |
+| `yt2bili/config.py` | `.env` reader; `PROJECT_ROOT` resolution handles both dev mode and PyInstaller-frozen EXEs (via `sys.frozen`) |
 
 ### Monitor State Flow
 
@@ -126,9 +142,9 @@ Only `download`, `split`, `upload` stages are retryable. Translation and cover f
 
 ### Path Resolution
 
-Always use `config.PROJECT_ROOT` (set by `frozen_paths.user_data_dir()`):
+Always use `config.PROJECT_ROOT` (resolved in `config.py`):
 - **Dev mode**: project root (the parent of the `yt2bili/` package)
-- **Frozen EXE**: directory next to `yt2bili.exe`
+- **Frozen EXE**: directory next to `yt2bili.exe` (via `sys.frozen` — `__file__` would point into PyInstaller's temp extraction dir)
 
 `yt2bili/youtube/monitor.py` has its own `project_path()` helper that resolves relative paths against `config.PROJECT_ROOT`.
 
