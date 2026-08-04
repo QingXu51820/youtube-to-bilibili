@@ -10,6 +10,7 @@ Unlike the title translator (``yt2bili.translation.translator``), this module:
 """
 
 import sys
+import time
 
 from openai import OpenAI
 
@@ -55,8 +56,15 @@ def _build_client() -> OpenAI:
 
 
 def _format_batch(batch: list[Cue]) -> str:
-    """Format a batch of cues as ``index|text`` lines for the API."""
-    return "\n".join(f"{cue.index}|{cue.text}" for cue in batch)
+    """Format a batch of cues as ``index|text`` lines for the API.
+
+    Newlines inside a cue are folded to a single space — a multi-line cue
+    (common in SRT) would otherwise break the ``NUMBER|TEXT`` format and
+    the continuation line gets dropped when parsing the response.
+    """
+    return "\n".join(
+        f"{cue.index}|{cue.text.replace(chr(10), ' ')}" for cue in batch
+    )
 
 
 def _parse_batch_response(raw: str, expected_count: int) -> list[tuple[int, str]]:
@@ -93,10 +101,16 @@ def _parse_batch_response(raw: str, expected_count: int) -> list[tuple[int, str]
         detail_parts: list[str] = []
         if missing:
             missing_list = sorted(missing)[:10]
-            detail_parts.append(f"缺失 #{missing_list}" + ("..." if len(missing) > 10 else ""))
+            detail_parts.append(
+                "缺失 " + ", ".join(f"#{i}" for i in missing_list)
+                + ("..." if len(missing) > 10 else "")
+            )
         if extra:
             extra_list = sorted(extra)[:10]
-            detail_parts.append(f"多余 #{extra_list}" + ("..." if len(extra) > 10 else ""))
+            detail_parts.append(
+                "多余 " + ", ".join(f"#{i}" for i in extra_list)
+                + ("..." if len(extra) > 10 else "")
+            )
         detail = "; ".join(detail_parts) if detail_parts else ""
         print(
             f"[字幕] [WARN] 翻译批次返回 {len(result)} 条，"
@@ -129,9 +143,12 @@ def _needs_retranslate(cue: Cue) -> bool:
     Check if a translated cue needs re-translation.
 
     Detects two failure modes from batch translation:
-    1. Oversized text (>200 chars) — model merged multiple translations.
-    2. Still in English — model skipped this cue.
+    1. Empty text — model echoed the index but no translation.
+    2. Oversized text (>200 chars) — model merged multiple translations.
+    3. Still in English — model skipped this cue.
     """
+    if not cue.text.strip():
+        return True
     if len(cue.text) > 200:
         return True
     if _is_untranslated(cue.text):
@@ -173,24 +190,33 @@ def _retranslate_small_batch(
 
     max_tokens = max(1024, len(cues) * 200)
 
-    try:
-        response = client.chat.completions.create(
-            model=config.DEEPSEEK_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": _SYSTEM_PROMPT.format(target_lang=target)
-                    + "\nThis is a re-translation of previously failed segments. "
-                    + "Be EXTREMELY careful with the NUMBER|TEXT format.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,  # lower temperature for more deterministic output
-            max_tokens=max_tokens,
-            extra_body=extra_body if extra_body else None,
-        )
-    except Exception as e:
-        print(f"  重试失败: {e}", flush=True, file=sys.stderr)
+    response = None
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=config.DEEPSEEK_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": _SYSTEM_PROMPT.format(target_lang=target)
+                        + "\nThis is a re-translation of previously failed segments. "
+                        + "Be EXTREMELY careful with the NUMBER|TEXT format.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,  # lower temperature for more deterministic output
+                max_tokens=max_tokens,
+                extra_body=extra_body if extra_body else None,
+            )
+            break
+        except Exception as e:
+            if attempt == 0:
+                print(f"  重试调用失败: {e}，2s 后再次尝试", flush=True, file=sys.stderr)
+                time.sleep(2)
+            else:
+                print(f"  重试失败: {e}", flush=True, file=sys.stderr)
+
+    if response is None:
         for c in cues:
             preview = c.text[:80].replace("\n", " ")
             if len(c.text) > 80:
@@ -371,24 +397,48 @@ def _translate_batch(
 
     max_tokens = max(4096, len(batch) * 150)
 
-    try:
-        response = client.chat.completions.create(
-            model=config.DEEPSEEK_MODEL,
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT.format(target_lang=target)},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_tokens=max_tokens,
-            extra_body=extra_body if extra_body else None,
-        )
-    except Exception as e:
-        print(f"失败: {e}", flush=True, file=sys.stderr)
-        # Return cues with original text on API failure
-        return [
-            Cue(index=c.index, start=c.start, end=c.end, text=c.text)
-            for c in batch
-        ]
+    # API 失败（限流/超时/网络）会让整批保留原文 —— 这是"好多话没翻译"的
+    # 直接原因。带退避重试整批；仍失败时拆成 5 条小批逐个重试，
+    # 最后才兜底保留原文。
+    response = None
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(
+                model=config.DEEPSEEK_MODEL,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT.format(target_lang=target)},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+                extra_body=extra_body if extra_body else None,
+            )
+            break
+        except Exception as e:
+            if attempt < 2:
+                delay = 3 * (attempt + 1)
+                print(
+                    f"[字幕] 批次 {batch_num}/{total_batches} API 调用失败"
+                    f"（第 {attempt + 1} 次: {e}），{delay}s 后重试",
+                    flush=True, file=sys.stderr,
+                )
+                time.sleep(delay)
+            else:
+                print(
+                    f"[字幕] 批次 {batch_num}/{total_batches} API 连续失败: {e}，"
+                    f"拆小批逐个重试...",
+                    flush=True, file=sys.stderr,
+                )
+
+    if response is None:
+        # 整批 API 全挂：按 5 条一组的小批兜底（小批成功率高得多）
+        fallback: list[Cue] = []
+        for start in range(0, len(batch), 5):
+            group = batch[start:start + 5]
+            fallback.extend(
+                _retranslate_small_batch(client, group, batch_num, total_batches)
+            )
+        return fallback
 
     raw = response.choices[0].message.content or ""
     parsed = _parse_batch_response(raw, len(batch))
