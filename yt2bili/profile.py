@@ -197,29 +197,55 @@ def _dict_to_profile(name: str, d: dict) -> Profile:
     yt_raw = d.get("youtube", {})
     settings_raw = d.get("settings", {})
 
-    channels = [
-        YouTubeChannel(channel_id=c["channel_id"], channel_title=c.get("channel_title", ""))
-        for c in yt_raw.get("channels", [])
-    ]
+    # Defensive parsing: one malformed entry must not invalidate the whole
+    # profile (load_profiles would swallow the exception and skip the account).
+    raw_channels = yt_raw.get("channels", [])
+    if not isinstance(raw_channels, list):
+        raw_channels = []
+    channels: list[YouTubeChannel] = []
+    for c in raw_channels:
+        if not isinstance(c, dict):
+            continue
+        cid = c.get("channel_id")
+        if not cid:
+            continue
+        channels.append(
+            YouTubeChannel(
+                channel_id=str(cid),
+                channel_title=str(c.get("channel_title", "") or ""),
+            )
+        )
+
+    # Type-coerce settings (profiles.json is hand-editable; a string "172"
+    # or "false" must not flow through to the upload API / filter logic).
+    tid = settings_raw.get("default_tid")
+    if tid is not None:
+        try:
+            tid = int(tid)
+        except (TypeError, ValueError):
+            tid = None
+    cfe = settings_raw.get("content_filter_enabled")
+    if isinstance(cfe, str):
+        cfe = cfe.strip().lower() in ("1", "true", "yes", "on")
 
     return Profile(
         name=name,
         bilibili=BiliCredentials(
-            sessdata=bili_raw.get("sessdata", ""),
-            bili_jct=bili_raw.get("bili_jct", ""),
-            buvid3=bili_raw.get("buvid3", ""),
-            login_time=bili_raw.get("login_time", ""),
+            sessdata=str(bili_raw.get("sessdata", "") or ""),
+            bili_jct=str(bili_raw.get("bili_jct", "") or ""),
+            buvid3=str(bili_raw.get("buvid3", "") or ""),
+            login_time=str(bili_raw.get("login_time", "") or ""),
         ),
         youtube=YouTubeSettings(
             channels=channels,
-            monitor_source=yt_raw.get("monitor_source", ""),
-            monitor_state=yt_raw.get("monitor_state", ""),
-            subscriptions_cache=yt_raw.get("subscriptions_cache", ""),
+            monitor_source=str(yt_raw.get("monitor_source", "") or ""),
+            monitor_state=str(yt_raw.get("monitor_state", "") or ""),
+            subscriptions_cache=str(yt_raw.get("subscriptions_cache", "") or ""),
         ),
         settings=ProfileSettings(
-            default_tid=settings_raw.get("default_tid"),
+            default_tid=tid,
             default_tags=settings_raw.get("default_tags"),
-            content_filter_enabled=settings_raw.get("content_filter_enabled"),
+            content_filter_enabled=cfe,
             content_filter_keywords=settings_raw.get("content_filter_keywords"),
         ),
     )
