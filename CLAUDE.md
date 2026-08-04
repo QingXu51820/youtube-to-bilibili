@@ -55,21 +55,20 @@ tools\build_exe.bat
 ```
 
 # ── Self-test (tests/) ───────────────────────────────────
-# Run the full suite (236 cases, no network required)
-python tools/run_self_test.py
-
-# Run only matching modules
-python tools/run_self_test.py --pattern test_cover.py
-
-# Equivalent unittest invocation
+# Run the full suite (388 cases, no network required)
 python -m unittest discover -s tests -v
+
+# Run only matching modules (each test file is self-contained, can run alone)
+python -m unittest tests.test_cover -v
 
 **Tests exist under `tests/`** — pure-logic unit tests covering translation
 (placeholder protect/restore, truncation timing), subtitle parsing/formatting
 (batch format, duration clamp), glossary, profiles, cover processing, monitor
-state/skip logic, subscriptions parsing, uploader description/credential
-guards, run reports, and video splitting. All network calls are mocked.
-Verify changes by running `python tools/run_self_test.py`, then
+state/skip logic, subscriptions parsing/API fetch, uploader description/
+credential guards, Bilibili subtitle API (CID poll, deferred upload), auth
+checker, QR login, run reports, video splitting, and discord pure logic.
+All network calls are mocked; ffmpeg/probe tests mock `config.find_tool`.
+Verify changes by running `python -m unittest discover -s tests`, then
 `python main.py <url>` end-to-end for integration.
 
 ## Configuration
@@ -101,7 +100,8 @@ Each stage is a separate `try/except` block. Failure at any stage records the er
 |---|---|
 | `main.py`, `youtube_subscriptions.py` | Root compatibility CLI wrappers |
 | `yt2bili/main.py` | CLI entry, arg parsing, pipeline orchestrator, run reports (`runs/`) |
-| `yt2bili/config.py` | `.env` reader with typed `_get()`/`_get_int()`, `validate()` checks credentials, `apply_profile_overrides()` |
+| `yt2bili/config.py` | `.env` reader with typed `_get()`/`_get_int()`, `validate()` checks credentials, `apply_profile_overrides()`, `find_tool()` (PATH + Windows registry fallback for ffmpeg/ffprobe) |
+| `yt2bili/auth_checker.py` | Credential status checks — Bilibili API validity, YouTube OAuth token, YouTube cookie health, `run_auth_check()` report |
 | `yt2bili/profile.py` | Multi-account profile system — `profiles.json` load/save, active profile state, state/cache path resolution |
 | `yt2bili/youtube/downloader.py` | yt-dlp Python API, cookie fallback chain, slow-speed detection + restart, ffprobe probing |
 | `yt2bili/translation/translator.py` | `BaseTranslator` → `GoogleTranslator` / `OpenAITranslator` / `DeepSeekTranslator`, term preservation, 80-char truncation |
@@ -111,7 +111,8 @@ Each stage is a separate `try/except` block. Failure at any stage records the er
 | `yt2bili/media/video_splitter.py` | ffmpeg `-c copy` lossless segmenting at keyframes |
 | `yt2bili/youtube/monitor.py` | Polling loop: fetch subs → deduplicate → sort queue → process → retry → persist state; multi-profile round-robin support |
 | `yt2bili/youtube/subscriptions.py` | Standalone sub fetcher (API + RSS), custom `YouTubeClient` (requests-based, avoids httplib2 proxy issues), channel handle resolution |
-| `yt2bili/config.py` | `.env` reader; `PROJECT_ROOT` resolution handles both dev mode and PyInstaller-frozen EXEs (via `sys.frozen`) |
+| `yt2bili/bilibili/subtitle.py` | Soft-subtitle API via httpx — CID lookup (`get_video_pages`/`wait_for_cid`), draft/save submit, deferred upload queue (`pending_subtitles.json`) |
+| `yt2bili/discord/monitor.py`, `publisher.py` | Discord 消息监控（Gateway + REST 兜底）→ B站动态发布（requires `discord.py`, not installed — only pure-logic parts are tested） |
 
 ### Monitor State Flow
 
