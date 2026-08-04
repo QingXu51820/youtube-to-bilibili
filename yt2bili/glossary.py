@@ -40,8 +40,8 @@ def _load_cache(path: Path) -> dict[str, str] | None:
             glossary = data.get("glossary", {})
             if glossary:
                 return {str(k): str(v) for k, v in glossary.items()}
-    except (json.JSONDecodeError, OSError, KeyError):
-        pass
+    except (json.JSONDecodeError, OSError, KeyError, TypeError, AttributeError):
+        pass  # corrupted/edited cache — treat as missing, will refetch
     return None
 
 
@@ -66,7 +66,8 @@ def _save_cache(path: Path, glossary: dict[str, str]) -> None:
 def _fetch_json(url: str) -> list[dict[str, Any]]:
     """Fetch a JSON array from a URL. Returns empty list on failure."""
     try:
-        timeout = max(5, int(getattr(config, "DISCORD_HTTP_TIMEOUT", None) or 30))
+        # Generic network timeout — must not piggyback on the Discord setting.
+        timeout = max(5, int(getattr(config, "YOUTUBE_HTTP_TIMEOUT", None) or 30))
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
@@ -134,12 +135,13 @@ def get_glossary() -> dict[str, str]:
         if _glossary is None:
             _glossary = _load_cache(cache_path)
             if _glossary is not None:
-                _last_fetch_time = time.time()
-                # Check cache file mtime for TTL tracking
+                # Track the cache file's mtime for TTL — not now. The cache
+                # may be months stale; max(now, mtime) would always yield
+                # now and defeat TTL tracking (stale cache served forever).
                 try:
-                    _last_fetch_time = max(_last_fetch_time, cache_path.stat().st_mtime)
+                    _last_fetch_time = cache_path.stat().st_mtime
                 except OSError:
-                    pass
+                    _last_fetch_time = time.time()
             else:
                 # No cache — must fetch synchronously
                 glossary = _build_glossary()
@@ -213,6 +215,13 @@ def _build_deadlock_glossary() -> dict[str, str]:
 
     if not data_zh:
         return glossary  # network failure — caller should keep old cache
+
+    # CRITICAL: if the EN lang file failed, ``en_name`` would be "" and the
+    # glossary would get an empty-string key. _apply_glossary would then
+    # re.sub(r"\b\b", ...) — inserting Chinese at every word boundary,
+    # corrupting every title/description, and the bad cache persists.
+    if not data_en:
+        return glossary
 
     # 2. Heroes
     for key, en_name in _HERO_KEYS.items():
@@ -304,13 +313,11 @@ def get_deadlock_glossary() -> dict[str, str]:
         if _deadlock_glossary is None:
             _deadlock_glossary = _load_cache(cache_path)
             if _deadlock_glossary is not None:
-                _deadlock_last_fetch_time = time.time()
+                # Same mtime-based TTL as get_glossary — see note there.
                 try:
-                    _deadlock_last_fetch_time = max(
-                        _deadlock_last_fetch_time, cache_path.stat().st_mtime
-                    )
+                    _deadlock_last_fetch_time = cache_path.stat().st_mtime
                 except OSError:
-                    pass
+                    _deadlock_last_fetch_time = time.time()
             else:
                 # No cache — must fetch synchronously
                 glossary = _build_deadlock_glossary()
