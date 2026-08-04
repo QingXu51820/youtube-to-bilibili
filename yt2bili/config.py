@@ -160,6 +160,67 @@ SUBTITLE_WAIT_CID_INTERVAL = _get_int("SUBTITLE_WAIT_CID_INTERVAL", 10)
 SUBTITLE_DIR = _get("SUBTITLE_DIR", str(Path(DOWNLOAD_DIR) / "subtitles"))
 
 
+def find_tool(name: str) -> str | None:
+    """Resolve an external tool executable to its full path.
+
+    Uses ``shutil.which()`` to search the process ``PATH``.  On Windows, falls
+    back to the *Machine* and *User* ``PATH`` entries stored in the registry
+    (``conda activate`` can drop trailing entries from the process ``PATH``).
+
+    Returns:
+        Absolute path to the executable, or ``None`` when not found.
+    """
+    import shutil
+
+    # 1. Primary: shutil.which respects PATHEXT and the live process PATH
+    resolved = shutil.which(name)
+    if resolved:
+        return resolved
+
+    # 2. Windows registry fallback — conda activation sometimes drops the
+    #    last Machine PATH entry, so reach into the registry directly.
+    if os.name == "nt":
+        try:
+            import winreg as _winreg
+
+            registry_paths: list[str] = []
+            for hive, subkey in (
+                (_winreg.HKEY_LOCAL_MACHINE,
+                 r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                (_winreg.HKEY_CURRENT_USER, r"Environment"),
+            ):
+                try:
+                    key = _winreg.OpenKey(hive, subkey)
+                    value, _ = _winreg.QueryValueEx(key, "Path")
+                    registry_paths.append(value)
+                    _winreg.CloseKey(key)
+                except OSError:
+                    pass
+
+            # Expand REG_EXPAND_SZ tokens (%SystemRoot% etc.)
+            expanded = os.path.expandvars(os.pathsep.join(registry_paths))
+
+            # Mirror the PATHEXT extension search that CreateProcess performs
+            pathext = os.environ.get("PATHEXT", ".EXE;.CMD;.BAT")
+            exts = [e for e in pathext.split(os.pathsep) if e]
+
+            for directory in expanded.split(os.pathsep):
+                directory = directory.strip()
+                if not directory:
+                    continue
+                for ext in exts:
+                    candidate = os.path.join(directory, name + ext.lower())
+                    if os.path.isfile(candidate):
+                        return os.path.normpath(candidate)
+                    candidate = os.path.join(directory, name + ext.upper())
+                    if os.path.isfile(candidate):
+                        return os.path.normpath(candidate)
+        except Exception:
+            pass
+
+    return None
+
+
 def apply_profile_overrides(profile_name: str = "default") -> None:
     """
     Overlay profile-specific settings onto module-level config variables.

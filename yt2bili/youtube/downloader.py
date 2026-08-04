@@ -431,8 +431,14 @@ def _best_available_resolution(info: dict) -> str:
 
 def _probe_video_resolution(file_path: Path) -> tuple[int, int] | None:
     """Probe the merged video file resolution with ffprobe."""
+    from yt2bili.config import find_tool
+
+    ffprobe = find_tool("ffprobe")
+    if ffprobe is None:
+        return None
+
     command = [
-        "ffprobe",
+        ffprobe,
         "-v",
         "error",
         "-select_streams",
@@ -477,8 +483,14 @@ def _probe_video_resolution(file_path: Path) -> tuple[int, int] | None:
 
 def _probe_video_duration(file_path: Path) -> float:
     """Probe video file duration in seconds using ffprobe."""
+    from yt2bili.config import find_tool
+
+    ffprobe = find_tool("ffprobe")
+    if ffprobe is None:
+        return 0.0
+
     command = [
-        "ffprobe",
+        ffprobe,
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "csv=p=0",

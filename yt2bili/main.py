@@ -724,6 +724,10 @@ def _check_external_tools() -> None:
 
     Missing tools print a warning but do not prevent startup — the pipeline
     degrades gracefully when they are absent.
+
+    Uses :func:`config.find_tool` which includes a Windows-registry fallback
+    so that tools are still detected when conda activation drops entries from
+    the process ``PATH``.
     """
     import subprocess
 
@@ -733,20 +737,23 @@ def _check_external_tools() -> None:
         "node": "yt-dlp 将使用内置 JS 引擎（可能较慢）",
     }
     for tool, impact in tools.items():
-        try:
-            subprocess.run(
-                [tool, "-version"],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-            version_check = "OK"
-        except FileNotFoundError:
+        # Resolve full path via config helper (handles conda PATH issues)
+        tool_path = config.find_tool(tool)
+        if tool_path is None:
             version_check = f"未找到 — {impact}"
-        except subprocess.TimeoutExpired:
-            version_check = f"响应超时 — {impact}"
-        except OSError as exc:
-            version_check = f"启动失败: {exc} — {impact}"
+        else:
+            try:
+                subprocess.run(
+                    [tool_path, "-version"],
+                    capture_output=True,
+                    timeout=5,
+                    check=False,
+                )
+                version_check = "OK"
+            except subprocess.TimeoutExpired:
+                version_check = f"响应超时 — {impact}"
+            except OSError as exc:
+                version_check = f"启动失败: {exc} — {impact}"
         print(f"[工具] {tool}: {version_check}")
 
 

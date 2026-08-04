@@ -16,8 +16,14 @@ from yt2bili import config
 
 def _probe_duration(file_path: Path) -> float:
     """Probe video file duration in seconds using ffprobe."""
+    from yt2bili.config import find_tool
+
+    ffprobe = find_tool("ffprobe")
+    if ffprobe is None:
+        return 0.0
+
     command = [
-        "ffprobe",
+        ffprobe,
         "-v", "error",
         "-show_entries", "format=duration",
         "-of", "csv=p=0",
@@ -90,13 +96,19 @@ def split_video(
         out_dir = Path(config.DOWNLOAD_DIR) / "splits" / source.stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve ffmpeg path (handles conda PATH issues on Windows)
+    ffmpeg = config.find_tool("ffmpeg")
+    if ffmpeg is None:
+        print("[分割] ❌ ffmpeg 未安装或不在 PATH 中")
+        return []
+
     # Segment file pattern – ffmpeg %03d auto-numbers from 0
     stem = source.stem
     ext = source.suffix  # e.g. ".mp4"
     pattern = out_dir / f"{stem}_P%03d{ext}"
 
     command = [
-        "ffmpeg",
+        ffmpeg,
         "-i", str(source),
         "-c", "copy",
         "-map", "0",
