@@ -1,5 +1,6 @@
 # Frequently modified data files
 data/snap_glossary.json
+data/deadlock_glossary.json
 
 # Environment / config files (inside config/)
 /config/.env

@@ -55,7 +55,7 @@ tools\build_exe.bat
 ```
 
 # ── Self-test (tests/) ───────────────────────────────────
-# Run the full suite (388 cases, no network required)
+# Run the full suite (500 cases, no network required)
 python -m unittest discover -s tests -v
 
 # Run only matching modules (each test file is self-contained, can run alone)
@@ -66,7 +66,9 @@ python -m unittest tests.test_cover -v
 (batch format, duration clamp), glossary, profiles, cover processing, monitor
 state/skip logic, subscriptions parsing/API fetch, uploader description/
 credential guards, Bilibili subtitle API (CID poll, deferred upload), auth
-checker, QR login, run reports, video splitting, and discord pure logic.
+checker, QR login, run reports, video splitting, OAuth auto-consent robot
+(fake driver), OAuth record-replay recorder (fake driver), and discord pure
+logic.
 All network calls are mocked; ffmpeg/probe tests mock `config.find_tool`.
 Verify changes by running `python -m unittest discover -s tests`, then
 `python main.py <url>` end-to-end for integration.
