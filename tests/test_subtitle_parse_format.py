@@ -229,6 +229,26 @@ class CuesToBilibiliJsonTests(unittest.TestCase):
         self.assertTrue(content.endswith("…"))
         self.assertIn("字幕过长", err.getvalue())
 
+    def test_zero_duration_cue_extended_to_minimum(self):
+        """回归：YouTube 自动字幕的 0 时长 cue 会被 B站 79014 拒绝，需延长。"""
+        cues = [Cue(1, 5.0, 5.0, ">> 鼓掌"), Cue(2, 5.5, 6.5, "正常")]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            payload = bf.cues_to_bilibili_json(cues)
+        body = payload["body"]
+        self.assertGreater(body[0]["to"], body[0]["from"])
+        self.assertAlmostEqual(
+            body[0]["to"] - body[0]["from"], bf._MIN_CUE_DURATION, places=3
+        )
+        self.assertAlmostEqual(body[1]["to"], 6.5)  # 正常 cue 不受影响
+        self.assertIn("持续时间为 0", err.getvalue())
+
+    def test_negative_duration_cue_extended_to_minimum(self):
+        """end < start 的反向时间轴同样修复。"""
+        cues = [Cue(1, 6.0, 4.0, "异常")]
+        payload = bf.cues_to_bilibili_json(cues)
+        self.assertGreater(payload["body"][0]["to"], payload["body"][0]["from"])
+
 
 class ParseSrtFileTests(unittest.TestCase):
     """parse_srt 文件级包装（内部 _parse_srt_text 已测，这里测文件读取）。"""

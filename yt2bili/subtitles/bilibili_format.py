@@ -21,6 +21,7 @@ _DEFAULT_LOCATION = 2  # bottom center
 # avoid wasted API calls and provide actionable warnings).
 _MAX_CONTENT_CHARS = 80   # per-cue content length (Bilibili limit ≈100)
 _MAX_CUE_COUNT = 1000     # total cues (Bilibili limit, loosely enforced)
+_MIN_CUE_DURATION = 0.01  # seconds; Bilibili rejects 0-duration cues (79014)
 
 
 def clamp_cues_to_duration(
@@ -113,6 +114,7 @@ def cues_to_bilibili_json(
     body: list[dict] = []
     trimmed = 0
     clamped = 0
+    fixed_zero = 0
     truncated = 0
 
     # ── Timestamp validation ─────────────────────────────────────
@@ -134,9 +136,24 @@ def cues_to_bilibili_json(
                     flush=True, file=sys.stderr,
                 )
 
+        # ── Minimum duration validation ───────────────────────────
+        # YouTube 自动字幕常有 start == end 的 0 时长 cue（音效标签等），
+        # B站会以 79014 "字幕的持续时间必须大于0" 拒绝整个投稿。
+        start = round(cue.start, 3)
+        end = round(cue.end, 3)
+        if end <= start:
+            end = round(start + _MIN_CUE_DURATION, 3)
+            fixed_zero += 1
+            if fixed_zero <= 5:
+                print(
+                    f"[字幕] [WARN] #{cue.index} 字幕持续时间为 0，"
+                    f"已延长至 {_MIN_CUE_DURATION * 1000:.0f}ms（YouTube 自动字幕常见）",
+                    flush=True, file=sys.stderr,
+                )
+
         body.append({
-            "from": round(cue.start, 3),
-            "to": round(cue.end, 3),
+            "from": start,
+            "to": end,
             "location": location,
             "content": content,
         })
@@ -150,6 +167,12 @@ def cues_to_bilibili_json(
     if clamped:
         print(
             f"[字幕] [WARN] 已修正 {clamped} 条字幕的结束时间（超出视频时长）",
+            flush=True, file=sys.stderr,
+        )
+    if fixed_zero > 5:
+        print(
+            f"[字幕] [WARN] 共 {fixed_zero} 条 0 时长字幕已延长至"
+            f" {_MIN_CUE_DURATION * 1000:.0f}ms",
             flush=True, file=sys.stderr,
         )
     if truncated > 5:
