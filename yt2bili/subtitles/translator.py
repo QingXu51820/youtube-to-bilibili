@@ -9,6 +9,7 @@ Unlike the title translator (``yt2bili.translation.translator``), this module:
 - Always uses DeepSeek (not configurable per-provider).
 """
 
+import re
 import sys
 import time
 
@@ -67,31 +68,125 @@ def _format_batch(batch: list[Cue]) -> str:
     )
 
 
-def _parse_batch_response(raw: str, expected_count: int) -> list[tuple[int, str]]:
+def _call_deepseek(
+    client: OpenAI,
+    system_prompt: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+):
+    """One ``chat.completions.create`` call for subtitle translation.
+
+    ``thinking`` is ALWAYS sent explicitly.  deepseek-v4 reasons by default:
+    without an explicit ``{"type": "disabled"}`` the model burns the whole
+    ``max_tokens`` budget on reasoning and returns empty content with
+    ``finish_reason=length``.  (The title translator in
+    ``yt2bili.translation.translator`` already sends the param unconditionally;
+    this module previously only sent it when thinking was enabled.)
+    """
+    return client.chat.completions.create(
+        model=config.DEEPSEEK_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=temperature,
+        max_tokens=max_tokens,
+        extra_body={"thinking": {"type": config.DEEPSEEK_THINKING}},
+    )
+
+
+def _response_text(response) -> tuple[str, str, str]:
+    """Extract ``(content, finish_reason, reasoning_content)`` from a response."""
+    choice = response.choices[0]
+    return (
+        choice.message.content or "",
+        getattr(choice, "finish_reason", "") or "",
+        getattr(choice.message, "reasoning_content", "") or "",
+    )
+
+
+def _retry_when_reasoning_truncated(
+    client: OpenAI,
+    response,
+    system_prompt: str,
+    prompt: str,
+    max_tokens: int,
+    temperature: float,
+    label: str,
+):
+    """
+    Re-call with a 3x budget when the response was cut during reasoning.
+
+    A response whose budget went entirely to reasoning (``finish_reason``
+    ``"length"``, empty content, non-empty ``reasoning_content``) is retried
+    once with a larger ``max_tokens`` so the answer can appear.  Returns the
+    original response unchanged when the check does not apply or the retry
+    fails.
+    """
+    content, finish_reason, reasoning = _response_text(response)
+    if finish_reason != "length" or content.strip() or not reasoning:
+        return response
+    print(
+        f"[字幕] {label} 响应在思考阶段被截断（无正文），"
+        "扩大 max_tokens 重试...",
+        flush=True, file=sys.stderr,
+    )
+    try:
+        return _call_deepseek(
+            client, system_prompt, prompt, max_tokens * 3, temperature
+        )
+    except Exception as e:
+        print(f"[字幕] {label} 扩大预算重试失败: {e}", flush=True, file=sys.stderr)
+        return response
+
+
+_LINE_RE = re.compile(r"^\s*(\d{1,6})\s*[|.:：)）、]\s*(.*)$")
+
+
+def _parse_batch_response(
+    raw: str, expected_count: int, finish_reason: str = ""
+) -> list[tuple[int, str]]:
     """
     Parse the model's response back into (index, text) pairs.
+
+    Tolerant to the format drift seen in production:
+    - Markdown code fences around the whole answer are stripped.
+    - Separators other than ``|`` (``.`` ``:`` ``)`` ``、``) are accepted.
+    - If no numbered line parses but the line count matches, lines are
+      mapped to indices 1..N in order as a last resort.
+
+    When nothing parses at all, the raw response (first 500 chars) and the
+    API ``finish_reason`` are printed so a real format failure — or a
+    truncated response — stays diagnosable instead of a bare "返回 0 条".
 
     Args:
         raw: Raw response text from the model.
         expected_count: Number of entries expected.
+        finish_reason: API finish_reason (e.g. ``"length"`` = truncated).
 
     Returns:
         List of (index, translated_text) tuples.  If count mismatches
         a warning is printed and the best-effort result returned.
     """
-    lines = [l.strip() for l in raw.strip().splitlines() if l.strip()]
+    text = raw.strip()
+    # Strip a single markdown code fence wrapping the whole answer
+    if text.startswith("```"):
+        text = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", text).strip()
+        text = re.sub(r"\s*```\s*$", "", text).strip()
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
     result: list[tuple[int, str]] = []
 
     for line in lines:
-        # Skip lines that don't match the "number|text" format
-        if "|" not in line:
-            continue
-        try:
-            idx_str, text = line.split("|", 1)
-            idx = int(idx_str.strip())
-            result.append((idx, text.strip()))
-        except ValueError:
-            continue
+        m = _LINE_RE.match(line)
+        if m:
+            result.append((int(m.group(1)), m.group(2).strip()))
+        # Anything else (preamble, notes, leftover fence) is skipped
+
+    # Last resort: unnumbered plain lines with the right count — trust order
+    if not result and len(lines) == expected_count:
+        result = [(i + 1, line) for i, line in enumerate(lines)]
 
     if len(result) != expected_count:
         returned_indices = {idx for idx, _ in result}
@@ -118,6 +213,15 @@ def _parse_batch_response(raw: str, expected_count: int) -> list[tuple[int, str]
             + (f"（{detail}）" if detail else ""),
             flush=True, file=sys.stderr,
         )
+
+        # 一条都没解析出来时打印原始响应，否则无法知道模型到底回了什么
+        if not result and expected_count > 0:
+            snippet = raw.strip()[:500].replace("\n", " ")
+            print(
+                f"[字幕] [WARN] 原始响应全文（finish_reason="
+                f"{finish_reason or 'unknown'}）: {snippet!r}",
+                flush=True, file=sys.stderr,
+            )
 
     return result
 
@@ -184,29 +288,19 @@ def _retranslate_small_batch(
     input_text = _format_batch(batch_with_glossary)
     prompt = _USER_PREFIX.format(target_lang=target) + input_text
 
-    extra_body: dict = {}
-    if config.DEEPSEEK_THINKING == "enabled":
-        extra_body = {"thinking": {"type": "enabled"}}
-
+    system_prompt = (
+        _SYSTEM_PROMPT.format(target_lang=target)
+        + "\nThis is a re-translation of previously failed segments. "
+        + "Be EXTREMELY careful with the NUMBER|TEXT format."
+    )
     max_tokens = max(1024, len(cues) * 200)
 
     response = None
     for attempt in range(2):
         try:
-            response = client.chat.completions.create(
-                model=config.DEEPSEEK_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": _SYSTEM_PROMPT.format(target_lang=target)
-                        + "\nThis is a re-translation of previously failed segments. "
-                        + "Be EXTREMELY careful with the NUMBER|TEXT format.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
+            response = _call_deepseek(
+                client, system_prompt, prompt, max_tokens,
                 temperature=0.1,  # lower temperature for more deterministic output
-                max_tokens=max_tokens,
-                extra_body=extra_body if extra_body else None,
             )
             break
         except Exception as e:
@@ -227,8 +321,11 @@ def _retranslate_small_batch(
             for c in cues
         ]
 
-    raw = response.choices[0].message.content or ""
-    parsed = _parse_batch_response(raw, len(cues))
+    response = _retry_when_reasoning_truncated(
+        client, response, system_prompt, prompt, max_tokens, 0.1, "小批重译"
+    )
+    raw, finish_reason, _ = _response_text(response)
+    parsed = _parse_batch_response(raw, len(cues), finish_reason)
     trans_map: dict[int, str] = {idx: text for idx, text in parsed}
 
     results: list[Cue] = []
@@ -390,10 +487,7 @@ def _translate_batch(
 
     input_text = _format_batch(batch_with_glossary)
     prompt = _USER_PREFIX.format(target_lang=target) + input_text
-
-    extra_body: dict = {}
-    if config.DEEPSEEK_THINKING == "enabled":
-        extra_body = {"thinking": {"type": "enabled"}}
+    system_prompt = _SYSTEM_PROMPT.format(target_lang=target)
 
     max_tokens = max(4096, len(batch) * 150)
 
@@ -403,16 +497,7 @@ def _translate_batch(
     response = None
     for attempt in range(3):
         try:
-            response = client.chat.completions.create(
-                model=config.DEEPSEEK_MODEL,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT.format(target_lang=target)},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-                max_tokens=max_tokens,
-                extra_body=extra_body if extra_body else None,
-            )
+            response = _call_deepseek(client, system_prompt, prompt, max_tokens, 0.3)
             break
         except Exception as e:
             if attempt < 2:
@@ -440,8 +525,12 @@ def _translate_batch(
             )
         return fallback
 
-    raw = response.choices[0].message.content or ""
-    parsed = _parse_batch_response(raw, len(batch))
+    response = _retry_when_reasoning_truncated(
+        client, response, system_prompt, prompt, max_tokens, 0.3,
+        f"批次 {batch_num}/{total_batches}",
+    )
+    raw, finish_reason, _ = _response_text(response)
+    parsed = _parse_batch_response(raw, len(batch), finish_reason)
 
     # Build lookup from index → translated text
     trans_map: dict[int, str] = {idx: text for idx, text in parsed}

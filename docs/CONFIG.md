@@ -42,6 +42,11 @@
 | `YOUTUBE_OAUTH_TIMEOUT_SECONDS` | 自动点击超时秒数，超时后回退为手动浏览器 | `600` |
 | `YOUTUBE_OAUTH_RECORD_ENABLED` | 首次授权时录制你的手动点击（存到 token 文件旁的 `.recording.json`），之后 token 失效时自动回放；`false`=只用内置自动点击机器人。删除录制文件即可重新录制 | `true` |
 
+> **注意**：deepseek-v4 默认会思考——即使 `DEEPSEEK_THINKING=disabled`，若 API 调用未显式
+> 下发 `thinking` 参数，模型会把全部 `max_tokens` 预算花在思考上，返回空正文 +
+> `finish_reason=length`（字幕批量翻译表现：`翻译批次返回 0 条`）。代码已修复为始终
+> 显式下发该参数。
+
 ## 下载稳定性配置
 
 | 配置项 | 说明 | 默认值 |

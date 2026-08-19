@@ -85,6 +85,41 @@ class ParseBatchResponseTests(unittest.TestCase):
         self.assertIn("多余 #3", err.getvalue())
         self.assertEqual(len(result), 3)
 
+    def test_markdown_code_fence_stripped(self):
+        """容错：整个响应被 ``` 代码块包裹时照常解析。"""
+        raw = "```\n1|你好\n2|世界\n```"
+        result = st._parse_batch_response(raw, 2)
+        self.assertEqual(result, [(1, "你好"), (2, "世界")])
+
+    def test_alt_separators_accepted(self):
+        """容错：模型用 . : ) 、 等分隔符替代 | 时仍能解析。"""
+        raw = "1. 你好\n2: 世界\n3) 再见\n4、谢谢"
+        result = st._parse_batch_response(raw, 4)
+        self.assertEqual(result, [(1, "你好"), (2, "世界"), (3, "再见"), (4, "谢谢")])
+
+    def test_unnumbered_lines_mapped_by_order(self):
+        """兜底：无编号但行数一致 → 按行序映射到 1..N。"""
+        raw = "你好\n世界\n再见"
+        result = st._parse_batch_response(raw, 3)
+        self.assertEqual(result, [(1, "你好"), (2, "世界"), (3, "再见")])
+
+    def test_zero_parse_logs_raw_response(self):
+        """诊断：一条都解析不出时打印原始响应，避免盲猜模型返回。"""
+        raw = "抱歉，我无法翻译这些内容"
+        err = io.StringIO()
+        with redirect_stderr(err):
+            result = st._parse_batch_response(raw, 5)
+        self.assertEqual(result, [])
+        self.assertIn("原始响应全文", err.getvalue())
+        self.assertIn("抱歉", err.getvalue())
+
+    def test_zero_parse_reports_finish_reason(self):
+        """诊断：0 解析时带上 finish_reason（length=输出被截断）。"""
+        err = io.StringIO()
+        with redirect_stderr(err):
+            st._parse_batch_response("没有编号的内容", 5, finish_reason="length")
+        self.assertIn("finish_reason=length", err.getvalue())
+
 
 class NeedsRetranslateTests(unittest.TestCase):
     def test_empty_text_flagged(self):
@@ -181,6 +216,84 @@ class TranslateBatchTests(unittest.TestCase):
              patch.object(st, "_retranslate_small_batch", side_effect=fake_retranslate):
             result = st._translate_batch(client, [make_cue(1, "hi"), make_cue(2, "你好")], 1, 1)
         self.assertEqual(result[0].text, "重译1")
+
+    def test_always_sends_thinking_param(self):
+        """回归：thinking 必须显式下发 —— deepseek-v4 默认思考会烧光 max_tokens。"""
+        call_log = []
+        client = fake_client("1|译", call_log=call_log)
+        with patch.object(st.config, "DEEPSEEK_THINKING", "disabled"):
+            st._translate_batch(client, [make_cue(1, "hi")], 1, 1)
+        self.assertEqual(call_log[0]["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_reasoning_truncation_escalates_budget(self):
+        """回归：思考阶段烧光预算（length+空正文+有思考内容）→ 3x 预算重试成功。"""
+        call_log = []
+        resp1 = types.SimpleNamespace(choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content="", reasoning_content="thinking..."),
+            finish_reason="length",
+        )])
+        resp2 = types.SimpleNamespace(choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content="1|你好\n2|世界"),
+            finish_reason="stop",
+        )])
+        replies = iter([resp1, resp2])
+
+        def _create(**kwargs):
+            call_log.append(kwargs)
+            return next(replies)
+
+        client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
+        )
+        with patch.object(st.config, "DEEPSEEK_THINKING", "disabled"):
+            result = st._translate_batch(client, [make_cue(1, "hi"), make_cue(2, "world")], 1, 1)
+        self.assertEqual([c.text for c in result], ["你好", "世界"])
+        self.assertEqual(len(call_log), 2)
+        self.assertEqual(call_log[1]["max_tokens"], call_log[0]["max_tokens"] * 3)
+
+
+class ReasoningTruncationGuardTests(unittest.TestCase):
+    """_retry_when_reasoning_truncated 的触发条件。"""
+
+    def _resp(self, content, finish_reason="", reasoning=""):
+        return types.SimpleNamespace(choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content=content, reasoning_content=reasoning),
+            finish_reason=finish_reason,
+        )])
+
+    def test_escalates_when_budget_burned_on_reasoning(self):
+        call_log = []
+        resp1 = self._resp("", "length", "deep thinking...")
+        replies = iter([self._resp("1|译")])
+
+        def _create(**kwargs):
+            call_log.append(kwargs)
+            return next(replies)
+
+        client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
+        )
+        new = st._retry_when_reasoning_truncated(
+            client, resp1, "sys", "prompt", 4096, 0.3, "批次 1/1"
+        )
+        self.assertEqual(st._response_text(new)[0], "1|译")
+        self.assertEqual(call_log[0]["max_tokens"], 4096 * 3)
+
+    def test_no_escalate_when_content_present(self):
+        resp = self._resp("1|译", "length", "thinking...")  # 正文非空 → 不动
+        client = fake_client("unused")
+        self.assertIs(
+            st._retry_when_reasoning_truncated(client, resp, "sys", "p", 100, 0.3, "x"),
+            resp,
+        )
+
+    def test_no_escalate_without_reasoning(self):
+        resp = self._resp("", "length")  # 无思考内容 → 不动
+        client = fake_client("unused")
+        self.assertIs(
+            st._retry_when_reasoning_truncated(client, resp, "sys", "p", 100, 0.3, "x"),
+            resp,
+        )
 
 
 class TranslateCuesTests(unittest.TestCase):
