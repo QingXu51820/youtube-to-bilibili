@@ -22,6 +22,66 @@ _DEFAULT_TIMEOUT = 15.0
 _UPLOAD_TIMEOUT = 30.0
 
 
+# ── Profile helpers ──────────────────────────────────────────────────
+
+def _active_profile_name() -> str:
+    """Name of the currently active profile ('default' in legacy .env mode)."""
+    from yt2bili import profile as profile_mod
+    return profile_mod.get_active_profile_name()
+
+
+def _profile_state_active() -> bool:
+    """
+    True when the active profile is a real profile account (not .env legacy).
+
+    ``"default"`` means two different modes: without a profiles.json (or without
+    a ``"default"`` profile in it) it is legacy .env mode with the shared queue;
+    with a ``"default"`` profile in profiles.json it is a real profile account
+    with its own queue.
+    """
+    from yt2bili import profile as profile_mod
+    name = _active_profile_name()
+    if name != "default":
+        return True
+    return profile_mod.is_multi_profile() and profile_mod.profile_exists("default")
+
+
+def _active_credentials() -> tuple[str, str, str]:
+    """
+    ``(sessdata, bili_jct, buvid3)`` for the active profile.
+
+    In legacy .env mode returns the module-level config values. In profile
+    mode returns the profile's own credentials — never silently falls back to
+    .env, otherwise subtitles would be checked/uploaded on the wrong account.
+    """
+    name = _active_profile_name()
+    if _profile_state_active():
+        from yt2bili import profile as profile_mod
+        prof = profile_mod.resolve_profile(name)
+        if prof is not None and prof.bilibili.sessdata and prof.bilibili.bili_jct:
+            return (
+                prof.bilibili.sessdata,
+                prof.bilibili.bili_jct,
+                prof.bilibili.buvid3 or "",
+            )
+        raise RuntimeError(
+            f"账号 '{name}' 未配置 B站 登录凭据（sessdata/bili_jct），无法提交字幕。\n"
+            f"运行: python main.py --login --profile {name}"
+        )
+    return config.BILI_SESSDATA, config.BILI_BILI_JCT, config.BILI_BUVID3
+
+
+def _active_profile_channel_titles() -> set[str] | None:
+    """Set of channel titles for the active profile; None in legacy mode."""
+    if not _profile_state_active():
+        return None
+    from yt2bili import profile as profile_mod
+    prof = profile_mod.resolve_profile(_active_profile_name())
+    if prof is None:
+        return None
+    return {c.channel_title for c in prof.youtube.channels if c.channel_title}
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _build_client(timeout: float = _DEFAULT_TIMEOUT) -> httpx.Client:
@@ -36,10 +96,11 @@ def _build_client(timeout: float = _DEFAULT_TIMEOUT) -> httpx.Client:
         "Origin": "https://member.bilibili.com",
     }
     cookies = {}
-    if config.BILI_SESSDATA:
-        cookies["SESSDATA"] = config.BILI_SESSDATA
-    if config.BILI_BUVID3:
-        cookies["buvid3"] = config.BILI_BUVID3
+    sessdata, _bili_jct, buvid3 = _active_credentials()
+    if sessdata:
+        cookies["SESSDATA"] = sessdata
+    if buvid3:
+        cookies["buvid3"] = buvid3
     cookies["opus-goback"] = "1"
 
     return httpx.Client(
@@ -224,7 +285,7 @@ def _dedup_subtitles(aid: int, cid: int, lan: str) -> int:
                         data={
                             "subtitle_id": sub_id,
                             "oid": str(cid),
-                            "csrf": config.BILI_BILI_JCT,
+                            "csrf": _active_credentials()[1],
                         },
                     )
                     if r.status_code == 200:
@@ -264,9 +325,10 @@ def submit_subtitle(
     Raises:
         RuntimeError: If the API returns an error or the request fails.
     """
-    if not config.BILI_SESSDATA:
+    sessdata, bili_jct, _buvid3 = _active_credentials()
+    if not sessdata:
         raise RuntimeError("BILI_SESSDATA 未设置，无法提交字幕")
-    if not config.BILI_BILI_JCT:
+    if not bili_jct:
         raise RuntimeError("BILI_BILI_JCT 未设置，无法提交字幕")
 
     # Dedup: remove existing same-language subtitle before creating a new one.
@@ -285,8 +347,8 @@ def submit_subtitle(
         "submit": "true",
         "sign": "false",
         "bvid": bvid,
-        "csrf": config.BILI_BILI_JCT,
-        "csrf_token": config.BILI_BILI_JCT,
+        "csrf": bili_jct,
+        "csrf_token": bili_jct,
     }
 
     # Debug: log the request (truncate data for readability)
@@ -349,7 +411,17 @@ def _cleanup_subtitle_files(translated_path: str) -> None:
 # ── Deferred subtitle upload ────────────────────────────────────────────
 
 def _pending_subtitles_path() -> Path:
-    return Path(config.PROJECT_ROOT) / "state" / "pending_subtitles.json"
+    """
+    Path of the pending-subtitle queue for the active profile.
+
+    Named profiles keep their own queue under ``state/{profile}/`` so that
+    monitor cycles for one account never check/upload another account's
+    subtitles. Legacy .env mode keeps the shared ``state/pending_subtitles.json``.
+    """
+    root = Path(config.PROJECT_ROOT)
+    if not _profile_state_active():
+        return root / "state" / "pending_subtitles.json"
+    return root / "state" / _active_profile_name() / "pending_subtitles.json"
 
 
 def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
@@ -385,6 +457,7 @@ def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
 
 def _recover_orphaned_subtitles(
     existing_bvids: set[str],
+    channel_titles: set[str] | None = None,
 ) -> list[dict]:
     """
     Scan subtitle directory for ``.zh-CN.srt`` files not in the pending queue.
@@ -392,6 +465,13 @@ def _recover_orphaned_subtitles(
     Cross-references with ``upload_log.json`` to find BVID, queries Bilibili
     to confirm no zh-CN subtitles exist yet, and returns entries worth retrying.
     Also pre-fetches CID from the API response to avoid duplicate queries later.
+
+    Args:
+        existing_bvids: BVIDs already in the pending queue (skip those).
+        channel_titles: When given (profile mode), only consider subtitle files
+            whose video's channel is in this set — one account must never
+            check/upload another account's subtitles. ``None`` (legacy .env
+            mode) restores the previous global scan.
     """
     subtitle_dir = Path(config.SUBTITLE_DIR)
     if not subtitle_dir.exists():
@@ -414,10 +494,15 @@ def _recover_orphaned_subtitles(
         bv = item.get("bvid")
         aid = item.get("aid", 0)
         if vid and bv:
-            vid_to_entry[vid] = {"bvid": bv, "aid": aid}
+            vid_to_entry[vid] = {
+                "bvid": bv,
+                "aid": aid,
+                "channel_title": item.get("channel_title", ""),
+            }
 
     # Collect orphaned .zh-CN.srt files (skip ones already in pending)
     orphaned: list[dict] = []
+    scoped_skipped = 0
     for srt in sorted(subtitle_dir.glob("*.zh-CN.srt")):
         video_id = srt.name.split(".", 1)[0]
         info = vid_to_entry.get(video_id)
@@ -426,12 +511,19 @@ def _recover_orphaned_subtitles(
         bvid = info["bvid"]
         if bvid in existing_bvids:
             continue
+        # Profile mode: never check/upload another account's subtitle files
+        if channel_titles is not None and info.get("channel_title") not in channel_titles:
+            scoped_skipped += 1
+            continue
 
         orphaned.append({
             "bvid": bvid,
             "aid": info["aid"],
             "translated_path": str(srt),
         })
+
+    if scoped_skipped:
+        print(f"[字幕] 跳过 {scoped_skipped} 个其他账号的字幕文件")
 
     if not orphaned:
         return []
@@ -489,8 +581,204 @@ def _recover_orphaned_subtitles(
     return recoverable
 
 
+def _migrate_legacy_pending_queue() -> None:
+    """
+    One-time split of the shared ``state/pending_subtitles.json`` into
+    per-profile queues (``state/{profile}/pending_subtitles.json``).
+
+    Entries are attributed to a profile via ``upload_log.json`` (video_id →
+    channel_title → profile channel list). Entries that cannot be attributed
+    stay in the legacy file, which is only processed in legacy .env mode —
+    they are never silently uploaded under the wrong account.
+
+    Idempotent: once split, the legacy file is removed (or holds only
+    unattributed entries), so later runs are no-ops.
+    """
+    legacy = Path(config.PROJECT_ROOT) / "state" / "pending_subtitles.json"
+    if not legacy.exists():
+        return
+
+    try:
+        entries = json.loads(legacy.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return  # leave an unreadable legacy file alone
+    if not isinstance(entries, list):
+        return
+
+    if not entries:
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+        return
+
+    from yt2bili import profile as profile_mod
+
+    # channel_title -> profile name (first profile wins on title collision)
+    channel_to_profile: dict[str, str] = {}
+    for pname, prof in profile_mod.load_profiles().items():
+        for c in prof.youtube.channels:
+            if c.channel_title:
+                channel_to_profile.setdefault(c.channel_title, pname)
+
+    # video_id -> channel_title from the global upload log
+    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
+    vid_to_channel: dict[str, str] = {}
+    try:
+        if upload_log_path.exists():
+            upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
+            if isinstance(upload_log, list):
+                for item in upload_log:
+                    vid = item.get("video_id")
+                    chan = item.get("channel_title", "")
+                    if vid and chan:
+                        vid_to_channel[vid] = chan
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    per_profile: dict[str, dict[str, dict]] = {}
+    unattributed: list[dict] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            unattributed.append(e)
+            continue
+        video_id = Path(str(e.get("translated_path", ""))).name.split(".", 1)[0]
+        pname = channel_to_profile.get(vid_to_channel.get(video_id, ""), "")
+        if pname:
+            per_profile.setdefault(pname, {})[e.get("bvid", "")] = e
+        else:
+            unattributed.append(e)
+
+    # Merge into each per-profile queue (one entry per bvid; newer added_at wins)
+    for pname, by_bvid in per_profile.items():
+        queue = Path(config.PROJECT_ROOT) / "state" / pname / "pending_subtitles.json"
+        merged: dict[str, dict] = {}
+        if queue.exists():
+            try:
+                existing = json.loads(queue.read_text(encoding="utf-8-sig"))
+                if isinstance(existing, list):
+                    for e in existing:
+                        if isinstance(e, dict):
+                            merged[e.get("bvid", "")] = e
+            except (json.JSONDecodeError, OSError):
+                pass
+        for bvid, e in by_bvid.items():
+            old = merged.get(bvid)
+            if old and old.get("added_at", "") >= e.get("added_at", ""):
+                continue
+            merged[bvid] = e
+        queue.parent.mkdir(parents=True, exist_ok=True)
+        tmp = queue.with_suffix(queue.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(list(merged.values()), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(queue)
+
+    if unattributed:
+        tmp = legacy.with_suffix(legacy.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(unattributed, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(legacy)
+    else:
+        try:
+            legacy.unlink()
+        except OSError:
+            pass
+
+    if per_profile:
+        summary = "，".join(
+            f"{p}: {len(v)} 条" for p, v in sorted(per_profile.items())
+        )
+        print(
+            f"[字幕] 已将旧的公共字幕队列拆分为账号独立队列: {summary}"
+            + (f"，{len(unattributed)} 条未归属保留" if unattributed else "")
+        )
+
+
+def _lookup_upload_log_url(video_id: str) -> str:
+    """Look up the YouTube URL for a video in the global upload log."""
+    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
+    try:
+        if upload_log_path.exists():
+            upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
+            if isinstance(upload_log, list):
+                for item in upload_log:
+                    if item.get("video_id") == video_id and item.get("url"):
+                        return str(item["url"])
+    except (json.JSONDecodeError, OSError):
+        pass
+    return ""
+
+
+def _find_source_subtitle(translated_path: str) -> str | None:
+    """
+    Find a kept source subtitle file next to the missing translated file.
+
+    Looks for ``{video_id}.{lang}.srt`` where ``lang`` is not the target
+    language (e.g. ``.en.srt``). Returns ``None`` when nothing is kept.
+    """
+    translated = Path(translated_path)
+    video_id = translated.name.split(".", 1)[0]
+    target_suffix = f".{config.SUBTITLE_TARGET_LANG}.srt"
+    for f in sorted(translated.parent.glob(f"{video_id}.*.srt")):
+        if f.name != translated.name and not f.name.endswith(target_suffix):
+            return str(f)
+    return None
+
+
+def _regenerate_missing_subtitle(entry: dict) -> str | None:
+    """
+    Regenerate a missing translated subtitle file for a pending entry.
+
+    If a source subtitle (e.g. ``{video_id}.en.srt``) is still on disk it is
+    reused and only re-translated; otherwise the subtitle is re-downloaded
+    from YouTube first. Returns the translated file path on success, or
+    ``None`` (the entry stays in the queue and is retried next cycle).
+    """
+    translated_path = entry.get("translated_path", "")
+    if not translated_path:
+        return None
+    video_id = Path(translated_path).name.split(".", 1)[0]
+
+    from yt2bili.subtitles.parser import parse_subtitle
+    from yt2bili.subtitles.translator import translate_cues
+    from yt2bili.subtitles.writer import write_srt
+
+    # Reuse a kept source subtitle when possible — only re-translate
+    source_path = _find_source_subtitle(translated_path)
+    cues = parse_subtitle(source_path) if source_path else []
+    if not cues:
+        # No kept source (or it is unreadable) — re-download from YouTube
+        url = _lookup_upload_log_url(video_id) or f"https://www.youtube.com/watch?v={video_id}"
+        print(f"[字幕] 源字幕缺失，重新下载: {video_id}")
+        from yt2bili.subtitles.downloader import download_subtitles
+        source_path = download_subtitles(url, video_id)
+        if not source_path:
+            print(f"[字幕] [WARN] 重新下载字幕失败 ({video_id})")
+            return None
+        cues = parse_subtitle(source_path)
+        if not cues:
+            print(f"[字幕] [WARN] 重新下载的字幕解析为空: {Path(source_path).name}")
+            return None
+    else:
+        print(f"[字幕] 发现保留的源字幕 {Path(source_path).name}，直接重新翻译")
+
+    try:
+        translated = translate_cues(cues, batch_size=config.SUBTITLE_TRANSLATE_BATCH_SIZE)
+    except Exception as e:
+        print(f"[字幕] [WARN] 重新翻译失败: {e}")
+        return None
+
+    write_srt(translated, translated_path)
+    return translated_path
+
+
 def upload_pending_subtitles() -> int:
     """Try to upload pending subtitles. Returns count of successfully uploaded."""
+    _migrate_legacy_pending_queue()
     path = _pending_subtitles_path()
 
     entries: list[dict] = []
@@ -505,9 +793,12 @@ def upload_pending_subtitles() -> int:
     from yt2bili.subtitles.parser import parse_subtitle
     from yt2bili.subtitles.bilibili_format import cues_to_bilibili_json
 
-    # Recover orphaned subtitles (previously marked as permanent failures)
+    # Recover orphaned subtitles (previously marked as permanent failures),
+    # scoped to this account's channels in profile mode
     existing_bvids = {e.get("bvid", "") for e in entries}
-    recovered = _recover_orphaned_subtitles(existing_bvids)
+    recovered = _recover_orphaned_subtitles(
+        existing_bvids, _active_profile_channel_titles()
+    )
     if recovered:
         entries.extend(recovered)
         # Persist merged list
@@ -547,14 +838,40 @@ def upload_pending_subtitles() -> int:
 
         try:
             # Check file still exists before attempting parse.
-            # If the file was already cleaned up (e.g. previous partial
-            # success), there is no point keeping it in the queue.
+            # If it is missing (manually deleted, cleaned up, disk issue),
+            # regenerate it: reuse a kept source subtitle if present, otherwise
+            # re-download from YouTube, then re-translate.
             if not Path(translated_path).exists():
                 print(
-                    f"[字幕] [WARN] 永久失败，文件缺失 ({bvid}): {translated_path}",
+                    f"[字幕] 翻译字幕文件缺失 ({bvid}): {translated_path}",
                     flush=True,
                 )
-                continue  # drop from queue — don't re-add to remaining
+                if _regenerate_missing_subtitle(entry):
+                    print(
+                        f"[字幕] 重新生成完成: {Path(translated_path).name}",
+                        flush=True,
+                    )
+                    entry.pop("regen_failures", None)  # 成功后清零
+                else:
+                    # 视频被设为私有 / YouTube 没有字幕轨道时，重新生成必然失败。
+                    # 连续失败超过阈值后永久放弃，避免每轮监控都白试一次。
+                    fails = int(entry.get("regen_failures", 0)) + 1
+                    entry["regen_failures"] = fails
+                    if fails >= config.SUBTITLE_REGEN_MAX_FAILURES:
+                        print(
+                            f"[字幕] [WARN] 重新生成连续失败 {fails} 次，放弃 ({bvid})"
+                            "（源字幕不可用或视频私有），不再重试",
+                            flush=True,
+                        )
+                        continue  # 永久放弃：不写回 remaining
+                    print(
+                        f"[字幕] [WARN] 重新生成失败 ({bvid})"
+                        f"（第 {fails}/{config.SUBTITLE_REGEN_MAX_FAILURES} 次），"
+                        "保留在队列中下轮重试",
+                        flush=True,
+                    )
+                    remaining.append(entry)
+                    continue
 
             cues = parse_subtitle(translated_path)
             if not cues:
@@ -597,3 +914,107 @@ def upload_pending_subtitles() -> int:
     if uploaded:
         print(f"[字幕] 延迟上传完成: {uploaded} 条，剩余 {len(remaining)} 条待处理")
     return uploaded
+
+
+def requeue_missing_subtitles() -> int:
+    """
+    One-time recovery: re-queue videos whose Chinese subtitle never made it to
+    Bilibili.
+
+    Scans the global ``upload_log.json`` (scoped to the active profile's
+    channels), queries Bilibili for each video not already in the pending
+    queue, and re-queues those that have no zh subtitle yet. Re-queued entries
+    point at a (missing) translated file — the next
+    :func:`upload_pending_subtitles` run regenerates it (re-download +
+    re-translate) automatically.
+
+    Returns the number of re-queued videos.
+    """
+    path = _pending_subtitles_path()
+
+    existing_bvids: set[str] = set()
+    if path.exists():
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(entries, list):
+                existing_bvids = {
+                    e.get("bvid", "") for e in entries if isinstance(e, dict)
+                }
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    channel_titles = _active_profile_channel_titles()
+
+    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
+    candidates: list[dict] = []
+    try:
+        if upload_log_path.exists():
+            upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
+            if isinstance(upload_log, list):
+                for item in upload_log:
+                    bvid = item.get("bvid", "")
+                    if not bvid or bvid in existing_bvids:
+                        continue
+                    if (channel_titles is not None
+                            and item.get("channel_title", "") not in channel_titles):
+                        continue
+                    candidates.append(item)
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    if not candidates:
+        print("[字幕] 没有需要检查的字幕状态视频")
+        return 0
+
+    print(f"[字幕] 检查 {len(candidates)} 个视频在 B站 的中文字幕状态...")
+    requeued = 0
+    has_sub = 0
+    skipped = 0
+    client = _build_client(timeout=_DEFAULT_TIMEOUT)
+    try:
+        for i, item in enumerate(candidates, 1):
+            bvid = item.get("bvid", "")
+            video_id = item.get("video_id", "")
+            try:
+                resp = client.get(_BILIBILI_VIDEO_INFO_URL, params={"bvid": bvid})
+                time.sleep(0.3)  # avoid rate limiting
+                if resp.status_code != 200:
+                    skipped += 1
+                    continue
+                data = resp.json()
+                if data.get("code") != 0:
+                    skipped += 1  # deleted / not visible — nothing to do
+                    continue
+                subtitle_list = (
+                    data.get("data", {}).get("subtitle", {}).get("list", [])
+                )
+                if any(s.get("lan", "").startswith("zh") for s in subtitle_list):
+                    has_sub += 1
+                    continue
+                # No Chinese subtitle on Bilibili — re-queue it. The translated
+                # file is missing by design; upload_pending_subtitles will
+                # regenerate it (re-download + re-translate) on the next run.
+                if not video_id:
+                    skipped += 1
+                    continue
+                translated_path = str(
+                    Path(config.SUBTITLE_DIR)
+                    / f"{video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
+                )
+                save_pending_subtitle(
+                    bvid=bvid, aid=item.get("aid", 0),
+                    translated_path=translated_path,
+                )
+                requeued += 1
+            except Exception:
+                skipped += 1
+            if i % 10 == 0:
+                print(f"[字幕]   已检查 {i}/{len(candidates)}...")
+    finally:
+        client.close()
+
+    print(
+        f"[字幕] 恢复完成: 重新入队 {requeued} 个，B站已有中文字幕 {has_sub} 个，"
+        f"跳过 {skipped} 个（不可达/出错）"
+    )
+    return requeued
