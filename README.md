@@ -204,6 +204,8 @@ python -m yt2bili.youtube.subscriptions --source api --limit 50
 4. 下载客户端 JSON，保存为 `config/client_secret.json`。
 5. 运行脚本，浏览器会打开授权页面；授权后会生成 `config/youtube_token.json`。
 
+> **自动授权（免手动点击）**：安装 playwright 后（`pip install playwright`），token 过期重授权时程序会用本机 Edge/Chrome 自动完成授权页。默认采用**录制-回放**模式：首次授权时你在弹出的浏览器里手动操作一次（登录/选账号/同意），操作被录制到 token 文件旁的 `*.recording.json`；之后 token 失效时自动回放你的操作，无需再手动点击。回放失败会自动回退到内置机器人（账号选择 → Continue → Continue，含未验证应用的 Advanced → unsafe），再失败则回退为手动浏览器。登录状态保存在 `config/oauth_browser_profile/`，重新录制只需删除录制文件。可用 `YOUTUBE_OAUTH_AUTO_CONSENT=false` 整体关闭，或用 `YOUTUBE_OAUTH_RECORD_ENABLED=false` 关闭录制-回放。详见 [配置参考](docs/CONFIG.md)。
+
 RSS 低配额模式：
 
 ```bash

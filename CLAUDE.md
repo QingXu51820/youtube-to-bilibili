@@ -82,6 +82,7 @@ All settings in `config/.env` (copy from `config/.env.example`). Read by `yt2bil
 - **Upload**: `DEFAULT_TID` (Bilibili zone ID), `DEFAULT_TAGS`
 - **Download**: `MAX_HEIGHT` (1080), `DOWNLOAD_MIN_SPEED_KIB`, `CLEANUP_AFTER_UPLOAD`
 - **Monitor**: `YOUTUBE_MONITOR_INTERVAL_SECONDS`, `YOUTUBE_MONITOR_SOURCE` (api/rss)
+- **OAuth auto-consent**: `YOUTUBE_OAUTH_AUTO_CONSENT` (default true), `YOUTUBE_OAUTH_ACCOUNT_EMAIL`, `YOUTUBE_OAUTH_BROWSER_CHANNEL` (msedge), `YOUTUBE_OAUTH_BROWSER_PROFILE`, `YOUTUBE_OAUTH_TIMEOUT_SECONDS`, `YOUTUBE_OAUTH_RECORD_ENABLED` (record-once-replay-always, default true)
 - **Splitting**: `MAX_VIDEO_DURATION_SECONDS` (36000 = 10h, Bilibili's limit)
 
 ## Architecture
@@ -111,6 +112,8 @@ Each stage is a separate `try/except` block. Failure at any stage records the er
 | `yt2bili/media/video_splitter.py` | ffmpeg `-c copy` lossless segmenting at keyframes |
 | `yt2bili/youtube/monitor.py` | Polling loop: fetch subs → deduplicate → sort queue → process → retry → persist state; multi-profile round-robin support |
 | `yt2bili/youtube/subscriptions.py` | Standalone sub fetcher (API + RSS), custom `YouTubeClient` (requests-based, avoids httplib2 proxy issues), channel handle resolution |
+| `yt2bili/youtube/oauth_consent.py` | Zero-click OAuth consent — `auto_consent()` strategy chain: replay recorded flow → record human's manual flow → built-in Playwright robot (account chooser → Continue → Continue, Advanced/unsafe); `auto_consent_browser()` patches `webbrowser.open` **and** `webbrowser.get` (newer google-auth-oauthlib calls `webbrowser.get().open()`), falls back to manual browser |
+| `yt2bili/youtube/oauth_recorder.py` | Record-once-replay-always OAuth — JS event capture (clicks/Enter/non-password text) into `youtube_token.recording.json`, tolerant step replay with locator-candidate fallbacks; pure logic + `RecorderDriver` protocol for fake-driver tests |
 | `yt2bili/bilibili/subtitle.py` | Soft-subtitle API via httpx — CID lookup (`get_video_pages`/`wait_for_cid`), draft/save submit, deferred upload queue (`pending_subtitles.json`) |
 | `yt2bili/discord/monitor.py`, `publisher.py` | Discord 消息监控（Gateway + REST 兜底）→ B站动态发布（requires `discord.py`, not installed — only pure-logic parts are tested） |
 
@@ -130,6 +133,47 @@ config/subscriptions_cache.json  ← cached channel list for RSS mode
 2. Try each browser in `YOUTUBE_COOKIES_FROM_BROWSER` (chrome, edge, firefox)
 3. Fall back to bare yt-dlp (no cookies)
 4. Wrap bot-detection errors with Chinese-language hint about browser login
+
+### YouTube OAuth Auto-Consent (`yt2bili/youtube/oauth_consent.py`)
+
+When `youtube_token.json` is missing/revoked, `run_local_server()` re-opens
+the Google consent page. `auto_consent_browser()` patches `webbrowser.open`
+and `webbrowser.get` (newer google-auth-oauthlib calls
+`webbrowser.get(browser).open(url, new=1, autoraise=True)`, which bypasses
+the module-level function) so a Playwright robot (visible Edge/Chrome via
+`channel=`, no `playwright install` needed) completes the flow
+automatically; any failure falls back to a manual browser. The walking
+logic is pure (`decide_action()` over a `PageSnapshot`), so tests use a
+fake driver — no browser in tests.
+
+Strategy chain when a recording file is configured (`auto_consent()`):
+1. **Replay** a previously recorded flow (`yt2bili/youtube/oauth_recorder.py`)
+2. **Record mode** (no recording yet): the human clicks through once — every
+   click/keystroke is captured by an injected script and saved to
+   `youtube_token.recording.json` (passwords never recorded)
+3. **Built-in robot**: hand-coded rules (`decide_action`) for the standard flow
+4. Manual browser (webbrowser fallback)
+
+Replay is tolerant: each recorded step only fires while the page URL matches
+where it was recorded, locator candidates go stable-first (data-identifier →
+role+text → text → aria/id/name → proportional coordinates), and steps whose
+element never appears are skipped after a per-step timeout. Re-record by
+deleting the `.recording.json` file; disable with
+`YOUTUBE_OAUTH_RECORD_ENABLED=false`.
+
+- **Concurrent monitors**: all profiles share ONE `youtube_token.json`
+  (profiles do not override `YOUTUBE_TOKEN_FILE`). `oauth_consent_lock()`
+  is a single-flight file lock — the lock holder runs the consent flow and
+  the token is written atomically (temp + `os.replace`) *while still
+  holding the lock*, so concurrent `--profile snap` / `--profile deadlock`
+  processes never run two consent flows or read a half-written token.
+- First-ever run: the user logs into Google once in the popped-up browser
+  window; the session persists in `config/oauth_browser_profile/`.
+- Re-consent frequency: Google expires refresh tokens after **7 days** while
+  the GCP OAuth client's publishing status is "Testing". Publishing the app
+  to "In production" (no verification needed for personal use) stops the
+  weekly re-authorization; the consent page then adds the
+  "Advanced → Go to … (unsafe)" step, which the robot handles automatically.
 
 ### Retry Strategy (multi-layered)
 

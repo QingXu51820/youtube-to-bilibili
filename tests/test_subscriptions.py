@@ -15,6 +15,7 @@ from yt2bili.youtube.subscriptions import (
     VideoItem,
     YouTubeNetworkError,
     _api_http_error,
+    _write_token_atomic,
     load_channels_file,
     load_subscriptions_cache,
     normalize_published_at,
@@ -219,6 +220,32 @@ class ApiHttpErrorClassificationTests(unittest.TestCase):
             with self.subTest(status=status):
                 err = _api_http_error(self._resp(status))
                 self.assertIsInstance(err, SystemExit)
+
+
+class AtomicTokenWriteTests(unittest.TestCase):
+    """Token writes must never expose a half-written file to concurrent monitors."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.token = Path(self._tmp.name) / "youtube_token.json"
+
+    def test_writes_and_leaves_no_temp_file(self):
+        _write_token_atomic(self.token, '{"a": 1}')
+        self.assertEqual(self.token.read_text(encoding="utf-8"), '{"a": 1}')
+        self.assertFalse(
+            self.token.with_name("youtube_token.json.tmp").exists()
+        )
+
+    def test_overwrites_existing_token(self):
+        self.token.write_text("old", encoding="utf-8")
+        _write_token_atomic(self.token, "new")
+        self.assertEqual(self.token.read_text(encoding="utf-8"), "new")
+
+    def test_creates_missing_parent_dir(self):
+        token = Path(self._tmp.name) / "nested" / "youtube_token.json"
+        _write_token_atomic(token, "x")
+        self.assertEqual(token.read_text(encoding="utf-8"), "x")
 
 
 if __name__ == "__main__":

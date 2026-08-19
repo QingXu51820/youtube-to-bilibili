@@ -35,6 +35,12 @@
 | `YOUTUBE_COOKIES_FROM_BROWSER` | yt-dlp 读取 YouTube 登录 Cookie 的浏览器列表；可写 `chrome:Profile 1` 指定个人资料 | `chrome,edge,firefox` |
 | `YOUTUBE_COOKIE_FILE` | 自动生成/使用的 Netscape `config/cookies.txt` 路径，优先于浏览器 Cookie | `config/cookies.txt` |
 | `YTDLP_REMOTE_COMPONENTS` | yt-dlp 允许下载的 YouTube JS challenge 解算组件 | `ejs:github` |
+| `YOUTUBE_OAUTH_AUTO_CONSENT` | OAuth token 过期时用 Playwright 自动点击 Google 授权页（账号选择→Continue→Continue），失败自动回退为手动浏览器 | `true` |
+| `YOUTUBE_OAUTH_ACCOUNT_EMAIL` | 授权页有多个账号时优先选中的邮箱，留空=选第一个 | 空 |
+| `YOUTUBE_OAUTH_BROWSER_CHANNEL` | 自动授权用的浏览器：`msedge` / `chrome`（使用本机已安装的浏览器，无需 `playwright install`） | `msedge` |
+| `YOUTUBE_OAUTH_BROWSER_PROFILE` | 保存浏览器登录状态的目录。首次使用需在弹出的窗口中登录一次 Google 账号，之后全程自动 | `config/oauth_browser_profile` |
+| `YOUTUBE_OAUTH_TIMEOUT_SECONDS` | 自动点击超时秒数，超时后回退为手动浏览器 | `600` |
+| `YOUTUBE_OAUTH_RECORD_ENABLED` | 首次授权时录制你的手动点击（存到 token 文件旁的 `.recording.json`），之后 token 失效时自动回放；`false`=只用内置自动点击机器人。删除录制文件即可重新录制 | `true` |
 
 ## 下载稳定性配置
 

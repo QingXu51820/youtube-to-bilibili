@@ -6,8 +6,13 @@ data/snap_glossary.json
 /config/cookies.txt
 /config/client_secret.json
 /config/youtube_token.json
+/config/youtube_token.json.lock
+/config/*.recording.json
+/config/*.recording.json.corrupt
 /config/subscriptions_cache.json
 /config/urls.txt
+/config/oauth_browser_profile/
+/config/oauth_consent_debug/
 
 # Tools (auxiliary scripts)
 tools/

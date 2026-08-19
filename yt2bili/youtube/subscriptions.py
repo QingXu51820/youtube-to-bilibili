@@ -411,6 +411,19 @@ def _api_http_error(response: requests.Response) -> Exception:
     return SystemExit(message)
 
 
+def _write_token_atomic(token_file: Path, text: str) -> None:
+    """Write the token via a temp file + os.replace.
+
+    A concurrent monitor process polls ``token_file.exists()`` and may read
+    the file the instant it appears — a plain ``write_text`` would let it
+    see a half-written token.
+    """
+    tmp = token_file.with_name(token_file.name + ".tmp")
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, token_file)
+
+
 def get_youtube_service(client_secret_file: Path, token_file: Path):
     """Create an authorized YouTube Data API service."""
     try:
@@ -444,30 +457,63 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
 
         if not creds or not creds.refresh_token:
             require_file(client_secret_file, "OAuth client secret file")
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(client_secret_file), [YOUTUBE_READONLY_SCOPE]
-            )
-            # Apply YOUTUBE_PROXY to OAuth token-exchange requests
-            # (googleapis.com is blocked without proxy in some regions)
-            proxy_url = _env("YOUTUBE_PROXY", "").strip()
-            _prev_http = os.environ.get("HTTP_PROXY")
-            _prev_https = os.environ.get("HTTPS_PROXY")
-            try:
-                if proxy_url:
-                    os.environ["HTTP_PROXY"] = proxy_url
-                    os.environ["HTTPS_PROXY"] = proxy_url
-                creds = flow.run_local_server(port=0)
-            finally:
-                if proxy_url:
-                    if _prev_http is not None:
-                        os.environ["HTTP_PROXY"] = _prev_http
-                    else:
-                        os.environ.pop("HTTP_PROXY", None)
-                    if _prev_https is not None:
-                        os.environ["HTTPS_PROXY"] = _prev_https
-                    else:
-                        os.environ.pop("HTTPS_PROXY", None)
-        token_file.write_text(creds.to_json(), encoding="utf-8")
+            # Single-flight: concurrent monitors (e.g. multiple --profile
+            # processes) share one consent flow — the losers poll the token
+            # file and reuse the winner's token instead of each opening a
+            # browser window.
+            from yt2bili.youtube.oauth_consent import oauth_consent_lock
+
+            with oauth_consent_lock(token_file) as should_consent:
+                if not should_consent:
+                    creds = Credentials.from_authorized_user_file(
+                        str(token_file), [YOUTUBE_READONLY_SCOPE]
+                    )
+                if creds is None or not creds.refresh_token:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        str(client_secret_file), [YOUTUBE_READONLY_SCOPE]
+                    )
+                    # Apply YOUTUBE_PROXY to OAuth token-exchange requests
+                    # (googleapis.com is blocked without proxy in some regions)
+                    proxy_url = _env("YOUTUBE_PROXY", "").strip()
+                    _prev_http = os.environ.get("HTTP_PROXY")
+                    _prev_https = os.environ.get("HTTPS_PROXY")
+                    try:
+                        if proxy_url:
+                            os.environ["HTTP_PROXY"] = proxy_url
+                            os.environ["HTTPS_PROXY"] = proxy_url
+                        # Auto-click the consent page (Playwright) when
+                        # available, falling back to a manual browser.
+                        from yt2bili.config import YOUTUBE_OAUTH_AUTO_CONSENT
+                        from yt2bili.youtube.oauth_consent import auto_consent_browser
+
+                        # Record-once-replay-always: the recording lives next
+                        # to the token file so each profile gets its own.
+                        recording_file = token_file.with_name(
+                            f"{token_file.stem}.recording.json"
+                        )
+                        with auto_consent_browser(
+                            YOUTUBE_OAUTH_AUTO_CONSENT, recording_file=recording_file
+                        ):
+                            creds = flow.run_local_server(port=0)
+                    finally:
+                        if proxy_url:
+                            if _prev_http is not None:
+                                os.environ["HTTP_PROXY"] = _prev_http
+                            else:
+                                os.environ.pop("HTTP_PROXY", None)
+                            if _prev_https is not None:
+                                os.environ["HTTPS_PROXY"] = _prev_https
+                            else:
+                                os.environ.pop("HTTPS_PROXY", None)
+                # Persist while STILL holding the lock: a waiter that polls
+                # the token file in the window between lock release and write
+                # would otherwise run its own consent flow (second browser
+                # window, second grant for the same account).
+                if creds is not None and creds.refresh_token:
+                    _write_token_atomic(token_file, creds.to_json())
+        else:
+            # Token loaded/refreshed without consent — persist the new expiry.
+            _write_token_atomic(token_file, creds.to_json())
 
     return YouTubeClient(creds, session=session)
 

@@ -81,6 +81,29 @@ RUNS_DIR = _get("RUNS_DIR", str(PROJECT_ROOT / "runs"))
 # ── YouTube Subscription Monitor ─────────────────────────────────
 YOUTUBE_CLIENT_SECRET_FILE = _get("YOUTUBE_CLIENT_SECRET_FILE", "config/client_secret.json")
 YOUTUBE_TOKEN_FILE = _get("YOUTUBE_TOKEN_FILE", "config/youtube_token.json")
+
+# ── YouTube OAuth auto-consent (zero-click authorization) ─────────
+# Drives the Google consent page with Playwright (visible Edge/Chrome window)
+# instead of asking the human to click through it. Falls back to a manual
+# browser when playwright is missing or automation fails.
+YOUTUBE_OAUTH_AUTO_CONSENT = _get("YOUTUBE_OAUTH_AUTO_CONSENT", "true").lower() == "true"
+YOUTUBE_OAUTH_ACCOUNT_EMAIL = _get("YOUTUBE_OAUTH_ACCOUNT_EMAIL", "")
+YOUTUBE_OAUTH_BROWSER_CHANNEL = _get("YOUTUBE_OAUTH_BROWSER_CHANNEL", "msedge")
+YOUTUBE_OAUTH_BROWSER_PROFILE = _get(
+    "YOUTUBE_OAUTH_BROWSER_PROFILE",
+    str(PROJECT_ROOT / "config" / "oauth_browser_profile"),
+)
+YOUTUBE_OAUTH_TIMEOUT_SECONDS = _get_int("YOUTUBE_OAUTH_TIMEOUT_SECONDS", 600)
+# Record-replay OAuth: the first authorization records the human's manual
+# clicks (next to the token file, e.g. youtube_token.recording.json) and
+# later authorizations replay them automatically. false = built-in robot only.
+YOUTUBE_OAUTH_RECORD_ENABLED = _get("YOUTUBE_OAUTH_RECORD_ENABLED", "true").lower() == "true"
+# Debug: record screenshots + a state log of every consent page step
+YOUTUBE_OAUTH_SCREENSHOTS = _get("YOUTUBE_OAUTH_SCREENSHOTS", "false").lower() == "true"
+YOUTUBE_OAUTH_SCREENSHOT_DIR = _get(
+    "YOUTUBE_OAUTH_SCREENSHOT_DIR",
+    str(PROJECT_ROOT / "config" / "oauth_consent_debug"),
+)
 YOUTUBE_MAX_VIDEOS_PER_CHANNEL = _get_int("YOUTUBE_MAX_VIDEOS_PER_CHANNEL", 5)
 YOUTUBE_SUBSCRIPTIONS_CACHE = _get("YOUTUBE_SUBSCRIPTIONS_CACHE", "config/subscriptions_cache.json")
 YOUTUBE_PROXY = _get("YOUTUBE_PROXY", "").strip()

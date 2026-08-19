@@ -30,5 +30,8 @@ google-auth-oauthlib>=1.0.0
 google-auth-httplib2>=0.2.0
 feedparser>=6.0.0
 
+# YouTube OAuth auto-consent (zero-click authorization, uses installed Edge/Chrome)
+playwright>=1.40.0
+
 # Optional: for TLS fingerprint spoofing to avoid B站 rate limiting
 # curl_cffi>=0.7.0
