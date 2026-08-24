@@ -92,16 +92,17 @@ def _list_languages(video_url: str) -> tuple[dict, dict]:
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
+        "js_runtimes": {"node": {}},
     }
-    base_opts["socket_timeout"] = max(
-        1, int(getattr(config, "YOUTUBE_HTTP_TIMEOUT", 60) or 60)
-    )
-    base_opts["retries"] = 3
+    base_opts.update(_yt_dlp_network_opts())
 
     # Phase 1: bare yt-dlp (avoids cookie-induced "format not available" errors)
     try:
-        with YoutubeDL(base_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
+        def _bare_extract():
+            with YoutubeDL(base_opts) as ydl:
+                return ydl.extract_info(video_url, download=False)
+
+        info = _with_stderr_suppressed(_bare_extract)
     except Exception:
         info = None
 
@@ -111,14 +112,11 @@ def _list_languages(video_url: str) -> tuple[dict, dict]:
     if not subtitles and not auto_captions:
         try:
             ydl_opts = copy.deepcopy(base_opts)
-            _with_yt_dlp_cookies(
+            info = _with_yt_dlp_cookies(
                 ydl_opts,
                 lambda ydl: ydl.extract_info(video_url, download=False),
                 label="字幕语言检测",
             )
-            # Re-extract with bare yt-dlp after cookie warm-up
-            with YoutubeDL(base_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
         except Exception:
             pass  # keep whatever we had from bare extraction
 
@@ -151,6 +149,7 @@ def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str
         "no_warnings": True,
         "skip_download": True,       # Only download subtitles
         "noplaylist": True,
+        "js_runtimes": {"node": {}},
         "writesubtitles": True,       # Download manual subtitles
         "writeautomaticsub": True,   # Also download auto-generated
         "subtitleslangs": [lang],
@@ -181,8 +180,11 @@ def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str
 
     # Phase 1: try without cookies first (avoids "format not available" errors)
     try:
-        with YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(video_url, download=True)
+        def _bare_download():
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(video_url, download=True)
+
+        _with_stderr_suppressed(_bare_download)
     except Exception:
         pass  # fall through to cookie-based retry
 

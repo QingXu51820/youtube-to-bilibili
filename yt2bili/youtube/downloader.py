@@ -315,14 +315,14 @@ def _with_stderr_suppressed(callback):
     import os
 
     stderr_fd = os.dup(2)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
     try:
-        os.close(2)
-        os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull_fd, 2)
         return callback()
     finally:
-        os.close(2)
         os.dup2(stderr_fd, 2)
         os.close(stderr_fd)
+        os.close(devnull_fd)
 
 
 def _with_yt_dlp_cookies(ydl_opts: dict, operation, *, label: str):
