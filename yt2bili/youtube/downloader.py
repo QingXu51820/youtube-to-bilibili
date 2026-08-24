@@ -12,6 +12,7 @@ import urllib.request
 from copy import deepcopy
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Callable
 
 from yt2bili import config
 from yt2bili.media.cover import is_valid_image
@@ -810,13 +811,17 @@ def _download_with_progress(url: str, output_template: str, info: dict | None = 
     raise RuntimeError(f"下载失败: 已达到最大重启次数 {max_restarts}，下载未完成")
 
 
-def download_video(url: str) -> VideoInfo:
+def download_video(url: str, before_download: Callable[[dict], None] | None = None) -> VideoInfo:
     """
     Download a YouTube video at 1080p or lower, merge into mp4,
     and return metadata.
 
     Args:
         url: YouTube video URL
+        before_download: Optional callback invoked after content/short/length
+            filters pass but before the media download starts. Receives the
+            extracted ``info`` dict. This lets callers start independent work
+            (e.g. subtitle translation) that can overlap the media download.
 
     Returns:
         VideoInfo with file path, title, description, and original URL
@@ -885,6 +890,9 @@ def download_video(url: str) -> VideoInfo:
             raise RuntimeError(
                 f"视频超过最大时长限制（{hours:.1f}h ≥ {skip_long_minutes} 分钟），已跳过"
             )
+
+    if before_download:
+        before_download(info)
 
     available_resolution = _best_available_resolution(info)
     if available_resolution:

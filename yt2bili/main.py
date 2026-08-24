@@ -99,6 +99,7 @@ import sys
 import os
 import json
 import time
+import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -117,10 +118,7 @@ from yt2bili.media.video_splitter import split_video
 from yt2bili.bilibili import auth
 from yt2bili.subtitles.downloader import download_subtitles
 from yt2bili.subtitles.parser import parse_subtitle
-from yt2bili.subtitles.translator import translate_cues
-from yt2bili.subtitles.writer import write_srt
-from yt2bili.subtitles.bilibili_format import clamp_cues_to_duration
-from yt2bili.bilibili.subtitle import save_pending_subtitle
+from yt2bili.subtitles.queue import enqueue_translation
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -227,13 +225,47 @@ def process_video(url: str, credential=None) -> ProcessResult:
     print(f"🚀 处理视频: {url}")
     print("=" * 60)
 
+    # Subtitle translation is prepared after the content/short/length filters
+    # pass, then handed to a background queue so it never blocks the next
+    # video download. The source subtitle download stays synchronous inside
+    # the callback to avoid concurrent yt-dlp cookie/stderr-suppression races.
+    subtitle_job = None
+    subtitle_source_error: str | None = None
+
+    def _prepare_subtitles(info: dict) -> None:
+        nonlocal subtitle_job, subtitle_source_error
+        if not config.SUBTITLE_ENABLED:
+            return
+        video_id = (info or {}).get("id", "")
+        if not video_id:
+            subtitle_source_error = "无法从视频信息获取 video_id"
+            return
+        try:
+            source_path = download_subtitles(url, video_id)
+            if not source_path:
+                raise RuntimeError("YouTube 上未找到匹配的字幕语言")
+            cues = parse_subtitle(source_path)
+            if not cues:
+                raise RuntimeError("字幕文件解析为空")
+        except Exception as e:
+            subtitle_source_error = str(e)
+            return
+        subtitle_job = enqueue_translation(video_id, cues, source_path)
+
+    def _cancel_subtitle_job() -> None:
+        nonlocal subtitle_job
+        if subtitle_job is not None:
+            subtitle_job.cancel()
+            subtitle_job = None
+
     # ── Step 1: Download ──────────────────────────────────────
     record.stage = "download"
     try:
-        video = download_video(url)
+        video = download_video(url, before_download=_prepare_subtitles)
     except Exception as e:
         record.error = str(e)
         print(f"\n❌ 下载失败: {e}")
+        _cancel_subtitle_job()
         return record
 
     record.video_path = video.file_path
@@ -241,6 +273,9 @@ def process_video(url: str, credential=None) -> ProcessResult:
     record.original_title = video.title
     if video.width and video.height:
         record.video_resolution = f"{video.width}x{video.height}"
+
+    if subtitle_job is not None:
+        subtitle_job.set_duration(video.duration)
 
     # ── Step 1.5: Split if video exceeds Bilibili's 10h limit ──
     record.stage = "split"
@@ -270,6 +305,7 @@ def process_video(url: str, credential=None) -> ProcessResult:
     except Exception as e:
         record.error = str(e)
         print(f"\n❌ 翻译失败: {e}")
+        _cancel_subtitle_job()
         return record
 
     record.translated_title = translated_title
@@ -291,6 +327,7 @@ def process_video(url: str, credential=None) -> ProcessResult:
     except Exception as e:
         record.error = str(e)
         print(f"\n❌ 封面处理失败: {e}")
+        _cancel_subtitle_job()
         return record
 
     record.cover_path = cover_path
@@ -298,6 +335,8 @@ def process_video(url: str, credential=None) -> ProcessResult:
     # ── Step 4: Upload to Bilibili ────────────────────────────
     record.stage = "upload"
     is_multi_part = len(video_files_for_upload) > 1
+    if is_multi_part:
+        _cancel_subtitle_job()
 
     print()
     try:
@@ -319,10 +358,12 @@ def process_video(url: str, credential=None) -> ProcessResult:
             print(f"\n🔐 {msg}")
         else:
             print(f"\n❌ 上传失败: {e}")
+        _cancel_subtitle_job()
         return record
     except Exception as e:
         record.error = str(e)
         print(f"\n❌ 上传失败: {e}")
+        _cancel_subtitle_job()
         return record
 
     record.success = True
@@ -330,7 +371,10 @@ def process_video(url: str, credential=None) -> ProcessResult:
     record.bvid = result.bvid
     record.aid = result.aid
 
-    # ── Step 4.5: Subtitle processing (synchronous, after upload) ──
+    if subtitle_job is not None:
+        subtitle_job.set_upload(record.bvid, record.aid)
+
+    # ── Step 4.5: Subtitle processing (background translation queue) ──
     record.stage = "subtitle"
 
     if is_multi_part:
@@ -339,79 +383,44 @@ def process_video(url: str, credential=None) -> ProcessResult:
     elif not config.SUBTITLE_ENABLED:
         print(f"\n[字幕] 字幕功能已禁用")
         record.subtitle_status = "skipped_disabled"
-    else:
-        try:
-            # Download source subtitles
-            record.stage = "subtitle_download"
-            subtitle_path = download_subtitles(video.original_url, video.video_id)
-            if not subtitle_path:
-                raise RuntimeError("YouTube 上未找到匹配的字幕语言")
-            record.subtitle_source_path = str(subtitle_path)
-            print(f"[字幕] 源字幕: {Path(subtitle_path).name}")
-
-            # Parse SRT cues
-            record.stage = "subtitle_parse"
-            cues = parse_subtitle(subtitle_path)
-            if not cues:
-                raise RuntimeError("字幕文件解析为空")
-            print(f"[字幕] 解析: {len(cues)} 条字幕")
-
-            # Translate via DeepSeek batch
-            record.stage = "subtitle_translate"
-            translated = translate_cues(cues, batch_size=config.SUBTITLE_TRANSLATE_BATCH_SIZE)
-            if not translated:
-                raise RuntimeError("翻译后字幕为空")
-            print(f"[字幕] 翻译完成: {len(translated)} 条字幕")
-
-            # Clamp cue end times to the actual video duration (ffprobe).
-            # YouTube 自动字幕的最后一条有时会超出视频时长；B站会以
-            # 79014 "字幕时间点超过视频时间长度" 拒绝。留 0.5s 余量，
-            # 避免与 B站整数秒时长差几个毫秒仍被拒。
-            if video.duration > 0:
-                translated, dropped_n, clamped_n = clamp_cues_to_duration(
-                    translated, video.duration, margin=0.5
-                )
-                if dropped_n:
-                    print(f"[字幕] 已移除 {dropped_n} 条超出视频时长的字幕")
-                if clamped_n:
-                    print(f"[字幕] 已修正 {clamped_n} 条字幕的结束时间（不超过视频时长）")
-
-            # Write translated SRT file
-            record.stage = "subtitle_write"
-            subtitle_dir = Path(config.SUBTITLE_DIR)
-            subtitle_dir.mkdir(parents=True, exist_ok=True)
-            translated_filename = f"{video.video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
-            translated_path = str(subtitle_dir / translated_filename)
-            write_srt(translated, translated_path)
-            record.subtitle_translated_path = translated_path
-            print(f"[字幕] 已保存: {translated_filename}")
-
-            # Defer subtitle upload (Bilibili CID may not be ready for hours)
-            if config.SUBTITLE_UPLOAD_TO_BILIBILI and record.bvid and record.aid:
-                save_pending_subtitle(
-                    bvid=record.bvid,
-                    aid=record.aid,
-                    translated_path=translated_path,
-                )
-                record.subtitle_status = "pending_upload"
-                print(f"[字幕] 已加入延迟上传队列，等待 B站 CID 就绪后自动上传")
-            else:
-                record.subtitle_status = (
-                    "success" if not config.SUBTITLE_UPLOAD_TO_BILIBILI
-                    else "skipped_upload_disabled"
-                )
-                print(f"[字幕] 已生成翻译字幕，未上传到 B站")
-
-        except Exception as e:
-            record.subtitle_error = str(e)
-            record.subtitle_status = "failed"
-            if config.SUBTITLE_REQUIRED:
-                record.error = str(e)
+    elif subtitle_source_error:
+        record.subtitle_error = subtitle_source_error
+        record.subtitle_status = "failed"
+        if config.SUBTITLE_REQUIRED:
+            record.error = subtitle_source_error
+            record.stage = "subtitle"
+            record.success = False
+            print(f"\n[FAIL] 字幕处理失败（必需）: {subtitle_source_error}")
+            return record
+        print(f"[字幕] [WARN] {subtitle_source_error}（非致命，继续）")
+    elif subtitle_job is not None:
+        record.subtitle_source_path = str(subtitle_job.source_path)
+        if config.SUBTITLE_REQUIRED:
+            subtitle_job.wait()
+            if subtitle_job.error:
+                record.error = subtitle_job.error
+                record.subtitle_error = subtitle_job.error
+                record.subtitle_status = "failed"
                 record.stage = "subtitle"
                 record.success = False
-                print(f"\n[FAIL] 字幕处理失败（必需）: {e}")
+                print(f"\n[FAIL] 字幕处理失败（必需）: {subtitle_job.error}")
                 return record
-            print(f"[字幕] [WARN] {e}（非致命，继续）")
+            record.subtitle_translated_path = subtitle_job.translated_path
+            record.subtitle_status = subtitle_job.status
+        else:
+            record.subtitle_status = "queued"
+            print(f"[字幕] 源字幕: {Path(subtitle_job.source_path).name}")
+            print("[字幕] 已加入后台翻译队列，不阻塞后续视频下载")
+    else:
+        record.subtitle_error = "字幕任务未创建"
+        record.subtitle_status = "failed"
+        if config.SUBTITLE_REQUIRED:
+            record.error = record.subtitle_error
+            record.stage = "subtitle"
+            record.success = False
+            print(f"\n[FAIL] 字幕处理失败（必需）: {record.subtitle_error}")
+            return record
+        print("[字幕] [WARN] 字幕任务未创建（非致命，继续）")
 
     # ── Step 5: Report result ─────────────────────────────────
     print()
