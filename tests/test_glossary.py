@@ -118,6 +118,41 @@ class BuildDeadlockGlossaryTests(unittest.TestCase):
         self.assertNotIn("Foo", result)
 
 
+class BuildSnapGlossaryTests(unittest.TestCase):
+    def _card(self, def_id, description):
+        return {"defId": def_id, "originalName": def_id, "name": "中文名", "description": description}
+
+    def _location(self, def_id, description):
+        return {"defId": def_id, "originalName": def_id, "name": "中文地点", "description": description}
+
+    def test_partial_location_fetch_returns_empty(self):
+        """一张卡牌接口失败时不得保存残缺词表，避免丢地点。"""
+        cards = [self._card("Abomination", "On Reveal: Afflict cards here.")]
+        with patch.object(gl, "_fetch_json", side_effect=[cards, []]):
+            self.assertEqual(gl._build_glossary(), {})
+
+    def test_adds_only_present_auto_terms(self):
+        cards = [self._card("OnRevealExample", "On Reveal: Give your Ongoing cards +2 Power.")]
+        locations = [self._location("ExampleLocation", "Ongoing: Cards here cannot be destroyed.")]
+        with patch.object(gl, "_fetch_json", side_effect=[cards, locations, cards, locations]):
+            result = gl._build_glossary()
+
+        self.assertIn("On Reveal", result)
+        self.assertEqual(result["On Reveal"], "揭示")
+        self.assertIn("Ongoing", result)
+        self.assertNotIn("Activate", result)  # not present in the corpus
+
+    def test_extract_game_terms_from_items(self):
+        items = [
+            self._card("A", "On Reveal: Destroy a card."),
+            self._location("B", "When a card moves here, +1 Power."),
+        ]
+        result = gl._extract_game_terms_from_items(items)
+        self.assertIn("On Reveal", result)
+        self.assertIn("Destroy", result)
+        self.assertNotIn("Ongoing", result)
+
+
 class GetGlossaryTests(unittest.TestCase):
     def tearDown(self):
         gl._glossary = None
@@ -156,6 +191,12 @@ class GetGlossaryTests(unittest.TestCase):
     def test_deadlock_disabled_returns_empty(self):
         with patch.object(gl.config, "DEADLOCK_GLOSSARY_ENABLED", False):
             self.assertEqual(gl.get_deadlock_glossary(), {})
+
+    def test_get_snap_game_terms_falls_back_to_seeds(self):
+        with patch.object(gl.config, "SNAP_GLOSSARY_ENABLED", True), \
+             patch.object(gl, "_load_game_terms", return_value={"On Reveal": "揭示"}):
+            result = gl.get_snap_game_terms()
+        self.assertEqual(result, {"On Reveal": "揭示"})
 
 
 if __name__ == "__main__":

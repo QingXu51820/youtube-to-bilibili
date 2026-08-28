@@ -1,16 +1,20 @@
 """
-Marvel SNAP card/location glossary — EN→CN name mapping.
+Marvel SNAP card/location/term glossary — EN→CN name mapping.
 
 Fetches official translations from untapped.gg's public JSON API,
-caches locally, and refreshes periodically in background.
+caches locally, and refreshes periodically in background.  In addition to
+card/location names, it records game terms extracted from English
+card/location descriptions and the official news feed.
 
 Usage:
-    from yt2bili.glossary import get_glossary
+    from yt2bili.glossary import get_glossary, get_snap_game_terms
     glossary = get_glossary()  # dict[str, str] — {"Abomination": "恶型怪", ...}
+    game_terms = get_snap_game_terms()  # {"On Reveal": "揭示", ...}
 """
 
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -23,6 +27,124 @@ from yt2bili import config
 
 _CARDS_URL = "https://snapjson.untapped.gg/v2/latest/zh/cards.json"
 _LOCATIONS_URL = "https://snapjson.untapped.gg/v2/latest/zh/locations.json"
+_CARDS_EN_URL = "https://snapjson.untapped.gg/v2/latest/en/cards.json"
+_LOCATIONS_EN_URL = "https://snapjson.untapped.gg/v2/latest/en/locations.json"
+
+# Game-term seed dictionary.  These are the translations used to enrich the
+# card/location name glossary.  Keys are checked against English card/location
+# descriptions (and official news) so only terms actually used by the current
+# card pool/news feed are persisted.  Values follow the official Simplified
+# Chinese localization used by untapped.gg / marvelsnap.com.
+_SNAP_GAME_TERMS: dict[str, str] = {
+    "On Reveal": "揭示",
+    "Ongoing": "持续",
+    "Activate": "激活",
+    "End of Turn": "回合结束",
+    "Start of Game": "对战开始",
+    "Game Start": "对战开始",
+    "Move": "移动",
+    "Moveable": "可移动",
+    "Empowered": "强化",
+    "Horde": "军团",
+    "Charged": "充能",
+    "Volts": "伏特",
+    "Regenerate": "再生",
+    "Quickdraw": "速抽",
+    "Destroy": "摧毁",
+    "Destroyed": "被摧毁",
+    "Discard": "丢弃",
+    "Discarded": "被丢弃",
+    "Banish": "放逐",
+    "Banished": "被放逐",
+    "Merge": "合并",
+    "Copy": "复制",
+    "Replace": "替换",
+    "Add": "添加",
+    "Draw": "抽牌",
+    "Shuffle": "洗入",
+    "Steal": "偷取",
+    "Return to Hand": "返回手牌",
+    "Put Back": "放回",
+    "Bring Back": "带回",
+    "Resurrect": "复活",
+    "Set Power": "将战力设为",
+    "Set Cost": "将能量消耗设为",
+    "Double": "翻倍",
+    "Objective": "目标",
+    "Front Row": "前排",
+    "Back Row": "后排",
+    "Adjacent": "相邻",
+    "Highest-Power": "战力最高",
+    "Lowest-Power": "战力最低",
+    "Highest-Cost": "能量消耗最高",
+    "Lowest-Cost": "能量消耗最低",
+    "Unrevealed": "未揭示",
+    "Revealed": "已揭示",
+    "Bonus Energy": "额外能量",
+    "Max Energy": "最大能量",
+    "Unspent Energy": "未消耗能量",
+    "Power": "战力",
+    "Cost": "能量消耗",
+    "Energy": "能量",
+    "Card": "卡牌",
+    "Character": "角色",
+    "Location": "区域",
+    "Deck": "牌库",
+    "Hand": "手牌",
+    "Fill": "填满",
+    "Swap": "交换",
+    "Switch Sides": "换边",
+    "Retreat": "撤退",
+    "Snap": "加倍",
+    "Conquest": "征服",
+    "Ranked": "排位",
+    "Alliance": "联盟",
+    "Bounty": "赏金",
+    "Collector's Tokens": "收藏家代币",
+    "Boosters": "强化套组",
+    "Wild Boosters": "万能强化套组",
+    "Variant": "变体",
+    "Premium Mystery Variant": "高级神秘变体",
+    "Avatar": "头像",
+    "Emote": "表情",
+    "Album": "图鉴",
+    "Border": "边框",
+    "Season Pass": "赛季通行证",
+    "Premium Season Pass": "高级赛季通行证",
+    "Super Premium": "超高级",
+    "SNAP Pack": "SNAP卡包",
+    "Golden Gauntlet": "金光手套",
+    "Twitch Drops": "Twitch掉宝",
+    "High Voltage": "高压电",
+    "Overdrive": "超载",
+    "Grand Arena": "大竞技场",
+    "Draft": "选牌模式",
+    "Augments": "强化效果",
+    "Legacy Variants": "经典变体",
+    "Daily Offer Shop": "今日推荐商店",
+    "Character Mastery": "角色专精",
+    "Google Play Achievements": "Google Play成就",
+    "Web Shop": "网页商店",
+}
+
+# Subset that is safe to auto-apply to arbitrary English title/subtitle text.
+# Common verbs/nouns such as "Move", "Draw", "Add", "Power" are deliberately
+# excluded — replacing every occurrence would corrupt normal English text.
+_SNAP_AUTO_APPLY_TERMS: frozenset[str] = frozenset({
+    "On Reveal", "Ongoing", "Activate", "End of Turn", "Start of Game",
+    "Game Start", "Moveable", "Empowered", "Horde", "Regenerate", "Quickdraw",
+    "Destroyed", "Discarded", "Banish", "Banished",
+    "Return to Hand", "Put Back", "Bring Back", "Set Power", "Set Cost",
+    "Objective", "Front Row", "Back Row", "Adjacent", "Highest-Power",
+    "Lowest-Power", "Highest-Cost", "Lowest-Cost", "Unrevealed", "Revealed",
+    "Bonus Energy", "Max Energy", "Unspent Energy", "Switch Sides",
+    "Conquest", "Alliance", "Bounty", "Collector's Tokens", "Boosters",
+    "Wild Boosters", "Premium Mystery Variant", "Season Pass",
+    "Premium Season Pass", "Super Premium", "SNAP Pack", "Golden Gauntlet",
+    "Twitch Drops", "High Voltage", "Overdrive", "Grand Arena", "Draft",
+    "Augments", "Legacy Variants", "Daily Offer Shop", "Character Mastery",
+    "Google Play Achievements", "Web Shop",
+})
 
 # ── Module-level cache ────────────────────────────────────────────────
 _glossary: dict[str, str] | None = None
@@ -45,8 +167,12 @@ def _load_cache(path: Path) -> dict[str, str] | None:
     return None
 
 
-def _save_cache(path: Path, glossary: dict[str, str]) -> None:
-    """Persist glossary to a local cache file."""
+def _save_cache(
+    path: Path,
+    glossary: dict[str, str],
+    game_terms: dict[str, str] | None = None,
+) -> None:
+    """Persist glossary (and optional game terms) to a local cache file."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -55,12 +181,28 @@ def _save_cache(path: Path, glossary: dict[str, str]) -> None:
             "count": len(glossary),
             "glossary": glossary,
         }
+        if game_terms is not None:
+            payload["game_terms"] = game_terms
         tmp = path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         tmp.replace(path)
     except OSError:
         pass  # non-critical — will retry next time
+
+
+def _load_game_terms(path: Path) -> dict[str, str]:
+    """Load game terms from a cache file, falling back to built-in seeds."""
+    try:
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            terms = data.get("game_terms", {})
+            if isinstance(terms, dict) and terms:
+                return {str(k): str(v) for k, v in terms.items()}
+    except (json.JSONDecodeError, OSError, KeyError, TypeError, AttributeError):
+        pass
+    return dict(_SNAP_GAME_TERMS)
 
 
 def _fetch_json(url: str) -> list[dict[str, Any]]:
@@ -76,12 +218,58 @@ def _fetch_json(url: str) -> list[dict[str, Any]]:
         return []
 
 
+_DESCRIPTION_TAG_RE = re.compile(r"<[^>]+>")
+_DESCRIPTION_WS_RE = re.compile(r"\s+")
+
+
+def _clean_description(description: str) -> str:
+    """Strip HTML and normalise whitespace in a card/location description."""
+    description = _DESCRIPTION_TAG_RE.sub(" ", description or "")
+    description = re.sub(r"[“”\"']", " ", description)
+    description = description.replace("’", "'").replace("…", " ")
+    return _DESCRIPTION_WS_RE.sub(" ", description).strip()
+
+
+def _term_present(text: str, term: str) -> bool:
+    """Return True if ``term`` appears as a whole phrase in ``text``."""
+    term = term.strip()
+    if not term:
+        return False
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(text))
+
+
+def _extract_game_terms_from_items(items: list[dict[str, Any]]) -> dict[str, str]:
+    """Return present game terms from a collection of card/location items."""
+    descriptions: list[str] = []
+    for item in items:
+        description = _clean_description(item.get("description") or "")
+        if description:
+            descriptions.append(description)
+
+    found: dict[str, str] = {}
+    for term, cn in _SNAP_GAME_TERMS.items():
+        if any(_term_present(desc, term) for desc in descriptions):
+            found[term] = cn
+    return found
+
+
 def _build_glossary() -> dict[str, str]:
-    """Fetch cards and locations from API, build EN→CN mapping."""
+    """Fetch cards/locations and build the EN→CN name+term mapping."""
     glossary: dict[str, str] = {}
 
     # Cards
     cards = _fetch_json(_CARDS_URL)
+    locations = _fetch_json(_LOCATIONS_URL)
+    if not cards or not locations:
+        # A partial glossary is worse than a stale one: card names without
+        # locations (or vice versa) would silently drop the missing half on the
+        # next cache refresh.  Require both sources before rebuilding.
+        return {}
+
     for card in cards:
         en = (card.get("originalName") or "").strip()
         cn = (card.get("name") or "").strip()
@@ -89,12 +277,21 @@ def _build_glossary() -> dict[str, str]:
             glossary[en] = cn
 
     # Locations
-    locations = _fetch_json(_LOCATIONS_URL)
     for loc in locations:
         en = (loc.get("originalName") or "").strip()
         cn = (loc.get("name") or "").strip()
         if en and cn and en.lower() != cn.lower():
             glossary[en] = cn
+
+    # Add safe game keywords that actually appear in English card/location
+    # text, so translators get the official Chinese term rather than a literal
+    # translation.  Unsafe common words are intentionally left in the
+    # separate game-term dictionary, not in this auto-applied glossary.
+    for term, cn in _extract_game_terms_from_items(
+        _fetch_json(_CARDS_EN_URL) + _fetch_json(_LOCATIONS_EN_URL)
+    ).items():
+        if term in _SNAP_AUTO_APPLY_TERMS:
+            glossary[term] = cn
 
     return glossary
 
@@ -108,7 +305,7 @@ def _background_refresh(cache_path: Path) -> None:
             with _glossary_lock:
                 _glossary = glossary
                 _last_fetch_time = time.time()
-            _save_cache(cache_path, glossary)
+            _save_cache(cache_path, glossary, game_terms=_load_game_terms(cache_path))
     except Exception:
         pass  # keep using old cache
     finally:
@@ -148,7 +345,7 @@ def get_glossary() -> dict[str, str]:
                 if glossary:
                     _glossary = glossary
                     _last_fetch_time = time.time()
-                    _save_cache(cache_path, glossary)
+                    _save_cache(cache_path, glossary, game_terms=_load_game_terms(cache_path))
                 return _glossary or {}
 
         # Check if refresh is needed
@@ -159,6 +356,17 @@ def get_glossary() -> dict[str, str]:
             t.start()
 
         return _glossary or {}
+
+
+def get_snap_game_terms() -> dict[str, str]:
+    """Return the SNAP game-term EN→CN glossary.
+
+    Unlike :func:`get_glossary`, this is not auto-applied to arbitrary text;
+    callers can use it for display, search, or targeted keyword replacement.
+    """
+    if not config.SNAP_GLOSSARY_ENABLED:
+        return {}
+    return _load_game_terms(Path(config.SNAP_GLOSSARY_CACHE))
 
 
 # ── Deadlock Hero/Item Glossary (fetched from deadlock.wiki) ──────────
