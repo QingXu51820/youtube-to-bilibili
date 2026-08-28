@@ -145,6 +145,16 @@ async def _process_message(raw_msg: dict[str, Any], state: dict[str, Any],
     if _is_processed(state, msg_id):
         return
 
+    # Repost work-hours gate: when enabled, never translate/publish outside
+    # China's legal working days 09:00-18:00.  We deliberately do NOT mark the
+    # message as processed so a later fallback poll can pick it up in-window.
+    from yt2bili import workhours
+    if workhours.gate_enabled():
+        allowed, reason = workhours.check()
+        if not allowed:
+            print(f"[Discord] ⏸️  {reason}，跳过消息 {msg_id}")
+            return
+
     # Filter: skip bots
     if config.DISCORD_SKIP_BOTS and parsed.get("author_bot"):
         _mark_processed(state, msg_id, error="bot 消息已跳过")

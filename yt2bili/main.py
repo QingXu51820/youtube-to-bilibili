@@ -15,6 +15,8 @@ YouTube → Bilibili 自动转载流水线 / Discord → Bilibili 动态搬运
   --file PATH                从文件批量读取 URL（每行一个，#开头为注释）
   --login                    重新扫码登录 B站，刷新凭据
   --refresh-youtube-cookies  从浏览器导出 YouTube Cookie（用于绕过反爬）
+  --work-hours-only           仅允许在中国法定工作日 09:00-18:00 搬运，
+                              其他时间段严禁搬运且不翻译（法定节假日/调休自动识别）
 
 ────────────────────────────────────────────────────────────────
   视频专用参数
@@ -109,6 +111,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from yt2bili import config
 from yt2bili import profile as profile_mod
+from yt2bili import workhours
 from yt2bili.config import validate
 from yt2bili.media.cover import image_size, prepare_cover
 from yt2bili.youtube.downloader import download_video
@@ -224,6 +227,18 @@ def process_video(url: str, credential=None) -> ProcessResult:
     print("=" * 60)
     print(f"🚀 处理视频: {url}")
     print("=" * 60)
+
+    # ── Step 0: Repost work-hours gate ────────────────────────
+    # When WORK_HOURS_ONLY is enabled, refuse to download/translate/upload
+    # outside China's legal working days 09:00-18:00.  Returning here avoids
+    # spending API/bandwidth on a repost that is forbidden by the gate.
+    allowed, reason = workhours.check()
+    if not allowed:
+        record.stage = "blocked_work_hours"
+        record.error = reason
+        print(f"\n⏸️  {reason}")
+        print("    本时段已禁止搬运与翻译，跳过本视频。")
+        return record
 
     # Subtitle translation is prepared after the content/short/length filters
     # pass, then handed to a background queue so it never blocks the next
@@ -670,6 +685,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="禁用下载低速保护（不限制最低下载速度）",
     )
     parser.add_argument(
+        "--work-hours-only",
+        action="store_true",
+        help="仅允许在中国法定工作日 09:00-18:00 搬运；其他时间段严禁搬运且不翻译",
+    )
+    parser.add_argument(
         "--profile", default="",
         help="选择 B站 账号配置（config/profiles.json 中定义的名称），留空使用默认账号（.env）",
     )
@@ -780,6 +800,9 @@ def main():
     if args.no_speed_protection:
         config.DOWNLOAD_MIN_SPEED_KIB = 0
 
+    if args.work_hours_only:
+        config.WORK_HOURS_ONLY = True
+
     if args.title_filter:
         config.TITLE_FILTER_KEYWORD = args.title_filter
 
@@ -830,6 +853,10 @@ def main():
         if profile_mod.is_multi_profile() and profile_mod.get_active_profile_name() == "default":
             print("❌ 多账号模式下请用 --profile 指定账号（如 --profile deadlock）。")
             return 1
+        allowed, reason = workhours.check()
+        if not allowed:
+            print(f"⏸️  {reason}，已取消 --requeue-subtitles。")
+            return 1
         _ensure_credentials()
         from yt2bili.bilibili.subtitle import requeue_missing_subtitles
 
@@ -838,6 +865,10 @@ def main():
 
     # ── Subtitle-only mode ─────────────────────────────────────
     if args.subtitle_only:
+        allowed, reason = workhours.check()
+        if not allowed:
+            print(f"⏸️  {reason}，已取消 --subtitle-only。")
+            return 1
         _ensure_credentials()
         from yt2bili.bilibili.subtitle import upload_pending_subtitles, _pending_subtitles_path
 
@@ -854,6 +885,17 @@ def main():
         interval = max(10, args.subtitle_interval)
         print(f"[字幕] 字幕轮询模式启动，间隔 {interval}s，按 Ctrl+C 停止")
         while True:
+            allowed, reason = workhours.check()
+            if not allowed:
+                seconds = workhours.seconds_until_next_window()
+                minutes = seconds / 60.0
+                print(f"[字幕] ⏸️  {reason}，等待 {minutes:.0f} 分钟后恢复。")
+                try:
+                    time.sleep(seconds)
+                except KeyboardInterrupt:
+                    print("\n[字幕] 已停止。")
+                    return 0
+                continue
             try:
                 upload_pending_subtitles()
             except Exception as e:
@@ -1027,6 +1069,19 @@ def main():
         import asyncio
         asyncio.run(run_discord_monitor())
         return 0
+
+    # ── Repost work-hours gate (single/batch/shared pipeline) ──
+    # Reached only in batch/single mode (monitor/discord/subtitle paths
+    # already returned above).  Refuse before login/URL gathering so an
+    # off-hours run doesn't even prompt or consume tokens.
+    if workhours.gate_enabled():
+        allowed, reason = workhours.check()
+        if not allowed:
+            print("=" * 60)
+            print(f"⏸️  {reason}")
+            print("    本时段已禁止搬运与翻译，已取消本次执行。")
+            print("=" * 60)
+            return 1
 
     # Step 0: Ensure logged in (QR code flow on first run)
     _ensure_credentials()

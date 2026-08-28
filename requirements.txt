@@ -24,6 +24,9 @@ requests>=2.31.0
 # Configuration
 python-dotenv>=1.0.0
 
+# China legal-workday gate (--work-hours-only) — optional; falls back to Mon-Fri if missing
+chinesecalendar>=1.11.0
+
 # YouTube subscriptions script
 google-api-python-client>=2.0.0
 google-auth-oauthlib>=1.0.0

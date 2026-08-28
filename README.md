@@ -115,6 +115,12 @@ python main.py --monitor
 python main.py --monitor --once --dry-run
 ```
 
+仅允许在中国法定工作日 09:00-18:00 搬运（其他时段严禁搬运且不翻译），节假日/调休自动识别：
+
+```bash
+python main.py --monitor --work-hours-only
+```
+
 ## 多账号管理
 
 创建 `config/profiles.json`（参考 `config/profiles.json.example`）配置多个 Bilibili 账号，每个账号绑定独立的 YouTube 频道列表和设置：

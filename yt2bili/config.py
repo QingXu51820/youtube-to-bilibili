@@ -168,6 +168,15 @@ DEADLOCK_GLOSSARY_TTL = _get_int("DEADLOCK_GLOSSARY_TTL", 86400)  # 1 day
 # ── Source Language ───────────────────────────────────────────────
 SOURCE_LANG = _get("SOURCE_LANG", "auto")  # source language for translation
 
+# ── Repost Work-Hours Gate ────────────────────────────────────────
+# When WORK_HOURS_ONLY=true, video reposting (and the translation that
+# feeds it) is only allowed on China's legal working days between
+# WORK_START_HOUR:00 and WORK_END_HOUR:00 (Asia/Shanghai / UTC+8).
+# Outside that window the pipeline refuses to download/translate/upload.
+WORK_HOURS_ONLY = _get("WORK_HOURS_ONLY", "false").lower() == "true"
+WORK_START_HOUR = _get_int("WORK_START_HOUR", 9)
+WORK_END_HOUR = _get_int("WORK_END_HOUR", 18)
+
 # ── Subtitle Settings ─────────────────────────────────────────────
 SUBTITLE_ENABLED = _get("SUBTITLE_ENABLED", "true").lower() == "true"
 SUBTITLE_REQUIRED = _get("SUBTITLE_REQUIRED", "false").lower() == "true"
@@ -345,5 +354,12 @@ def validate() -> list[str]:
         issues.append("SUBTITLE_REGEN_MAX_FAILURES must be >= 1")
     if SUBTITLE_WAIT_CID_INTERVAL < 1:
         issues.append("SUBTITLE_WAIT_CID_INTERVAL must be >= 1")
+
+    if WORK_START_HOUR < 0 or WORK_START_HOUR > 23:
+        issues.append("WORK_START_HOUR must be between 0 and 23")
+    if WORK_END_HOUR < 0 or WORK_END_HOUR > 23:
+        issues.append("WORK_END_HOUR must be between 0 and 23")
+    if WORK_START_HOUR >= WORK_END_HOUR:
+        issues.append("WORK_START_HOUR must be less than WORK_END_HOUR")
 
     return issues

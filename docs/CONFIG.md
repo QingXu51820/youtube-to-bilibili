@@ -189,6 +189,26 @@ python main.py --monitor --no-speed-protection
 - 内容筛选（可选）：下载前先按完整短语匹配 `CONTENT_FILTER_KEYWORDS`；标题/简介明确命中时直接通过，未命中时再用 DeepSeek 判断。只有明确不相关才永久跳过，API 失败或返回无法解析时会放行以避免误杀。
 - 处理历史写入 `state/processed_videos.json`，用 YouTube `video_id` 去重
 
+### 搬运时段限制（法定工作日 09:00-18:00）
+
+开启后自动搬运只在**中国法定工作日 09:00-18:00** 进行，其他时段一律禁止下载、翻译与上传（Discord 动态搬运同理）。
+
+| 配置项 | 说明 | 默认值 |
+| --- | --- | --- |
+| `WORK_HOURS_ONLY` | 是否开启搬运时段限制 | `false` |
+| `WORK_START_HOUR` | 允许搬运的开始小时（0-23） | `9` |
+| `WORK_END_HOUR` | 允许搬运的结束小时（0-23，开区间） | `18` |
+
+也可用命令行开关临时开启：
+
+```text
+python main.py --monitor --work-hours-only
+```
+
+- 法定节假日与调休补班通过 `chinesecalendar` 包识别；若未安装或当年日历未发布，则退化为「周一至周五」判断。
+- 监控模式在非搬运时段会暂停轮询，等到下一个合法时段自动恢复。
+- 单个/批量搬运在非搬运时段直接拒绝执行，不会下载、翻译或上传。
+
 ---
 
 ## Marvel SNAP 示例配置

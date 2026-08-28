@@ -36,6 +36,8 @@ STATUS_SKIPPED_LIVE = "skipped_live"
 STATUS_SKIPPED_LONG = "skipped_long"
 STATUS_SKIPPED_VERTICAL = "skipped_vertical"
 STATUS_SKIPPED_CONTENT = "skipped_content"
+STATUS_SKIPPED_WORK_HOURS = "skipped_work_hours"
+
 def _try_deferred_subtitles() -> None:
     """Attempt to upload pending subtitles (non-blocking, short timeout)."""
     try:
@@ -63,6 +65,10 @@ CONTENT_SKIP_MARKERS = (
 LONG_SKIP_MARKERS = (
     "视频超过最大时长限制",
     "超长视频",
+)
+WORK_HOURS_SKIP_MARKERS = (
+    "已禁止搬运与翻译",
+    "搬运时段",
 )
 # ── Per-video retry ────────────────────────────────────────────────
 _VIDEO_RETRY_MAX = max(0, int(getattr(config, "YOUTUBE_VIDEO_RETRY_MAX", None) or 2))
@@ -593,6 +599,18 @@ def is_long_skip_result(result: Any) -> bool:
     return any(marker.lower() in error for marker in LONG_SKIP_MARKERS)
 
 
+def is_work_hours_skip_result(result: Any) -> bool:
+    """True when the result was deferred by the repost work-hours gate.
+
+    Unlike the other skip types this is temporal, not permanent: the video
+    is retried on the next workday cycle that falls inside the window.
+    """
+    if getattr(result, "stage", "") != "blocked_work_hours":
+        return False
+    error = str(getattr(result, "error", "")).lower()
+    return any(marker.lower() in error for marker in WORK_HOURS_SKIP_MARKERS)
+
+
 def should_skip_video(state: dict[str, Any], video: VideoItem) -> tuple[bool, str]:
     entry = state["videos"].get(video.video_id)
     if not entry:
@@ -608,6 +626,9 @@ def should_skip_video(state: dict[str, Any], video: VideoItem) -> tuple[bool, st
         return True, "竖屏视频已永久跳过"
     if status == STATUS_SKIPPED_CONTENT:
         return True, "内容筛选已跳过"
+    if status == STATUS_SKIPPED_WORK_HOURS:
+        # Temporal gate — not a permanent skip; retry when a window opens.
+        return False, "非搬运时段，稍后重试"
     return False, ""
 
 
@@ -663,6 +684,8 @@ def record_failure(state: dict[str, Any], video: VideoItem, result: Any) -> None
         status = STATUS_SKIPPED_CONTENT
     elif is_long_skip_result(result):
         status = STATUS_SKIPPED_LONG
+    elif is_work_hours_skip_result(result):
+        status = STATUS_SKIPPED_WORK_HOURS
     else:
         status = STATUS_FAILED
     entry = _base_entry(state, video, status)
@@ -910,6 +933,50 @@ def run_monitor_cycle(
     return results
 
 
+def _respect_repost_windows(interval_seconds: int, once: bool, dry_run: bool = False) -> bool:
+    """Return True when the monitor cycle may run; False means caller should stop.
+
+    When the work-hours gate (``WORK_HOURS_ONLY``) is enabled and the current
+    time falls outside China's legal working-day 09:00-18:00 window:
+
+      * ``dry_run=True`` — never blocked (dry-run neither reposts nor translates).
+      * ``once=True`` — print a short note and return ``False`` (skip the run).
+      * ``once=False`` — print a note, sleep until the next window opens, then
+        return ``True`` so the caller can run a cycle once the gate allows it.
+
+    When the gate is disabled or the window is already open, returns ``True``
+    immediately.  ``Ctrl+C`` during the sleep raises ``KeyboardInterrupt`` so a
+    long off-hours wait is still interruptible.
+    """
+    from yt2bili import workhours
+
+    if dry_run:
+        return True
+    if not workhours.gate_enabled():
+        return True
+
+    seconds = workhours.seconds_until_next_window()
+    if seconds <= 0:
+        return True
+
+    start = workhours.start_hour()
+    end = workhours.end_hour()
+    if once:
+        print(f"[订阅] ⏸️  当前不在中国法定工作日 {start:02d}:00-{end:02d}:00 搬运时段，"
+              "--once 模式无任务可执行。")
+        return False
+
+    minutes = seconds / 60.0
+    print(f"[订阅] ⏸️  当前不在中国法定工作日 {start:02d}:00-{end:02d}:00 搬运时段，"
+          f"等待 {minutes:.0f} 分钟后恢复检查。")
+    try:
+        time.sleep(seconds)
+    except KeyboardInterrupt:
+        print("\n[订阅] 等待中断，退出。")
+        raise
+    return True
+
+
 def run_monitor_loop(
     *,
     process_video: ProcessVideoFunc,
@@ -939,6 +1006,8 @@ def run_monitor_loop(
         from yt2bili import profile as profile_mod
 
         while True:
+            if not _respect_repost_windows(interval_seconds, once, dry_run):
+                return 0
             for profile in profiles:
                 profile_mod.set_active_profile(profile.name)
                 config.apply_profile_overrides(profile.name)
@@ -991,6 +1060,8 @@ def run_monitor_loop(
     # ── Single-profile / legacy mode ──────────────────────────
     consecutive_failures = 0
     while True:
+        if not _respect_repost_windows(interval_seconds, once, dry_run):
+            return 0
         print("=" * 60)
         print(f"[订阅] 开始检查: {beijing_now()}")
         print("=" * 60)
