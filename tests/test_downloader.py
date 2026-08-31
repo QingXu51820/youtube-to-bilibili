@@ -173,6 +173,29 @@ class DownloadVideoTests(unittest.TestCase):
         self.assertEqual(result.title, "Test Video")
         self.assertEqual(result.description, "desc")
         self.assertEqual(result.video_id, "abc123")
+
+    def test_channel_metadata_exposed(self):
+        self._patch_environment()
+        self.dl_dir.mkdir(parents=True)
+        result, mocks = self._mock_stages(
+            metadata=self._info(
+                channel="Bynx_Plays",
+                uploader="Other Uploader",
+                channel_id="UC123",
+            ),
+            download_result=self.video_path,
+        )
+        self.assertEqual(result.channel_title, "Bynx_Plays")
+        self.assertEqual(result.channel_id, "UC123")
+
+    def test_channel_title_falls_back_to_uploader(self):
+        self._patch_environment()
+        self.dl_dir.mkdir(parents=True)
+        result, mocks = self._mock_stages(
+            metadata=self._info(channel="", uploader="Fallback Chan"),
+            download_result=self.video_path,
+        )
+        self.assertEqual(result.channel_title, "Fallback Chan")
         self.assertEqual(result.width, 1920)
         self.assertEqual(result.height, 1080)
         self.assertEqual(result.duration, 100.0)

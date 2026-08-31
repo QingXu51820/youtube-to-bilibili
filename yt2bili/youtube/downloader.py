@@ -99,6 +99,8 @@ class VideoInfo:
     description: str      # video description
     original_url: str     # the YouTube URL
     video_id: str = ""    # YouTube video ID
+    channel_title: str = ""  # YouTube 频道名（合集归入用）
+    channel_id: str = ""     # YouTube 频道 ID
     thumbnail_path: str = ""  # path to downloaded thumbnail
     width: int = 0
     height: int = 0
@@ -950,6 +952,8 @@ def download_video(url: str, before_download: Callable[[dict], None] | None = No
         description=description if description else "",
         original_url=url,
         video_id=video_id,
+        channel_title=channel_title,
+        channel_id=info.get("channel_id", "") or "",
         thumbnail_path=thumbnail_path,
         width=width,
         height=height,
