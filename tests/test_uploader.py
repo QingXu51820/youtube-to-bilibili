@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from yt2bili import config
 from yt2bili.bilibili import subtitle as bsub
@@ -115,6 +115,109 @@ class UploadCredentialGuardTests(unittest.TestCase):
     def test_upload_video_empty_string(self):
         result = upload_video("", "title")
         self.assertFalse(result.success)
+
+
+class CollectionAssignmentTests(unittest.TestCase):
+    """上传成功后自动归入合集（非致命，失败不影响上传结果）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _fake_video_uploader(self):
+        def event(name):
+            return SimpleNamespace(value=name)
+
+        class FakeVideoUploader:
+            def __init__(self, pages, meta, credential, **kwargs):
+                self.pages = pages
+                self.meta = meta
+                self._handlers = {}
+
+            def on(self, event, handler=None):
+                def _register(fn):
+                    self._handlers[event] = fn
+                    return fn
+                return handler or _register
+
+            async def start(self):
+                return {"bvid": "BV123", "aid": 456}
+
+        return SimpleNamespace(
+            VideoMeta=lambda **kw: SimpleNamespace(**kw),
+            VideoUploaderPage=lambda path, title: SimpleNamespace(
+                path=path, title=title
+            ),
+            VideoUploader=FakeVideoUploader,
+            VideoUploaderEvents=SimpleNamespace(
+                PREUPLOAD=event("PREUPLOAD"),
+                PRE_COVER=event("PRE_COVER"),
+                AFTER_COVER=event("AFTER_COVER"),
+                PRE_SUBMIT=event("PRE_SUBMIT"),
+                COMPLETED=event("COMPLETED"),
+                ABORTED=event("ABORTED"),
+                FAILED=event("FAILED"),
+                AFTER_CHUNK=event("AFTER_CHUNK"),
+                AFTER_PAGE=event("AFTER_PAGE"),
+            ),
+        )
+
+    def _valid_cover(self):
+        p = Path(self._tmp.name) / "cover.jpg"
+        p.write_bytes(_make_minimal_jpeg())
+        return str(p)
+
+    def test_success_calls_collection_add(self):
+        cred = SimpleNamespace(sessdata="s", bili_jct="j")
+        add = AsyncMock(return_value={"season_id": 7, "episodes": 1})
+        cover = self._valid_cover()
+        with patch("yt2bili.bilibili.uploader.video_uploader",
+                   self._fake_video_uploader()), \
+             patch("yt2bili.bilibili.collection.add_uploaded_video_to_collection",
+                   new=add):
+            result = asyncio.run(
+                _upload_async(
+                    ["a.mp4"], "译题", tid=172, credential=cred,
+                    cover_path=cover, collection="Bynx",
+                )
+            )
+        self.assertTrue(result.success)
+        self.assertEqual(result.bvid, "BV123")
+        add.assert_awaited_once()
+        args = add.await_args.args
+        self.assertEqual(args[0], cred)
+        self.assertEqual(args[1], "Bynx")
+        self.assertEqual(args[3], "BV123")
+        self.assertEqual(args[4], 456)
+        self.assertEqual(args[5], ["译题"])
+
+    def test_collection_failure_keeps_upload_success(self):
+        cred = SimpleNamespace(sessdata="s", bili_jct="j")
+        add = AsyncMock(side_effect=RuntimeError("接口被风控"))
+        with patch("yt2bili.bilibili.uploader.video_uploader",
+                   self._fake_video_uploader()), \
+             patch("yt2bili.bilibili.collection.add_uploaded_video_to_collection",
+                   new=add):
+            result = asyncio.run(
+                _upload_async(
+                    ["a.mp4"], "译题", credential=cred, collection="Bynx",
+                )
+            )
+        self.assertTrue(result.success)
+        self.assertEqual(result.bvid, "BV123")
+
+    def test_no_collection_skips_call(self):
+        cred = SimpleNamespace(sessdata="s", bili_jct="j")
+        add = AsyncMock()
+        with patch("yt2bili.bilibili.uploader.video_uploader",
+                   self._fake_video_uploader()), \
+             patch("yt2bili.bilibili.collection.add_uploaded_video_to_collection",
+                   new=add):
+            result = asyncio.run(
+                _upload_async(["a.mp4"], "译题", credential=cred)
+            )
+        self.assertTrue(result.success)
+        add.assert_not_called()
 
 
 class BilibiliSubtitleApiTests(unittest.TestCase):

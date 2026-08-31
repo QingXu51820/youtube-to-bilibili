@@ -178,6 +178,7 @@ async def _upload_async(
     source_url: str = "",
     cover_path: str | None = None,
     credential: Credential | None = None,
+    collection: str | None = None,
 ) -> UploadResult:
     """
     Async upload a video to Bilibili (single or multi-part).
@@ -190,6 +191,7 @@ async def _upload_async(
         tid: Category ID (default from config)
         source_url: Original source URL (for 转载)
         cover_path: Optional cover image path
+        collection: Optional B站 合集名 — 上传成功后自动把视频归入该合集
 
     Returns:
         UploadResult with status and BV/AV numbers
@@ -327,6 +329,28 @@ async def _upload_async(
         bvid = result.get("bvid", "")
         aid = result.get("aid", 0)
 
+        if collection and collection.strip():
+            try:
+                from yt2bili.bilibili.collection import (
+                    add_uploaded_video_to_collection,
+                )
+                part_titles = [p.title for p in pages]
+                info = await add_uploaded_video_to_collection(
+                    cred,
+                    collection.strip(),
+                    cover,
+                    bvid,
+                    aid,
+                    part_titles,
+                )
+                print(
+                    f"[合集] ✅ 已归入合集「{collection.strip()}」"
+                    f" (id={info['season_id']}, {info['episodes']}个分P)"
+                )
+            except Exception as e:
+                # 合集归入失败不影响视频上传结果 —— 只打警告，用户可以手动补。
+                print(f"[合集] ⚠️ 归入合集失败（不影响上传）: {e}")
+
         return UploadResult(
             success=True,
             bvid=bvid,
@@ -363,6 +387,7 @@ def upload_video(
     tid: int | None = None,
     cover_path: str | None = None,
     credential: Credential | None = None,
+    collection: str | None = None,
 ) -> UploadResult:
     """
     Upload a video to Bilibili (synchronous wrapper).
@@ -377,6 +402,7 @@ def upload_video(
         tid: Category ID
         cover_path: Optional cover image path
         credential: Optional pre-built Credential (uses active profile when omitted)
+        collection: Optional B站 合集名 — 上传成功后自动归入该合集
 
     Returns:
         UploadResult
@@ -421,12 +447,18 @@ def upload_video(
             import nest_asyncio
             nest_asyncio.apply()
         result = loop.run_until_complete(
-            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, cred)
+            _upload_async(
+                file_paths, title, desc, tags, tid, original_url, cover, cred,
+                collection,
+            )
         )
     except RuntimeError:
         # No event loop running, use asyncio.run
         result = asyncio.run(
-            _upload_async(file_paths, title, desc, tags, tid, original_url, cover, cred)
+            _upload_async(
+                file_paths, title, desc, tags, tid, original_url, cover, cred,
+                collection,
+            )
         )
 
     return result
