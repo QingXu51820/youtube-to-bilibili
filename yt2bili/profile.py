@@ -31,6 +31,7 @@ class YouTubeChannel:
     """A YouTube channel to monitor."""
     channel_id: str
     channel_title: str = ""
+    collection: str = ""  # 可选：该频道投稿归入的 B站 合集名（留空则默认按频道名）
 
 
 @dataclass
@@ -213,6 +214,7 @@ def _dict_to_profile(name: str, d: dict) -> Profile:
             YouTubeChannel(
                 channel_id=str(cid),
                 channel_title=str(c.get("channel_title", "") or ""),
+                collection=str(c.get("collection", "") or ""),
             )
         )
 
@@ -262,7 +264,11 @@ def _profile_to_dict(profile: Profile) -> dict:
         },
         "youtube": {
             "channels": [
-                {"channel_id": c.channel_id, "channel_title": c.channel_title}
+                {
+                    "channel_id": c.channel_id,
+                    "channel_title": c.channel_title,
+                    "collection": c.collection,
+                }
                 for c in profile.youtube.channels
             ],
             "monitor_source": profile.youtube.monitor_source,

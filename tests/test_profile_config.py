@@ -60,6 +60,14 @@ class DictToProfileTests(unittest.TestCase):
         ]}})
         self.assertEqual(p.youtube.channels[0].channel_id, "123456")
 
+    def test_channel_collection_parsed(self):
+        p = _dict_to_profile("x", {"youtube": {"channels": [
+            {"channel_id": "UC1", "channel_title": "A", "collection": "Bynx"},
+            {"channel_id": "UC2", "channel_title": "B"},
+        ]}})
+        self.assertEqual(p.youtube.channels[0].collection, "Bynx")
+        self.assertEqual(p.youtube.channels[1].collection, "")
+
     def test_tid_string_and_invalid(self):
         p1 = _dict_to_profile("x", {"settings": {"default_tid": "172"}})
         self.assertEqual(p1.settings.default_tid, 172)
@@ -101,6 +109,18 @@ class ProfileDictRoundtripTests(unittest.TestCase):
         self.assertFalse(p2.settings.content_filter_enabled)
         # None 字段不写入 JSON
         self.assertNotIn("default_tags", d["settings"])
+
+    def test_roundtrip_preserves_collection(self):
+        p = Profile(
+            name="s",
+            youtube=YouTubeSettings(
+                channels=[YouTubeChannel("UC1", "Chan", collection="KMB")]
+            ),
+        )
+        d = _profile_to_dict(p)
+        self.assertEqual(d["youtube"]["channels"][0]["collection"], "KMB")
+        p2 = _dict_to_profile("s", d)
+        self.assertEqual(p2.youtube.channels[0].collection, "KMB")
 
 
 class SaveLoadProfilesTests(unittest.TestCase):
