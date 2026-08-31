@@ -210,7 +210,7 @@ def _cleanup_after_success(video, cover_path: str, extra_video_paths: list[str] 
         _remove_orphan_intermediates(video.file_path, video.video_id)
 
 
-def process_video(url: str, credential=None) -> ProcessResult:
+def process_video(url: str, credential=None, channel_title=None) -> ProcessResult:
     """
     Process a single YouTube URL through the full pipeline.
 
@@ -218,6 +218,8 @@ def process_video(url: str, credential=None) -> ProcessResult:
         url: YouTube video URL.
         credential: Optional pre-built bilibili_api Credential.
                     When omitted the active profile is used.
+        channel_title: Optional known channel title (monitor passes it);
+                       otherwise resolved from yt-dlp metadata.
 
     Returns:
         ProcessResult with success/failure details
@@ -286,6 +288,10 @@ def process_video(url: str, credential=None) -> ProcessResult:
     record.video_path = video.file_path
     record.thumbnail_path = video.thumbnail_path
     record.original_title = video.title
+    channel_title = video.channel_title or channel_title or ""
+    collection_name = _resolve_collection_name(channel_title, video.channel_id or "")
+    if collection_name:
+        print(f"[合集] 频道「{channel_title}」→ 合集「{collection_name}」")
     if video.width and video.height:
         record.video_resolution = f"{video.width}x{video.height}"
 
@@ -363,6 +369,7 @@ def process_video(url: str, credential=None) -> ProcessResult:
             original_title=video.title,
             cover_path=cover_path,
             credential=credential,
+            collection=collection_name or None,
         )
         if not result.success:
             raise RuntimeError(result.message)
@@ -625,6 +632,95 @@ def setup_profile(args) -> None:
         # Otherwise stay in legacy .env mode
 
 
+def _resolve_collection_name(channel_title: str, channel_id: str = "") -> str:
+    """
+    Return the active profile's configured 合集名 for a channel.
+
+    Matches by channel_id first, then by case-insensitive channel title.
+    Channels without a ``collection`` setting fall back to their title.
+    Returns "" when the channel is not in the active profile.
+    """
+    prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
+    if prof is None:
+        return ""
+    title = (channel_title or "").strip().lower()
+    for c in prof.youtube.channels:
+        if c.channel_id and channel_id and c.channel_id == channel_id:
+            return c.collection or c.channel_title or ""
+        if c.channel_title and c.channel_title.strip().lower() == title:
+            return c.collection or c.channel_title or ""
+    return ""
+
+
+def _run_collections_command(create_missing: bool = False) -> int:
+    """
+    Print the active profile's 频道 → 合集 对照表.
+
+    When *create_missing* is True, missing 合集 are created on B站 first
+    (real API calls) and the table is re-printed afterwards.
+    """
+    import asyncio
+
+    from yt2bili.bilibili.collection import (
+        ensure_collection,
+        resolve_channel_collections,
+        sync_list_collections,
+    )
+
+    prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
+    if prof is None:
+        print("没有可用的账号配置。")
+        return 1
+    if not prof.bilibili.sessdata:
+        print(f"账号 '{prof.name}' 未登录，无法查询合集。")
+        print(f"运行: python main.py --login --profile {prof.name}")
+        return 1
+
+    credential = auth.get_credential(profile_name=prof.name)
+    pairs = [(c.channel_title, c.collection) for c in prof.youtube.channels]
+    collections = sync_list_collections(credential)
+    matches = resolve_channel_collections(pairs, collections)
+
+    print(f"账号: {prof.name} — 频道 → 合集 对照（{len(matches)} 个频道）")
+    print(f"{'频道':<28} {'合集名':<22} 状态")
+    print("-" * 76)
+    for m in matches:
+        if m.status == "matched":
+            status = f"已匹配 (id={m.season_id})"
+        else:
+            status = "待新建（上传时自动创建）"
+        print(f"{m.channel_title:<28} {m.collection_name:<22} {status}")
+
+    if not create_missing:
+        return 0
+
+    pending = [m for m in matches if m.status == "to_create"]
+    if not pending:
+        print("\n✅ 没有缺失的合集。")
+        return 0
+
+    print("\n正在创建缺失的合集...")
+    for m in pending:
+        try:
+            info, created = asyncio.run(
+                ensure_collection(credential, m.collection_name, None)
+            )
+            print(f"  ➕ 已创建合集「{m.collection_name}」 (id={info.season_id})")
+        except Exception as e:
+            print(f"  ❌ 创建合集「{m.collection_name}」失败: {e}")
+
+    print("\n创建后状态：")
+    collections = sync_list_collections(credential)
+    matches = resolve_channel_collections(pairs, collections)
+    for m in matches:
+        if m.status == "matched":
+            status = f"已匹配 (id={m.season_id})"
+        else:
+            status = "仍缺失"
+        print(f"  {m.channel_title:<28} {m.collection_name:<22} {status}")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="YouTube → Bilibili 自动转载流水线")
     parser.add_argument("urls", nargs="*", help="YouTube 视频链接")
@@ -696,6 +792,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--list-profiles", action="store_true",
         help="列出 config/profiles.json 中所有可用账号配置",
+    )
+    parser.add_argument(
+        "--list-collections", action="store_true",
+        help="列出当前账号的 频道→合集 对照（只读）",
+    )
+    parser.add_argument(
+        "--create-collections", action="store_true",
+        help="先创建缺失的合集，再列出 频道→合集 对照（会调用 B站 接口）",
     )
     parser.add_argument(
         "--all-profiles", action="store_true",
@@ -808,6 +912,10 @@ def main():
 
     # ── Profile setup (before credential checks) ───────────────
     setup_profile(args)
+
+    # ── 频道 → 合集 对照 / 创建缺失合集 ───────────────────────
+    if args.list_collections or args.create_collections:
+        sys.exit(_run_collections_command(create_missing=args.create_collections))
 
     # ── --resolve-channel helper ───────────────────────────────
     if args.resolve_channel:
@@ -1107,6 +1215,10 @@ def main():
         print("  python main.py --login                        重新扫码登录")
         print("  python main.py --login --profile snap         登录指定账号")
         print("  python main.py --list-profiles                列出所有账号")
+        print("  python main.py --list-collections --profile snap")
+        print("                                          频道→合集 对照（只读）")
+        print("  python main.py --create-collections --profile snap")
+        print("                                          创建缺失合集并核对")
         print("  python main.py --resolve-channel @Handle      解析频道句柄")
         print("  python main.py                                自动读取 urls.txt 或交互输入")
         return 0

@@ -1,6 +1,8 @@
 """自测：main.py 辅助逻辑（run 报告、清理、dry-run 守卫、monitor 参数接线）。"""
 
 import json
+import contextlib
+import io
 import os
 import re
 import sys
@@ -8,11 +10,22 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 from yt2bili import config
 from yt2bili import main as main_mod
+from yt2bili import profile as profile_mod
+from yt2bili.bilibili.collection import CollectionInfo
+from yt2bili.bilibili.uploader import UploadResult
 from yt2bili.main import ProcessResult, _cleanup_old_runs, _write_run_report
+from yt2bili.profile import (
+    BiliCredentials,
+    Profile,
+    YouTubeChannel,
+    YouTubeSettings,
+)
+from yt2bili.youtube.downloader import VideoInfo
 
 
 def make_result(url="https://youtu.be/abc", success=True, stage="complete"):
@@ -110,6 +123,136 @@ class MonitorArgWiringTests(unittest.TestCase):
         self.assertIsNone(kwargs["write_run_report"])
         self.assertEqual(kwargs["source"], "rss")  # .env 回退
         self.assertTrue(kwargs["once"])
+
+
+class CollectionResolutionTests(unittest.TestCase):
+    """_resolve_collection_name：按频道 ID/标题找 active profile 的合集名。"""
+
+    def _profile(self):
+        return Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "Bynx_Plays", collection="Bynx"),
+                YouTubeChannel("UC2", "PlainChan"),
+            ]),
+        )
+
+    def _patch_profile(self, prof):
+        return [
+            patch.object(main_mod.profile_mod, "get_active_profile_name",
+                         return_value="snap"),
+            patch.object(main_mod.profile_mod, "resolve_profile",
+                         return_value=prof),
+        ]
+
+    def test_configured_collection_by_title_case_insensitive(self):
+        prof = self._profile()
+        with self._patch_profile(prof)[0], self._patch_profile(prof)[1]:
+            self.assertEqual(
+                main_mod._resolve_collection_name("bynx_plays"), "Bynx"
+            )
+
+    def test_configured_collection_by_id(self):
+        prof = self._profile()
+        with self._patch_profile(prof)[0], self._patch_profile(prof)[1]:
+            self.assertEqual(
+                main_mod._resolve_collection_name("Anything", "UC1"), "Bynx"
+            )
+
+    def test_fallback_to_channel_title(self):
+        prof = self._profile()
+        with self._patch_profile(prof)[0], self._patch_profile(prof)[1]:
+            self.assertEqual(
+                main_mod._resolve_collection_name("PlainChan"), "PlainChan"
+            )
+
+    def test_no_match_returns_empty(self):
+        prof = self._profile()
+        with self._patch_profile(prof)[0], self._patch_profile(prof)[1]:
+            self.assertEqual(main_mod._resolve_collection_name("Unknown"), "")
+
+
+class CollectionsReportTests(unittest.TestCase):
+    """--list-collections / --create-collections 命令输出。"""
+
+    def _profile(self):
+        return Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "Bynx_Plays", collection="Bynx"),
+                YouTubeChannel("UC2", "MarvelSnap", collection="MarvelSnap"),
+            ]),
+        )
+
+    def _run(self, create_missing=False):
+        prof = self._profile()
+        cred = SimpleNamespace(sessdata="s", bili_jct="j")
+        existing = [CollectionInfo(season_id=7, title="Bynx", section_id=8)]
+        created = CollectionInfo(season_id=9, title="MarvelSnap", section_id=10)
+        with patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=prof), \
+             patch.object(main_mod.auth, "get_credential",
+                          return_value=cred), \
+             patch("yt2bili.bilibili.collection.sync_list_collections",
+                   return_value=existing), \
+             patch("yt2bili.bilibili.collection.ensure_collection",
+                   new=AsyncMock(return_value=(created, True))):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main_mod._run_collections_command(
+                    create_missing=create_missing
+                )
+        return code, out.getvalue()
+
+    def test_report_lists_matched_and_to_create(self):
+        code, text = self._run(create_missing=False)
+        self.assertEqual(code, 0)
+        self.assertIn("Bynx_Plays", text)
+        self.assertIn("已匹配 (id=7)", text)
+        self.assertIn("MarvelSnap", text)
+        self.assertIn("待新建", text)
+
+    def test_create_missing_creates_collections(self):
+        code, text = self._run(create_missing=True)
+        self.assertEqual(code, 0)
+        self.assertIn("已创建合集「MarvelSnap」", text)
+        self.assertIn("(id=9)", text)
+
+
+class ProcessVideoCollectionWiringTests(unittest.TestCase):
+    """process_video 把解析到的合集名传给 upload_video。"""
+
+    def test_passes_collection_to_upload(self):
+        prof = Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "Bynx_Plays", collection="Bynx"),
+            ]),
+        )
+        video = VideoInfo(
+            file_path="x.mp4", title="T", description="",
+            original_url="https://youtu.be/abc", video_id="abc",
+            channel_title="Bynx_Plays", channel_id="UC1",
+        )
+        with patch.object(main_mod.workhours, "check",
+                          return_value=(True, "")), \
+             patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=prof), \
+             patch.object(main_mod, "download_video", return_value=video), \
+             patch.object(main_mod, "translate", return_value="译题"), \
+             patch.object(main_mod, "prepare_cover", return_value="/tmp/c.jpg"), \
+             patch.object(main_mod, "upload_video") as up:
+            up.return_value = UploadResult(success=True, bvid="BV1", aid=1)
+            result = main_mod.process_video("https://youtu.be/abc")
+        self.assertTrue(result.success)
+        self.assertEqual(up.call_args.kwargs["collection"], "Bynx")
 
 
 if __name__ == "__main__":
