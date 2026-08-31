@@ -10,7 +10,11 @@
       },
       "youtube": {
         "channels": [
-          {"channel_id": "UCgsbO683Z1-_FknDdKmyrMA", "channel_title": "MarvelSnap"}
+          {
+            "channel_id": "UCgsbO683Z1-_FknDdKmyrMA",
+            "channel_title": "MarvelSnap",
+            "collection": "MarvelSnap"
+          }
         ],
         "monitor_source": "rss",
         "monitor_state": "",
@@ -33,7 +37,11 @@
       },
       "youtube": {
         "channels": [
-          {"channel_id": "UC_DEADLOCK_CHANNEL_ID", "channel_title": "Deadlock Official"}
+          {
+            "channel_id": "UC_DEADLOCK_CHANNEL_ID",
+            "channel_title": "Deadlock Official",
+            "collection": "Deadlock Official"
+          }
         ],
         "monitor_source": "rss",
         "monitor_state": "",
