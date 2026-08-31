@@ -9,10 +9,34 @@ unit-tested without network access.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+import httpx
+
+
+# ── Constants ──────────────────────────────────────────────────────────
+
+_COLLECTIONS_URL = "https://member.bilibili.com/x2/creative/web/seasons"
+_CREATE_COLLECTION_URL = "https://member.bilibili.com/x2/creative/web/season/add"
+_ADD_EPISODES_URL = (
+    "https://member.bilibili.com/x2/creative/web/season/section/episodes/add"
+)
+_COVER_UP_URL = "https://member.bilibili.com/x/vu/web/cover/up"
+_PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
+
+_AUTH_ERROR_CODES = (401, 403)
+_DEFAULT_TIMEOUT = 15.0
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 
 
 # ── Data model ──────────────────────────────────────────────────────────
@@ -148,3 +172,214 @@ def make_placeholder_cover(title: str) -> str:
     )
     img.save(out, "JPEG", quality=90)
     return str(out)
+
+
+# ── HTTP helpers ────────────────────────────────────────────────────────
+
+def _headers() -> dict:
+    return {
+        "User-Agent": _UA,
+        "Referer": "https://member.bilibili.com",
+        "Origin": "https://member.bilibili.com",
+    }
+
+
+def _cookies(credential) -> dict:
+    cookies = {}
+    sessdata = getattr(credential, "sessdata", "") or ""
+    bili_jct = getattr(credential, "bili_jct", "") or ""
+    buvid3 = getattr(credential, "buvid3", "") or ""
+    if sessdata:
+        cookies["SESSDATA"] = sessdata
+    if bili_jct:
+        cookies["bili_jct"] = bili_jct
+    if buvid3:
+        cookies["buvid3"] = buvid3
+    return cookies
+
+
+def _check_response(resp: httpx.Response, label: str) -> dict:
+    """Check a creator-center response; raise on auth/API errors."""
+    if resp.status_code in _AUTH_ERROR_CODES:
+        raise RuntimeError(
+            f"B站登录凭据已过期（HTTP {resp.status_code}），请重新扫码登录。\n"
+            f"运行: python main.py --login"
+        )
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise RuntimeError(f"{label} 返回非 JSON 响应: {e}")
+    code = data.get("code", -1)
+    if code != 0:
+        raise RuntimeError(
+            f"{label}失败: {data.get('message', str(data))} (code={code})"
+        )
+    return data
+
+
+def _client(credential) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        headers=_headers(),
+        cookies=_cookies(credential),
+        timeout=_DEFAULT_TIMEOUT,
+    )
+
+
+async def list_collections(credential) -> list[CollectionInfo]:
+    """Fetch all 合集 (seasons) owned by the credential's account."""
+    collections: list[CollectionInfo] = []
+    pn = 1
+    async with _client(credential) as client:
+        while True:
+            resp = await client.get(
+                _COLLECTIONS_URL,
+                params={"pn": pn, "ps": 50, "order": "mtime", "sort": "desc"},
+            )
+            data = _check_response(resp, "获取合集列表")
+            body = data.get("data") or {}
+            seasons = body.get("seasons") or []
+            for s in seasons:
+                season = s.get("season") or {}
+                sections = ((s.get("sections") or {}).get("sections")) or []
+                collections.append(
+                    CollectionInfo(
+                        season_id=int(season.get("id") or 0),
+                        title=str(season.get("title") or ""),
+                        section_id=int(sections[0].get("id") or 0)
+                        if sections else 0,
+                        total=sum(
+                            int(sec.get("epCount") or 0) for sec in sections
+                        ),
+                    )
+                )
+            total = int(body.get("total") or 0)
+            if not seasons or pn * 50 >= total:
+                break
+            pn += 1
+    return collections
+
+
+def sync_list_collections(credential) -> list[CollectionInfo]:
+    """Synchronous wrapper for ``list_collections`` (CLI use)."""
+    return asyncio.run(list_collections(credential))
+
+
+async def upload_cover(credential, cover_path: str) -> str:
+    """Upload an image via the cover endpoint and return its Bilibili URL."""
+    raw = Path(cover_path).read_bytes()
+    mime = (
+        "image/png"
+        if str(cover_path).lower().endswith(".png")
+        else "image/jpeg"
+    )
+    b64 = base64.b64encode(raw).decode("ascii")
+    body = {
+        "csrf": getattr(credential, "bili_jct", "") or "",
+        "cover": f"data:{mime};base64,{b64}",
+    }
+    async with _client(credential) as client:
+        resp = await client.post(
+            _COVER_UP_URL,
+            params={"ts": int(time.time() * 1000)},
+            data=body,
+        )
+        data = _check_response(resp, "上传合集封面")
+    return str((data.get("data") or {}).get("url") or "")
+
+
+async def create_collection(credential, title: str, cover_url: str) -> int:
+    """Create a new 合集 and return its season_id."""
+    body = {
+        "title": title,
+        "desc": "",
+        "cover": cover_url,
+        "season_price": 0,
+        "csrf": getattr(credential, "bili_jct", "") or "",
+    }
+    async with _client(credential) as client:
+        resp = await client.post(_CREATE_COLLECTION_URL, data=body)
+        data = _check_response(resp, "创建合集")
+    return int(data.get("data") or 0)
+
+
+async def fetch_video_pages(credential, bvid: str) -> list[dict]:
+    """Return ``[{"cid": int, "part": str}]`` for an uploaded video."""
+    async with _client(credential) as client:
+        resp = await client.get(_PAGELIST_URL, params={"bvid": bvid})
+        data = _check_response(resp, "获取分P信息")
+    pages = data.get("data") or []
+    return [
+        {"cid": int(p.get("cid") or 0), "part": str(p.get("part") or "")}
+        for p in pages
+    ]
+
+
+async def add_video_to_collection(
+    credential, section_id: int, episodes: list[dict]
+) -> dict:
+    """Add one or more episodes to a collection's default section."""
+    payload = {
+        "sectionId": section_id,
+        "episodes": episodes,
+        "csrf": getattr(credential, "bili_jct", "") or "",
+    }
+    async with _client(credential) as client:
+        resp = await client.post(
+            _ADD_EPISODES_URL,
+            params={"csrf": getattr(credential, "bili_jct", "") or ""},
+            json=payload,
+        )
+        return _check_response(resp, "加入合集")
+
+
+async def ensure_collection(
+    credential, name: str, cover_path: str | None
+) -> tuple[CollectionInfo, bool]:
+    """
+    Return the collection matching *name*, creating it when missing.
+
+    Returns ``(info, created)``.  New collections use *cover_path* (or a
+    generated placeholder) as their cover.
+    """
+    found = find_collection_by_name(await list_collections(credential), name)
+    if found is not None:
+        return found, False
+
+    cover_path = cover_path or make_placeholder_cover(name)
+    cover_url = await upload_cover(credential, cover_path)
+    season_id = await create_collection(credential, name, cover_url)
+    found = find_collection_by_name(await list_collections(credential), name)
+    if found is None:
+        raise RuntimeError(
+            f"合集「{name}」已创建但重新查询失败（season_id={season_id}）"
+        )
+    return found, True
+
+
+async def add_uploaded_video_to_collection(
+    credential,
+    collection_name: str,
+    cover_path: str | None,
+    bvid: str,
+    aid: int,
+    part_titles: list[str] | None = None,
+) -> dict:
+    """
+    Ensure *collection_name* exists, then add the uploaded video to it.
+
+    Returns a summary dict with season_id/section_id/created/episodes.
+    """
+    info, created = await ensure_collection(
+        credential, collection_name, cover_path
+    )
+    pages = await fetch_video_pages(credential, bvid)
+    if not pages:
+        raise RuntimeError("无法获取视频分P信息（cid），未加入合集")
+    episodes = build_episodes(aid, pages, part_titles)
+    await add_video_to_collection(credential, info.section_id, episodes)
+    return {
+        "season_id": info.season_id,
+        "section_id": info.section_id,
+        "created": created,
+        "episodes": len(episodes),
+    }
