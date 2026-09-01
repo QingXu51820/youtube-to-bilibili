@@ -30,6 +30,9 @@ _COLLECTIONS_URL = "https://member.bilibili.com/x2/creative/web/seasons"
 _CREATE_COLLECTION_URL = "https://member.bilibili.com/x2/creative/web/season/add"
 _SECTION_URL = "https://member.bilibili.com/x2/creative/web/season/section"
 _SECTION_EDIT_URL = "https://member.bilibili.com/x2/creative/web/season/section/edit"
+_SEASON_ARCHIVES_URL = (
+    "https://api.bilibili.com/x/polymer/web-space/seasons_archives_list"
+)
 _ADD_EPISODES_URL = (
     "https://member.bilibili.com/x2/creative/web/season/section/episodes/add"
 )
@@ -43,6 +46,7 @@ _COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（�
 _COLLECTION_ADD_DELAY = 3.0        # 每次补归提交之间的间隔（秒），避免触发 B站 限流
 _COLLECTION_SWEEP_BUDGET = 30      # 单轮最多补归条数，剩余留待下一轮
 _REORDER_DELAY = 3.0               # 每次合集重排提交之间的间隔（秒）
+_REORDER_VIEW_DELAY = 0.2          # 反查 B站 视频信息的最小间隔（秒）
 _RATE_LIMIT_CODES = (20111, 20113)  # 合集编辑过于频繁 / 手速太快啦～
 _RATE_LIMIT_COOLDOWN = 300         # 限流条目重试冷却（秒）
 _UA = (
@@ -70,6 +74,7 @@ class CollectionInfo:
     section_id: int = 0    # 合集默认小节（"正片"）ID，加视频时使用
     total: int = 0         # 合集内视频数
     section_mtime: int = 0  # 默认小节修改时间（用于跳过未变化的合集）
+    mid: int = 0           # 合集所有者账号 mid（公开接口反查发布时间用）
 
 
 @dataclass
@@ -275,6 +280,7 @@ async def list_collections(credential) -> list[CollectionInfo]:
                         ),
                         section_mtime=int(sections[0].get("mtime") or 0)
                         if sections else 0,
+                        mid=int(season.get("mid") or 0),
                     )
                 )
             total = int(body.get("total") or 0)
@@ -717,6 +723,11 @@ def _reorder_cache_path(queue_path: Path) -> Path:
     return queue_path.parent / "bvid_dates.json"
 
 
+def _bili_cache_path(queue_path: Path) -> Path:
+    """Cache of bvid → B站 upload date (used only as fallback)."""
+    return queue_path.parent / "bili_dates.json"
+
+
 def _reorder_markers_path(queue_path: Path) -> Path:
     """Per-season mtime markers so full reorder passes skip unchanged 合集."""
     return queue_path.parent / "collections_reorder.json"
@@ -777,6 +788,15 @@ def _collect_published_dates(
                 add(key, value)
                 if str(key).startswith("BV"):
                     yt_bvids.add(str(key))
+    bili_cache = _bili_cache_path(queue_path)
+    if bili_cache.exists():
+        try:
+            cached = json.loads(bili_cache.read_text(encoding="utf-8-sig"))
+        except (json.JSONDecodeError, OSError):
+            cached = {}
+        if isinstance(cached, dict):
+            for key, value in cached.items():
+                add(key, value)
     return dates, yt_bvids, bvid_to_video_id
 
 
@@ -856,75 +876,73 @@ async def _fill_youtube_api_pubdates(
     return filled
 
 
-async def _fill_bili_pubdates(
+async def _fetch_archive_dates(
     client,
-    episodes: list[dict],
-    dates: dict,
-) -> tuple[set, dict]:
+    mid: int,
+    season_id: int,
+) -> dict:
     """
-    Fetch B站 pubdate for episodes whose bvid/aid has no known date yet.
+    Fetch the collection's public archive list (paginated) and return
+    ``bvid → YYYY-MM-DD`` for every episode.
 
-    Results are written into *dates* (bvid and aid keys).  Paced to avoid
-    hammering the public view API.  Returns ``(bili_only, desc_video_ids)``:
-    the bvids that only got a B站 date, and a bvid → YouTube video-id map
-    recovered from each description.
+    Uses the public space endpoint (with referer), which returns ``pubdate``
+    per archive — a handful of requests per collection instead of one view
+    API call per video.
     """
-    missing: list[tuple[str, str]] = []
-    for ep in episodes:
-        bvid = str(ep.get("bvid", "") or "")
-        aid = str(ep.get("aid", 0) or 0)
-        if not bvid:
-            continue
-        if dates.get(bvid) or dates.get(aid):
-            continue
-        missing.append((bvid, aid))
-
-    bili_only: set[str] = set()
-    desc_video_ids: dict[str, str] = {}
-    semaphore = asyncio.Semaphore(6)
-
-    async def _fetch_one(bvid: str, aid: str) -> None:
-        async with semaphore:
-            pub = None
-            desc = ""
-            try:
-                resp = await client.get(
-                    _VIDEO_VIEW_URL, params={"bvid": bvid}
-                )
-                payload = resp.json() if resp.status_code == 200 else {}
-                if payload.get("code") == 0:
-                    body = payload.get("data") or {}
-                    pub = body.get("pubdate")
-                    desc = str(body.get("desc") or "")
-            except Exception:
-                pub = None
-            date = _normalize_publish_date(pub)
-            if date:
-                dates[bvid] = date
-                if aid:
-                    dates[aid] = date
-                bili_only.add(bvid)
-            video_id = _extract_youtube_url(desc)
-            if video_id:
-                desc_video_ids[bvid] = video_id
-
-    if missing:
-        await asyncio.gather(*(_fetch_one(b, a) for b, a in missing))
-    return bili_only, desc_video_ids
+    out: dict[str, str] = {}
+    page = 1
+    headers = {
+        "Referer": (
+            f"https://space.bilibili.com/{mid}/channel/collectiondetail"
+            f"?sid={season_id}"
+        ),
+    }
+    while page <= 100:
+        try:
+            resp = await client.get(
+                _SEASON_ARCHIVES_URL,
+                params={
+                    "mid": mid,
+                    "season_id": season_id,
+                    "page_size": 30,
+                    "page_num": page,
+                },
+                headers=headers,
+            )
+            payload = resp.json() if resp.status_code == 200 else {}
+            if payload.get("code") != 0:
+                break
+            archives = (payload.get("data") or {}).get("archives") or []
+        except Exception:
+            break
+        if not archives:
+            break
+        for arc in archives:
+            bvid = str(arc.get("bvid", "") or "")
+            date = _normalize_publish_date(arc.get("pubdate"))
+            if bvid and date:
+                out[bvid] = date
+        if len(archives) < 30:
+            break
+        page += 1
+        await asyncio.sleep(_REORDER_VIEW_DELAY)
+    return out
 
 
 async def _fill_missing_dates(
     client,
+    mid: int,
+    season_id: int,
     episodes: list[dict],
     dates: dict,
     yt_bvids: set,
     bvid_to_video_id: dict,
     youtube=None,
-) -> tuple[set, dict]:
+) -> set:
     """
-    Fill dates for every episode: YouTube Data API first (local + desc
-    mappings), then B站 upload date as fallback.  Returns the bvids that
-    only have a B站 date, plus the desc-recovered video-id map.
+    Fill dates for every episode: YouTube Data API for locally-mapped video
+    ids first, then B站 upload date from the collection's public archive list.
+    Returns the set of bvids that only have a B站 date.
     """
     local_map = {
         bvid: video_id for bvid, video_id in bvid_to_video_id.items()
@@ -933,17 +951,22 @@ async def _fill_missing_dates(
     video_id_to_bvid = {video_id: bvid for bvid, video_id in local_map.items()}
     await _fill_youtube_api_pubdates(dates, yt_bvids, video_id_to_bvid, youtube)
 
-    bili_only, desc_video_ids = await _fill_bili_pubdates(
-        client, episodes, dates
-    )
-    desc_map = {
-        bvid: video_id for bvid, video_id in desc_video_ids.items()
-        if not (dates.get(bvid) or "")
-    }
-    video_id_to_bvid = {video_id: bvid for bvid, video_id in desc_map.items()}
-    await _fill_youtube_api_pubdates(dates, yt_bvids, video_id_to_bvid, youtube)
-    return bili_only, desc_video_ids
-
+    bili_only: set[str] = set()
+    archive_dates = await _fetch_archive_dates(client, mid, season_id)
+    for ep in episodes:
+        bvid = str(ep.get("bvid", "") or "")
+        aid = str(ep.get("aid", 0) or 0)
+        if not bvid:
+            continue
+        if dates.get(bvid) or dates.get(aid):
+            continue
+        date = archive_dates.get(bvid, "")
+        if date:
+            dates[bvid] = date
+            if aid:
+                dates[aid] = date
+            bili_only.add(bvid)
+    return bili_only
 
 async def reorder_collection_section(
     credential,
@@ -1027,6 +1050,31 @@ def _save_bvid_date_cache(queue_path: Path, dates: dict, yt_bvids: set) -> None:
     tmp.replace(path)
 
 
+def _save_bili_date_cache(queue_path: Path, dates: dict, bili_only: set) -> None:
+    """Persist bvid → B站 fallback dates so later reorders skip refetches."""
+    bili_dates = {
+        key: value for key, value in dates.items()
+        if str(key).startswith("BV") and str(key) in bili_only and value
+    }
+    if not bili_dates:
+        return
+    path = _bili_cache_path(queue_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update(bili_dates)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
 async def _reorder_touched_collections(
     credential,
     touched: dict,
@@ -1041,7 +1089,10 @@ async def _reorder_touched_collections(
     dates, yt_bvids, bvid_to_video_id = _collect_published_dates(
         state_path, queue_path
     )
+    bili_only_all: set[str] = set()
     async with _client(credential) as client:
+        collections = await list_collections(credential)
+        mid_by_season = {c.season_id: c.mid for c in collections}
         for season_id, (section_id, name) in touched.items():
             try:
                 section, episodes = await fetch_collection_section(
@@ -1050,10 +1101,12 @@ async def _reorder_touched_collections(
                 if not section.get("id"):
                     print(f"[合集] ⚠️ 合集「{name}」小节信息缺失，跳过重排")
                     continue
-                await _fill_missing_dates(
-                    client, episodes, dates, yt_bvids, bvid_to_video_id,
+                bili_only = await _fill_missing_dates(
+                    client, mid_by_season.get(season_id, 0), season_id,
+                    episodes, dates, yt_bvids, bvid_to_video_id,
                     youtube=youtube,
                 )
+                bili_only_all |= bili_only
                 result = await reorder_collection_section(
                     credential, section, episodes, dates,
                     reverse=reverse, client=client,
@@ -1078,6 +1131,7 @@ async def _reorder_touched_collections(
             else:
                 print(f"[合集] ✓ 「{name}」顺序已正确")
     _save_bvid_date_cache(queue_path, dates, yt_bvids)
+    _save_bili_date_cache(queue_path, dates, bili_only_all)
 
 
 def reorder_collections(
@@ -1114,8 +1168,9 @@ def reorder_collections(
                 markers = {}
         collections = sync_list_collections(credential)
 
-        async def run() -> tuple[int, int]:
+        async def run() -> tuple[int, int, set]:
             reordered = already = 0
+            bili_only_all: set[str] = set()
             async with _client(credential) as client:
                 for c in collections:
                     if not c.section_id:
@@ -1140,26 +1195,17 @@ def reorder_collections(
                                 "mtime": section_mtime, "complete": True,
                             }
                             continue
-                        _, desc_ids = await _fill_missing_dates(
-                            client, episodes, dates, yt_bvids,
-                            bvid_to_video_id, youtube=youtube,
+                        bili_only = await _fill_missing_dates(
+                            client, c.mid, c.season_id, episodes, dates,
+                            yt_bvids, bvid_to_video_id, youtube=youtube,
                         )
+                        bili_only_all |= bili_only
                         missing_after = [
                             e for e in episodes
                             if not (
                                 dates.get(str(e.get("bvid", "") or ""))
                                 or dates.get(str(e.get("aid", 0) or 0))
                             )
-                        ]
-                        fillable_remaining = [
-                            e for e in episodes
-                            if (
-                                str(e.get("bvid", "") or "")
-                                in bvid_to_video_id
-                                or str(e.get("bvid", "") or "")
-                                in desc_ids
-                            )
-                            and str(e.get("bvid", "") or "") not in yt_bvids
                         ]
                         result = await reorder_collection_section(
                             credential, section, episodes, dates,
@@ -1185,9 +1231,7 @@ def reorder_collections(
                         continue
                     markers[str(c.season_id)] = {
                         "mtime": section_mtime,
-                        "complete": (
-                            not missing_after and not fillable_remaining
-                        ),
+                        "complete": not missing_after,
                     }
                     if result.get("changed"):
                         reordered += 1
@@ -1199,11 +1243,12 @@ def reorder_collections(
                     else:
                         already += 1
                         print(f"[合集] ✓ 「{c.title}」顺序已正确")
-            return reordered, already
+            return reordered, already, bili_only_all
 
-        reordered, already = asyncio.run(run())
+        reordered, already, bili_only_all = asyncio.run(run())
         _save_reorder_markers(queue_path, markers)
         _save_bvid_date_cache(queue_path, dates, yt_bvids)
+        _save_bili_date_cache(queue_path, dates, bili_only_all)
         return reordered, already
     finally:
         _release_sweep_lock(queue_path)

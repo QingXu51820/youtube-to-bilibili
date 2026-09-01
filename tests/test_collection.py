@@ -1123,40 +1123,31 @@ class ReorderDateCollectionTests(unittest.TestCase):
         )
         self.assertEqual(filled, 0)
 
-    def test_fill_bili_pubdates_fills_and_recovers_desc_ids(self):
-        payload = {"code": 0, "data": {
-            "desc": "原视频: https://www.youtube.com/watch?v=yt999YYY999",
-            "pubdate": 1788237652,
-        }}
-        client = FakeAsyncClient(
-            lambda method, url, kwargs: FakeResponse(payload)
-        )
-        episodes = [
-            {"id": 1, "bvid": "BV2", "aid": 2},
-        ]
-        dates = {}
-        bili_only, desc_ids = asyncio.run(
-            collection_mod._fill_bili_pubdates(
-                client, episodes, dates
-            )
-        )
-        self.assertEqual(bili_only, {"BV2"})
-        self.assertEqual(dates["BV2"], "2026-09-01")
-        self.assertEqual(desc_ids, {"BV2": "yt999YYY999"})
+    def test_fetch_archive_dates_paginates(self):
+        def handler(method, url, kwargs):
+            page = kwargs["params"]["page_num"]
+            if page == 1:
+                return FakeResponse({"code": 0, "data": {"archives": [
+                    {"bvid": f"BV{i}", "pubdate": 1788237652}
+                    for i in range(30)
+                ]}})
+            if page == 2:
+                return FakeResponse({"code": 0, "data": {"archives": [
+                    {"bvid": "BV99", "pubdate": 1752462339},
+                ]}})
+            return FakeResponse({"code": 0, "data": {"archives": []}})
 
-    def test_fill_bili_pubdates_skips_known_dates(self):
-        client = FakeAsyncClient(
-            lambda method, url, kwargs: FakeResponse({"code": 0, "data": {}})
+        client = FakeAsyncClient(handler)
+        result = asyncio.run(
+            collection_mod._fetch_archive_dates(client, 13357698, 4613228)
         )
-        episodes = [{"id": 1, "bvid": "BV1", "aid": 1}]
-        bili_only, desc_ids = asyncio.run(
-            collection_mod._fill_bili_pubdates(
-                client, episodes, {"BV1": "2026-08-01", "1": "2026-08-01"}
-            )
+        self.assertEqual(len(result), 31)
+        self.assertEqual(result["BV99"], "2025-07-14")
+        self.assertEqual(result["BV0"], "2026-09-01")
+        self.assertIn(
+            "seasons_archives_list", client.calls[0][1]
         )
-        self.assertEqual(bili_only, set())
-        self.assertEqual(desc_ids, {})
-        self.assertEqual(client.calls, [])
+        self.assertIn("Referer", client.calls[0][2]["headers"])
 
     def test_backfill_copies_published_at(self):
         self._write_state({
@@ -1218,6 +1209,8 @@ class ReorderCollectionsFullPassTests(unittest.TestCase):
                               side_effect=fake_list), \
                  patch.object(collection_mod, "fetch_collection_section",
                               side_effect=fake_section), \
+                 patch.object(collection_mod, "_fetch_archive_dates",
+                              AsyncMock(return_value={})), \
                  patch.object(collection_mod, "reorder_collection_section",
                               side_effect=fake_reorder):
                 reordered, already = collection_mod.reorder_collections(
