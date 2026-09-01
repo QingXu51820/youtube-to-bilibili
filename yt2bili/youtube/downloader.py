@@ -587,6 +587,16 @@ def _extract_metadata(url: str) -> dict:
         raise RuntimeError(f"获取视频信息失败:\n{e}") from e
 
 
+def fetch_channel_identity(url: str) -> tuple[str, str]:
+    """Return ``(channel_title, channel_id)`` for a YouTube URL (metadata only)."""
+    info = _extract_metadata(url)
+    title = (info.get("channel") or info.get("uploader") or "").strip()
+    channel_id = (info.get("channel_id") or info.get("uploader_id") or "").strip()
+    if not title:
+        raise RuntimeError(f"YouTube 元数据未返回频道名: {url}")
+    return title, channel_id
+
+
 def _reject_non_video_content(info: dict) -> None:
     """Reject live/upcoming stream entries before download starts."""
     live_status = (info.get("live_status") or "").strip()

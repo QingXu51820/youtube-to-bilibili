@@ -266,5 +266,29 @@ class DownloadVideoTests(unittest.TestCase):
         self.assertIn("找不到视频文件", str(ctx.exception))
 
 
+class FetchChannelIdentityTests(unittest.TestCase):
+    def test_returns_channel_and_id(self):
+        with patch("yt2bili.youtube.downloader._extract_metadata",
+                   return_value={"channel": "Chan", "channel_id": "UC1"}):
+            self.assertEqual(
+                downloader.fetch_channel_identity("https://youtu.be/x"),
+                ("Chan", "UC1"),
+            )
+
+    def test_falls_back_to_uploader_fields(self):
+        with patch("yt2bili.youtube.downloader._extract_metadata",
+                   return_value={"uploader": "Chan2", "uploader_id": "UC2"}):
+            self.assertEqual(
+                downloader.fetch_channel_identity("https://youtu.be/x"),
+                ("Chan2", "UC2"),
+            )
+
+    def test_raises_when_channel_missing(self):
+        with patch("yt2bili.youtube.downloader._extract_metadata",
+                   return_value={"title": "x"}):
+            with self.assertRaises(RuntimeError):
+                downloader.fetch_channel_identity("https://youtu.be/x")
+
+
 if __name__ == "__main__":
     unittest.main()

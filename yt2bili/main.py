@@ -724,11 +724,16 @@ def _run_fix_collections_command() -> int:
 
     credential = auth.get_credential(profile_name=prof.name)
     from yt2bili.bilibili.collection import process_pending_collections
+    from yt2bili.youtube.downloader import fetch_channel_identity
+
+    def resolve_channel(video_id: str):
+        return fetch_channel_identity(f"https://www.youtube.com/watch?v={video_id}")
+
     state_path = None
     if profile_mod.is_profile_state_active():
         state_path = profile_mod.get_state_file_path(prof)
     added, pending, failed = process_pending_collections(
-        credential, state_path=state_path
+        credential, state_path=state_path, resolve_channel=resolve_channel
     )
     print(f"\n[合集] 补归完成: 成功 {added}，待补 {pending}，失败 {failed}")
     return 0

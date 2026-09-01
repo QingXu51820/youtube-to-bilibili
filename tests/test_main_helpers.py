@@ -291,6 +291,7 @@ class FixCollectionsCommandTests(unittest.TestCase):
         self.assertEqual(code, 0)
         sweep.assert_called_once()
         self.assertEqual(sweep.call_args.kwargs["state_path"], state)
+        self.assertTrue(callable(sweep.call_args.kwargs["resolve_channel"]))
 
     def test_run_fix_collections_requires_login(self):
         prof = Profile(

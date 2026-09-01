@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
 import tempfile
 import time
@@ -363,6 +364,42 @@ def _entry_cooldown(
     return retry_interval_seconds
 
 
+def _sweep_lock_path(queue_path: Path) -> Path:
+    return queue_path.with_suffix(queue_path.suffix + ".lock")
+
+
+def _acquire_sweep_lock(queue_path: Path, stale_seconds: int = 1800) -> bool:
+    """Exclusive lock so concurrent sweeps (monitor + manual loop) don't collide."""
+    path = _sweep_lock_path(queue_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            age = 0.0
+        if age < stale_seconds:
+            return False
+        try:
+            path.unlink()
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            return False
+    try:
+        os.write(fd, f"{os.getpid()} {_now_iso()}\n".encode("utf-8"))
+    finally:
+        os.close(fd)
+    return True
+
+
+def _release_sweep_lock(queue_path: Path) -> None:
+    try:
+        _sweep_lock_path(queue_path).unlink()
+    except OSError:
+        pass
+
+
 def pending_collections_path() -> Path:
     """
     Path of the pending-collection queue for the active profile.
@@ -499,6 +536,54 @@ def backfill_collections(
             "（不在当前账号频道列表或缺少频道信息）"
         )
     return added
+
+
+def enrich_missing_channels(state_path: Path, resolve_channel) -> int:
+    """
+    Fill empty ``channel_title`` for uploaded state entries via YouTube metadata.
+
+    *resolve_channel* takes a YouTube video id and returns
+    ``(channel_title, channel_id)``.  Results are persisted back into the
+    state file so later sweeps never re-fetch the same video.
+    """
+    if not state_path.exists():
+        return 0
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[合集] ⚠️ 读取历史记录失败（{e}），跳过频道反查: {state_path}")
+        return 0
+    videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
+
+    enriched = 0
+    for video_id, v in videos.items():
+        if not video_id:
+            continue
+        if str(v.get("status", "")) != "uploaded":
+            continue
+        if (v.get("channel_title") or "").strip():
+            continue
+        if not str(v.get("url", "") or ""):
+            continue
+        try:
+            title, channel_id = resolve_channel(video_id)
+        except Exception as e:
+            print(f"[合集] ⚠️ 反查频道失败 {video_id}: {e}")
+            continue
+        v["channel_title"] = str(title or "").strip()
+        if channel_id:
+            v["channel_id"] = str(channel_id)
+        enriched += 1
+        print(f"[合集] 反查频道: {video_id} → {v['channel_title']}")
+
+    if enriched:
+        tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(state_path)
+    return enriched
 
 
 async def add_video_to_collection(
@@ -690,24 +775,36 @@ def process_pending_collections(
     retry_interval_seconds: int = _COLLECTION_RETRY_INTERVAL,
     rate_limit_cooldown_seconds: int = _RATE_LIMIT_COOLDOWN,
     state_path: Path | None = None,
+    resolve_channel=None,
 ) -> tuple[int, int, int]:
     """
-    Backfill history, then attempt to add every queued video to its 合集.
+    Enrich missing channels (optional), backfill history, then attempt to add
+    every queued video to its 合集.
 
     Returns ``(added, pending, failed)`` counts after one sweep.
     """
     queue_path = pending_collections_path()
-    if backfill:
-        resolved_state = state_path or (queue_path.parent / "processed_videos.json")
-        n = backfill_collections(queue_path, resolved_state)
-        if n:
-            print(f"[合集] 历史回填: {n} 条")
-    entries = load_pending_collections(queue_path)
-    if not entries:
+    if not _acquire_sweep_lock(queue_path):
+        print("[合集] ⏸️ 另一进程正在执行补归，跳过本轮")
         return 0, 0, 0
-    return asyncio.run(
-        _sweep_pending_collections(
-            credential, queue_path, entries, retry_interval_seconds,
-            rate_limit_cooldown_seconds,
+    try:
+        resolved_state = state_path or (queue_path.parent / "processed_videos.json")
+        if backfill:
+            if resolve_channel is not None:
+                n = enrich_missing_channels(resolved_state, resolve_channel)
+                if n:
+                    print(f"[合集] 频道反查: 补全 {n} 条")
+            n = backfill_collections(queue_path, resolved_state)
+            if n:
+                print(f"[合集] 历史回填: {n} 条")
+        entries = load_pending_collections(queue_path)
+        if not entries:
+            return 0, 0, 0
+        return asyncio.run(
+            _sweep_pending_collections(
+                credential, queue_path, entries, retry_interval_seconds,
+                rate_limit_cooldown_seconds,
+            )
         )
-    )
+    finally:
+        _release_sweep_lock(queue_path)

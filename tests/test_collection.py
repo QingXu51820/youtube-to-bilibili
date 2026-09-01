@@ -339,6 +339,90 @@ class BackfillCollectionTests(unittest.TestCase):
         self.assertEqual(n, 0)
 
 
+class EnrichMissingChannelsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name) / "processed_videos.json"
+
+    def _write(self, videos):
+        self.state.write_text(
+            json.dumps({"videos": videos}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_enriches_empty_channel_and_saves(self):
+        self._write({
+            "v1": {"status": "uploaded", "bvid": "BV1",
+                   "url": "https://youtu.be/v1", "channel_title": ""},
+            "v2": {"status": "uploaded", "bvid": "BV2",
+                   "url": "https://youtu.be/v2", "channel_title": "Known"},
+            "v3": {"status": "failed", "bvid": "BV3",
+                   "url": "https://youtu.be/v3", "channel_title": ""},
+        })
+        n = collection_mod.enrich_missing_channels(
+            self.state, resolve_channel=lambda vid: ("Chan", "UC1")
+        )
+        self.assertEqual(n, 1)
+        state2 = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(state2["videos"]["v1"]["channel_title"], "Chan")
+        self.assertEqual(state2["videos"]["v1"]["channel_id"], "UC1")
+        self.assertEqual(state2["videos"]["v2"]["channel_title"], "Known")
+        self.assertEqual(state2["videos"]["v3"]["channel_title"], "")
+
+    def test_resolver_error_skips_entry(self):
+        self._write({
+            "v1": {"status": "uploaded", "bvid": "BV1",
+                   "url": "https://youtu.be/v1", "channel_title": ""},
+        })
+        n = collection_mod.enrich_missing_channels(
+            self.state, resolve_channel=lambda vid: (_ for _ in ()).throw(
+                RuntimeError("bot check")
+            )
+        )
+        self.assertEqual(n, 0)
+        state2 = json.loads(self.state.read_text(encoding="utf-8"))
+        self.assertEqual(state2["videos"]["v1"]["channel_title"], "")
+
+    def test_missing_state_returns_zero(self):
+        n = collection_mod.enrich_missing_channels(
+            Path(self._tmp.name) / "nope.json",
+            resolve_channel=lambda vid: ("Chan", "UC1"),
+        )
+        self.assertEqual(n, 0)
+
+
+class SweepLockTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.queue = Path(self._tmp.name) / "pending_collections.json"
+
+    def test_lock_excludes_concurrent(self):
+        self.assertTrue(collection_mod._acquire_sweep_lock(self.queue))
+        self.assertFalse(collection_mod._acquire_sweep_lock(self.queue))
+        collection_mod._release_sweep_lock(self.queue)
+        self.assertTrue(collection_mod._acquire_sweep_lock(self.queue))
+        collection_mod._release_sweep_lock(self.queue)
+
+    def test_process_skips_when_locked(self):
+        self.queue.write_text(json.dumps([{
+            "video_id": "v1", "bvid": "BV1", "aid": 1,
+            "collection_name": "Bynx", "status": "pending",
+        }]), encoding="utf-8")
+        self.assertTrue(collection_mod._acquire_sweep_lock(self.queue))
+        try:
+            with patch.object(collection_mod, "pending_collections_path",
+                              return_value=self.queue):
+                result = collection_mod.process_pending_collections(
+                    SimpleNamespace(sessdata="s", bili_jct="j"),
+                    retry_interval_seconds=0,
+                )
+            self.assertEqual(result, (0, 0, 0))
+        finally:
+            collection_mod._release_sweep_lock(self.queue)
+
+
 class ListCollectionsTests(unittest.TestCase):
     def _payload(self, season_id, title, section_id, ep_count, total):
         return {
@@ -566,6 +650,29 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
             )
         self.assertEqual((added, pending, failed), (1, 1, 0))
         self.assertEqual(add.await_count, 1)  # 只重试了限流那条，普通条仍受 1h 节流
+
+    def test_process_runs_enrichment_before_backfill(self):
+        """resolve_channel 传入时，先补全空频道再回填。"""
+        self.queue.write_text(json.dumps([self._entry()]), encoding="utf-8")
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "enrich_missing_channels",
+                          return_value=2) as enrich, \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "fetch_video_pages",
+                          AsyncMock(return_value=[{"cid": 1, "part": "P1"}])), \
+             patch.object(collection_mod, "add_uploaded_video_to_collection",
+                          AsyncMock(return_value={"season_id": 7, "episodes": 1})):
+            collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0,
+                resolve_channel=lambda vid: ("Chan", "UC1"),
+            )
+        enrich.assert_called_once()
+        self.assertEqual(
+            enrich.call_args.args[0],
+            self.queue.parent / "processed_videos.json",
+        )
 
     def test_network_error_keeps_pending(self):
         self.queue.write_text(json.dumps([self._entry()]), encoding="utf-8")
