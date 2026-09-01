@@ -314,6 +314,8 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 
 def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
     """Import successful historical uploads so cleaned files are not reprocessed."""
+    from yt2bili import profile as profile_mod
+    active = profile_mod.get_active_profile_name()
     if not runs_dir.exists():
         return 0
 
@@ -323,6 +325,14 @@ def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
         except Exception:
+            continue
+
+        report_profile = report.get("profile") or ""
+        if report_profile:
+            if report_profile != active:
+                continue
+        elif active != "default":
+            # 旧报告没有 profile 字段且当前不是 legacy default：无法确认归属，跳过。
             continue
 
         for row in report.get("results", []):
@@ -338,7 +348,8 @@ def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
                 "video_id": video_id,
                 "url": row.get("url", ""),
                 "title": row.get("original_title", ""),
-                "channel_title": existing.get("channel_title", ""),
+                "channel_title": row.get("channel_title", "")
+                or existing.get("channel_title", ""),
                 "published_at": existing.get("published_at", ""),
                 "status": STATUS_UPLOADED,
                 "stage": "complete",
@@ -362,6 +373,31 @@ def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
 def _upload_log_path() -> Path:
     """Return path to the persistent upload log (global, not per-profile)."""
     return project_path("state") / "upload_log.json"
+
+
+def _profile_channels(profile_name: str) -> set[str]:
+    """Lowercased channel titles configured for a profile (empty in legacy .env)."""
+    from yt2bili import profile as profile_mod
+    prof = profile_mod.resolve_profile(profile_name)
+    if prof is None:
+        return set()
+    return {
+        (c.channel_title or "").strip().lower()
+        for c in prof.youtube.channels
+        if (c.channel_title or "").strip()
+    }
+
+
+def _upload_log_entry_matches(entry: dict, active: str, channels: set[str]) -> bool:
+    """True when an upload-log entry belongs to the active profile."""
+    profile = entry.get("profile") or ""
+    if profile:
+        return profile == active
+    # 旧条目没有 profile 字段：legacy .env 数据归 default；否则按频道归属判断。
+    if active == "default":
+        return True
+    channel = (entry.get("channel_title") or "").strip().lower()
+    return bool(channel and channel in channels)
 
 
 def _load_upload_log() -> list[dict[str, Any]]:
@@ -389,6 +425,7 @@ def _save_upload_log(log_entries: list[dict[str, Any]]) -> None:
 
 def append_upload_log_entry(video: VideoItem, result: Any) -> None:
     """Record a successful upload to the persistent upload log."""
+    from yt2bili import profile as profile_mod
     log_entries = _load_upload_log()
     video_id = video.video_id
     existing_idx = None
@@ -405,6 +442,7 @@ def append_upload_log_entry(video: VideoItem, result: Any) -> None:
         "bvid": getattr(result, "bvid", ""),
         "aid": getattr(result, "aid", 0),
         "translated_title": getattr(result, "translated_title", ""),
+        "profile": profile_mod.get_active_profile_name(),
         "uploaded_at": utc_now(),
     }
 
@@ -418,6 +456,9 @@ def append_upload_log_entry(video: VideoItem, result: Any) -> None:
 
 def seed_state_from_upload_log(state: dict[str, Any]) -> int:
     """Import successful uploads from the persistent upload log as dedup fallback."""
+    from yt2bili import profile as profile_mod
+    active = profile_mod.get_active_profile_name()
+    channels = _profile_channels(active)
     log_entries = _load_upload_log()
     if not log_entries:
         return 0
@@ -427,6 +468,8 @@ def seed_state_from_upload_log(state: dict[str, Any]) -> int:
     for entry in log_entries:
         video_id = entry.get("video_id", "")
         if not video_id:
+            continue
+        if not _upload_log_entry_matches(entry, active, channels):
             continue
         existing = videos.get(video_id, {})
         if existing.get("status") == STATUS_UPLOADED:

@@ -56,6 +56,13 @@ class WriteRunReportTests(unittest.TestCase):
         self.assertEqual(data["failed"], 1)
         self.assertEqual(data["results"][0]["bvid"], "BV1")
 
+    def test_report_includes_active_profile(self):
+        with patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"):
+            _write_run_report([make_result()])
+        data = json.loads((self.runs / "latest.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["profile"], "snap")
+
     def test_filename_has_millisecond_precision(self):
         """回归：同一秒两次批处理不得互相覆盖。"""
         r1 = _write_run_report([make_result()])
@@ -255,6 +262,7 @@ class ProcessVideoCollectionWiringTests(unittest.TestCase):
         self.assertEqual(up.call_args.kwargs["collection"], "Bynx")
         self.assertEqual(up.call_args.kwargs["video_id"], "abc")
         self.assertEqual(up.call_args.kwargs["channel_title"], "Bynx_Plays")
+        self.assertEqual(result.channel_title, "Bynx_Plays")
 
 
 class FixCollectionsCommandTests(unittest.TestCase):

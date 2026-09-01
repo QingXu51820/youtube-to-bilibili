@@ -2,6 +2,8 @@
 
 import asyncio
 import base64
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -310,6 +312,24 @@ class BackfillCollectionTests(unittest.TestCase):
         )
         self.assertEqual(n, 0)
         self.assertFalse(self.queue.exists())
+
+    def test_unresolved_channel_prints_aggregate_warning(self):
+        """回归：跳过无法归属的记录时只输出聚合统计，不逐条刷屏。"""
+        self._write_state({
+            "v1": {"status": "uploaded", "bvid": "BV1",
+                   "channel_title": "Ghost1", "title": "T1"},
+            "v2": {"status": "uploaded", "bvid": "BV2",
+                   "channel_title": "Ghost2", "title": "T2"},
+        })
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            n = collection_mod.backfill_collections(
+                self.queue, self.state,
+                resolve_collection_name=lambda title: "",
+            )
+        self.assertEqual(n, 0)
+        self.assertIn("跳过 2 条无法确定归属频道", buf.getvalue())
+        self.assertNotIn("无法确定频道「Ghost1」", buf.getvalue())
 
     def test_missing_state_returns_zero(self):
         n = collection_mod.backfill_collections(

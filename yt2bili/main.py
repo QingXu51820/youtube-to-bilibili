@@ -140,6 +140,7 @@ class ProcessResult:
     bvid: str = ""
     aid: int = 0
     original_title: str = ""
+    channel_title: str = ""
     translated_title: str = ""
     video_path: str = ""
     thumbnail_path: str = ""
@@ -289,6 +290,7 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
     record.thumbnail_path = video.thumbnail_path
     record.original_title = video.title
     channel_title = video.channel_title or channel_title or ""
+    record.channel_title = channel_title
     collection_name = _resolve_collection_name(channel_title, video.channel_id or "")
     if collection_name:
         print(f"[合集] 频道「{channel_title}」→ 合集「{collection_name}」")
@@ -499,6 +501,7 @@ def _write_run_report(results: list[ProcessResult]) -> Path:
     success_count = sum(1 for r in results if r.success)
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "profile": profile_mod.get_active_profile_name(),
         "total": len(results),
         "success": success_count,
         "failed": len(results) - success_count,

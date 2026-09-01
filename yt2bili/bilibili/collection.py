@@ -443,6 +443,7 @@ def backfill_collections(
     entries = load_pending_collections(queue_path)
     queued_ids = {e.get("video_id", "") for e in entries}
     added = 0
+    skipped_unattributed = 0
     for video_id, v in videos.items():
         if not video_id or video_id in queued_ids:
             continue
@@ -454,7 +455,7 @@ def backfill_collections(
         channel_title = str(v.get("channel_title", "") or "")
         collection_name = (resolve_collection_name(channel_title) or "").strip()
         if not collection_name:
-            print(f"[合集] ⚠️ 无法确定频道「{channel_title}」的合集，跳过回填: {v.get('title', '')}")
+            skipped_unattributed += 1
             continue
         entries.append({
             "video_id": video_id,
@@ -473,6 +474,11 @@ def backfill_collections(
         print(f"[合集] 回填: {v.get('title', '')} → 合集「{collection_name}」 ({bvid})")
     if added:
         save_pending_collections(queue_path, entries)
+    if skipped_unattributed:
+        print(
+            f"[合集] 跳过 {skipped_unattributed} 条无法确定归属频道的历史记录"
+            "（不在当前账号频道列表或缺少频道信息）"
+        )
     return added
 
 

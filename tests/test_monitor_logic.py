@@ -277,6 +277,91 @@ class SeedStateTests(unittest.TestCase):
         self.assertEqual(seeded, 1)
         self.assertEqual(state["videos"]["xyz789"]["bvid"], "BV2")
 
+    def test_seed_from_upload_log_filters_by_profile(self):
+        """回归：snap 账号不得导入 deadlock 的历史上传记录。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "upload_log.json"
+            path.write_text(json.dumps([
+                {"video_id": "snap1", "url": "u", "title": "T",
+                 "channel_title": "Jeff Hoogland", "profile": "snap",
+                 "bvid": "BV1", "aid": 1, "translated_title": "译",
+                 "uploaded_at": "2026-08-01T00:00:00Z"},
+                {"video_id": "dl1", "url": "u", "title": "T",
+                 "channel_title": "Zerggy", "profile": "deadlock",
+                 "bvid": "BV2", "aid": 2, "translated_title": "译",
+                 "uploaded_at": "2026-08-01T00:00:00Z"},
+                {"video_id": "old_snap", "url": "u", "title": "T",
+                 "channel_title": "Jeff Hoogland",
+                 "bvid": "BV3", "aid": 3, "translated_title": "译",
+                 "uploaded_at": "2026-08-01T00:00:00Z"},
+                {"video_id": "old_dl", "url": "u", "title": "T",
+                 "channel_title": "Zerggy",
+                 "bvid": "BV4", "aid": 4, "translated_title": "译",
+                 "uploaded_at": "2026-08-01T00:00:00Z"},
+                {"video_id": "old_unknown", "url": "u", "title": "T",
+                 "channel_title": "",
+                 "bvid": "BV5", "aid": 5, "translated_title": "译",
+                 "uploaded_at": "2026-08-01T00:00:00Z"},
+            ]), encoding="utf-8")
+            prof = SimpleNamespace(youtube=SimpleNamespace(channels=[
+                SimpleNamespace(channel_title="Jeff Hoogland"),
+                SimpleNamespace(channel_title="MarvelSnap"),
+            ]))
+            with patch.object(monitor, "_upload_log_path", return_value=path), \
+                 patch("yt2bili.profile.get_active_profile_name",
+                       return_value="snap"), \
+                 patch("yt2bili.profile.resolve_profile",
+                       return_value=prof):
+                state = {"version": 1, "videos": {}}
+                seeded = monitor.seed_state_from_upload_log(state)
+        self.assertEqual(seeded, 2)
+        self.assertIn("snap1", state["videos"])
+        self.assertIn("old_snap", state["videos"])
+        self.assertNotIn("dl1", state["videos"])
+        self.assertNotIn("old_dl", state["videos"])
+        self.assertNotIn("old_unknown", state["videos"])
+
+    def test_seed_from_runs_filters_by_profile(self):
+        """回归：runs 报告按 profile 字段隔离，旧报告只归 legacy default。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            runs.mkdir()
+            row = {
+                "success": True, "original_title": "T",
+                "translated_title": "译", "bvid": "BV1", "aid": 1,
+            }
+            reports = {
+                "snap.json": {"profile": "snap", "generated_at": "now",
+                              "results": [dict(row, url="https://youtu.be/snap1")]},
+                "deadlock.json": {"profile": "deadlock", "generated_at": "now",
+                                  "results": [dict(row, url="https://youtu.be/dl1")]},
+                "legacy.json": {"generated_at": "now",
+                                "results": [dict(row, url="https://youtu.be/leg1")]},
+            }
+            for name, content in reports.items():
+                (runs / name).write_text(json.dumps(content), encoding="utf-8")
+            with patch("yt2bili.profile.get_active_profile_name",
+                       return_value="snap"):
+                state = {"version": 1, "videos": {}}
+                seeded = monitor.seed_state_from_runs(state, runs)
+        self.assertEqual(seeded, 1)
+        self.assertIn("snap1", state["videos"])
+        self.assertNotIn("dl1", state["videos"])
+        self.assertNotIn("leg1", state["videos"])
+
+    def test_append_upload_log_entry_stores_profile(self):
+        video = SimpleNamespace(video_id="v1", url="u", title="T",
+                                channel_title="C")
+        result = SimpleNamespace(bvid="BV1", aid=1, translated_title="译")
+        entries = []
+        with patch.object(monitor, "_load_upload_log", return_value=entries), \
+             patch.object(monitor, "_save_upload_log",
+                          side_effect=lambda e: entries.extend(e)), \
+             patch("yt2bili.profile.get_active_profile_name",
+                   return_value="snap"):
+            monitor.append_upload_log_entry(video, result)
+        self.assertEqual(entries[0]["profile"], "snap")
+
 
 class RunMonitorCycleTests(unittest.TestCase):
     def setUp(self):
