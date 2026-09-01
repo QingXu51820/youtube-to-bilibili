@@ -421,6 +421,63 @@ def enqueue_collection(
     save_pending_collections(path, entries)
 
 
+def backfill_collections(
+    queue_path: Path,
+    state_path: Path,
+    resolve_collection_name=None,
+) -> int:
+    """
+    Queue every ``uploaded`` video from *state_path* that has a bvid and is
+    not already queued/added.  Returns the number of new queue entries.
+    """
+    from yt2bili import profile as profile_mod
+    if resolve_collection_name is None:
+        resolve_collection_name = profile_mod.resolve_collection_name
+    if not state_path.exists():
+        return 0
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[合集] ⚠️ 读取历史记录失败（{e}），跳过回填: {state_path}")
+        return 0
+    videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
+
+    entries = load_pending_collections(queue_path)
+    queued_ids = {e.get("video_id", "") for e in entries}
+    added = 0
+    for video_id, v in videos.items():
+        if not video_id or video_id in queued_ids:
+            continue
+        if str(v.get("status", "")) != "uploaded":
+            continue
+        bvid = str(v.get("bvid", "") or "")
+        if not bvid:
+            continue
+        channel_title = str(v.get("channel_title", "") or "")
+        collection_name = (resolve_collection_name(channel_title) or "").strip()
+        if not collection_name:
+            print(f"[合集] ⚠️ 无法确定频道「{channel_title}」的合集，跳过回填: {v.get('title', '')}")
+            continue
+        entries.append({
+            "video_id": video_id,
+            "bvid": bvid,
+            "aid": int(v.get("aid", 0) or 0),
+            "collection_name": collection_name,
+            "channel_title": channel_title,
+            "added_at": _now_iso(),
+            "last_attempt_at": "",
+            "attempts": 0,
+            "status": "pending",
+            "last_error": "",
+        })
+        queued_ids.add(video_id)
+        added += 1
+        print(f"[合集] 回填: {v.get('title', '')} → 合集「{collection_name}」 ({bvid})")
+    if added:
+        save_pending_collections(queue_path, entries)
+    return added
+
+
 async def wait_for_video_pages(
     credential,
     bvid: str,

@@ -254,6 +254,72 @@ class PendingCollectionQueueTests(unittest.TestCase):
             )
 
 
+class BackfillCollectionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.queue = Path(self._tmp.name) / "pending_collections.json"
+        self.state = Path(self._tmp.name) / "processed_videos.json"
+
+    def _write_state(self, videos):
+        self.state.write_text(
+            json.dumps({"videos": videos}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_backfills_uploaded_videos_only(self):
+        self._write_state({
+            "v1": {"status": "uploaded", "bvid": "BV1", "aid": 1,
+                   "channel_title": "Bynx_Plays", "title": "T1"},
+            "v2": {"status": "failed", "bvid": "BV2", "aid": 2,
+                   "channel_title": "Bynx_Plays", "title": "T2"},
+        })
+        n = collection_mod.backfill_collections(
+            self.queue, self.state,
+            resolve_collection_name=lambda title: "Bynx",
+        )
+        self.assertEqual(n, 1)
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual([e["video_id"] for e in entries], ["v1"])
+        self.assertEqual(entries[0]["collection_name"], "Bynx")
+        self.assertEqual(entries[0]["status"], "pending")
+
+    def test_skips_queued_and_missing_bvid(self):
+        self._write_state({
+            "v1": {"status": "uploaded", "bvid": "BV1",
+                   "channel_title": "A", "title": "T1"},
+            "v2": {"status": "uploaded", "bvid": "",
+                   "channel_title": "A", "title": "T2"},
+        })
+        self.queue.write_text(json.dumps([
+            {"video_id": "v1", "status": "pending", "bvid": "BV1"},
+        ]), encoding="utf-8")
+        n = collection_mod.backfill_collections(
+            self.queue, self.state,
+            resolve_collection_name=lambda title: "Col",
+        )
+        self.assertEqual(n, 0)
+
+    def test_unresolved_channel_skipped(self):
+        self._write_state({
+            "v1": {"status": "uploaded", "bvid": "BV1",
+                   "channel_title": "Ghost", "title": "T1"},
+        })
+        n = collection_mod.backfill_collections(
+            self.queue, self.state,
+            resolve_collection_name=lambda title: "",
+        )
+        self.assertEqual(n, 0)
+        self.assertFalse(self.queue.exists())
+
+    def test_missing_state_returns_zero(self):
+        n = collection_mod.backfill_collections(
+            self.queue, self.state,
+            resolve_collection_name=lambda title: "Col",
+        )
+        self.assertEqual(n, 0)
+
+
 class ListCollectionsTests(unittest.TestCase):
     def _payload(self, season_id, title, section_id, ep_count, total):
         return {
