@@ -179,6 +179,8 @@ async def _upload_async(
     cover_path: str | None = None,
     credential: Credential | None = None,
     collection: str | None = None,
+    video_id: str = "",
+    channel_title: str = "",
 ) -> UploadResult:
     """
     Async upload a video to Bilibili (single or multi-part).
@@ -331,25 +333,21 @@ async def _upload_async(
 
         if collection and collection.strip():
             try:
-                from yt2bili.bilibili.collection import (
-                    add_uploaded_video_to_collection,
-                )
-                part_titles = [p.title for p in pages]
-                info = await add_uploaded_video_to_collection(
-                    cred,
-                    collection.strip(),
-                    cover,
-                    bvid,
-                    aid,
-                    part_titles,
+                from yt2bili.bilibili.collection import enqueue_collection
+                enqueue_collection(
+                    collection=collection.strip(),
+                    bvid=bvid,
+                    aid=aid,
+                    video_id=video_id,
+                    channel_title=channel_title,
                 )
                 print(
-                    f"[合集] ✅ 已归入合集「{collection.strip()}」"
-                    f" (id={info['season_id']}, {info['episodes']}个分P)"
+                    f"[合集] 已加入待补归队列"
+                    f"（审核通过后自动归入「{collection.strip()}」）"
                 )
             except Exception as e:
-                # 合集归入失败不影响视频上传结果 —— 只打警告，用户可以手动补。
-                print(f"[合集] ⚠️ 归入合集失败（不影响上传）: {e}")
+                # 队列写入失败不影响视频上传结果 —— 只打警告，可稍后手动补。
+                print(f"[合集] ⚠️ 写入待补归队列失败（不影响上传）: {e}")
 
         return UploadResult(
             success=True,
@@ -388,6 +386,8 @@ def upload_video(
     cover_path: str | None = None,
     credential: Credential | None = None,
     collection: str | None = None,
+    video_id: str = "",
+    channel_title: str = "",
 ) -> UploadResult:
     """
     Upload a video to Bilibili (synchronous wrapper).
@@ -450,6 +450,7 @@ def upload_video(
             _upload_async(
                 file_paths, title, desc, tags, tid, original_url, cover, cred,
                 collection,
+                video_id=video_id, channel_title=channel_title,
             )
         )
     except RuntimeError:
@@ -458,6 +459,7 @@ def upload_video(
             _upload_async(
                 file_paths, title, desc, tags, tid, original_url, cover, cred,
                 collection,
+                video_id=video_id, channel_title=channel_title,
             )
         )
 

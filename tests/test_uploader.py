@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from yt2bili import config
 from yt2bili.bilibili import subtitle as bsub
@@ -167,37 +167,35 @@ class CollectionAssignmentTests(unittest.TestCase):
         p.write_bytes(_make_minimal_jpeg())
         return str(p)
 
-    def test_success_calls_collection_add(self):
+    def test_success_enqueues_collection(self):
         cred = SimpleNamespace(sessdata="s", bili_jct="j")
-        add = AsyncMock(return_value={"season_id": 7, "episodes": 1})
+        enq = Mock(return_value=None)
         cover = self._valid_cover()
         with patch("yt2bili.bilibili.uploader.video_uploader",
                    self._fake_video_uploader()), \
-             patch("yt2bili.bilibili.collection.add_uploaded_video_to_collection",
-                   new=add):
+             patch("yt2bili.bilibili.collection.enqueue_collection", new=enq):
             result = asyncio.run(
                 _upload_async(
                     ["a.mp4"], "译题", tid=172, credential=cred,
-                    cover_path=cover, collection="Bynx",
+                    collection="Bynx", video_id="vid1", channel_title="Chan",
+                    cover_path=cover,
                 )
             )
         self.assertTrue(result.success)
-        self.assertEqual(result.bvid, "BV123")
-        add.assert_awaited_once()
-        args = add.await_args.args
-        self.assertEqual(args[0], cred)
-        self.assertEqual(args[1], "Bynx")
-        self.assertEqual(args[3], "BV123")
-        self.assertEqual(args[4], 456)
-        self.assertEqual(args[5], ["译题"])
+        enq.assert_called_once()
+        kwargs = enq.call_args.kwargs
+        self.assertEqual(kwargs["collection"], "Bynx")
+        self.assertEqual(kwargs["bvid"], "BV123")
+        self.assertEqual(kwargs["aid"], 456)
+        self.assertEqual(kwargs["video_id"], "vid1")
+        self.assertEqual(kwargs["channel_title"], "Chan")
 
     def test_collection_failure_keeps_upload_success(self):
         cred = SimpleNamespace(sessdata="s", bili_jct="j")
-        add = AsyncMock(side_effect=RuntimeError("接口被风控"))
+        enq = Mock(side_effect=OSError("磁盘满"))
         with patch("yt2bili.bilibili.uploader.video_uploader",
                    self._fake_video_uploader()), \
-             patch("yt2bili.bilibili.collection.add_uploaded_video_to_collection",
-                   new=add):
+             patch("yt2bili.bilibili.collection.enqueue_collection", new=enq):
             result = asyncio.run(
                 _upload_async(
                     ["a.mp4"], "译题", credential=cred, collection="Bynx",
@@ -208,16 +206,15 @@ class CollectionAssignmentTests(unittest.TestCase):
 
     def test_no_collection_skips_call(self):
         cred = SimpleNamespace(sessdata="s", bili_jct="j")
-        add = AsyncMock()
+        enq = Mock()
         with patch("yt2bili.bilibili.uploader.video_uploader",
                    self._fake_video_uploader()), \
-             patch("yt2bili.bilibili.collection.add_uploaded_video_to_collection",
-                   new=add):
+             patch("yt2bili.bilibili.collection.enqueue_collection", new=enq):
             result = asyncio.run(
                 _upload_async(["a.mp4"], "译题", credential=cred)
             )
         self.assertTrue(result.success)
-        add.assert_not_called()
+        enq.assert_not_called()
 
 
 class BilibiliSubtitleApiTests(unittest.TestCase):
