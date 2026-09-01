@@ -253,6 +253,55 @@ class ProcessVideoCollectionWiringTests(unittest.TestCase):
             result = main_mod.process_video("https://youtu.be/abc")
         self.assertTrue(result.success)
         self.assertEqual(up.call_args.kwargs["collection"], "Bynx")
+        self.assertEqual(up.call_args.kwargs["video_id"], "abc")
+        self.assertEqual(up.call_args.kwargs["channel_title"], "Bynx_Plays")
+
+
+class FixCollectionsCommandTests(unittest.TestCase):
+    def test_run_fix_collections_calls_sweep(self):
+        prof = Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "Bynx_Plays", collection="Bynx"),
+            ]),
+        )
+        state = Path("state/snap/processed_videos.json")
+        with patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=prof), \
+             patch.object(main_mod.profile_mod, "is_profile_state_active",
+                          return_value=True), \
+             patch.object(main_mod.profile_mod, "get_state_file_path",
+                          return_value=state), \
+             patch.object(main_mod.auth, "get_credential",
+                          return_value="cred"), \
+             patch("yt2bili.bilibili.collection.process_pending_collections",
+                   return_value=(2, 1, 0)) as sweep:
+            code = main_mod._run_fix_collections_command()
+        self.assertEqual(code, 0)
+        sweep.assert_called_once()
+        self.assertEqual(sweep.call_args.kwargs["state_path"], state)
+
+    def test_run_fix_collections_requires_login(self):
+        prof = Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="", bili_jct=""),
+        )
+        with patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=prof), \
+             patch("yt2bili.bilibili.collection.process_pending_collections",
+                   return_value=(0, 0, 0)) as sweep:
+            code = main_mod._run_fix_collections_command()
+        self.assertEqual(code, 1)
+        sweep.assert_not_called()
+
+    def test_parser_has_fix_collections_flag(self):
+        args = main_mod._build_parser().parse_args(["--fix-collections"])
+        self.assertTrue(args.fix_collections)
 
 
 if __name__ == "__main__":

@@ -370,6 +370,8 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
             cover_path=cover_path,
             credential=credential,
             collection=collection_name or None,
+            video_id=video.video_id,
+            channel_title=channel_title,
         )
         if not result.success:
             raise RuntimeError(result.message)
@@ -706,6 +708,29 @@ def _run_collections_command(create_missing: bool = False) -> int:
     return 0
 
 
+def _run_fix_collections_command() -> int:
+    """回填历史记录并尝试补归所有待处理合集（单次执行）。"""
+    prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
+    if prof is None:
+        print("没有可用的账号配置。")
+        return 1
+    if not prof.bilibili.sessdata:
+        print(f"账号 '{prof.name}' 未登录，无法补归合集。")
+        print(f"运行: python main.py --login --profile {prof.name}")
+        return 1
+
+    credential = auth.get_credential(profile_name=prof.name)
+    from yt2bili.bilibili.collection import process_pending_collections
+    state_path = None
+    if profile_mod.is_profile_state_active():
+        state_path = profile_mod.get_state_file_path(prof)
+    added, pending, failed = process_pending_collections(
+        credential, state_path=state_path
+    )
+    print(f"\n[合集] 补归完成: 成功 {added}，待补 {pending}，失败 {failed}")
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="YouTube → Bilibili 自动转载流水线")
     parser.add_argument("urls", nargs="*", help="YouTube 视频链接")
@@ -785,6 +810,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--create-collections", action="store_true",
         help="先创建缺失的合集，再列出 频道→合集 对照（会调用 B站 接口）",
+    )
+    parser.add_argument(
+        "--fix-collections", action="store_true",
+        help="回填历史并补归所有已上传但未加入合集的视频（调用 B站 接口）",
     )
     parser.add_argument(
         "--all-profiles", action="store_true",
@@ -897,6 +926,10 @@ def main():
 
     # ── Profile setup (before credential checks) ───────────────
     setup_profile(args)
+
+    # ── 补归合集（回填历史 + 扫描待办队列） ─────────────────
+    if args.fix_collections:
+        sys.exit(_run_fix_collections_command())
 
     # ── 频道 → 合集 对照 / 创建缺失合集 ───────────────────────
     if args.list_collections or args.create_collections:
