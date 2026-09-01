@@ -176,6 +176,34 @@ def resolve_profile(name: str = "default") -> Profile | None:
 
 # ── State / cache path helpers ──────────────────────────────────────────────
 
+def resolve_collection_name(channel_title: str, channel_id: str = "") -> str:
+    """
+    Return the active profile's configured 合集名 for a channel.
+
+    Matches by channel_id first, then by case-insensitive channel title.
+    Channels without a ``collection`` setting fall back to their title.
+    Returns "" when the channel is not in the active profile.
+    """
+    prof = resolve_profile(get_active_profile_name())
+    if prof is None:
+        return ""
+    title = (channel_title or "").strip().lower()
+    for c in prof.youtube.channels:
+        if c.channel_id and channel_id and c.channel_id == channel_id:
+            return c.collection or c.channel_title or ""
+        if c.channel_title and c.channel_title.strip().lower() == title:
+            return c.collection or c.channel_title or ""
+    return ""
+
+
+def is_profile_state_active() -> bool:
+    """True when the active profile is a real profile account (not .env legacy)."""
+    name = get_active_profile_name()
+    if name != "default":
+        return True
+    return is_multi_profile() and profile_exists("default")
+
+
 def get_state_file_path(profile: Profile) -> Path:
     """Return the state file path for a profile."""
     if profile.youtube.monitor_state:

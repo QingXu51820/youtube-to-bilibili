@@ -300,5 +300,73 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(issues, [])
 
 
+class ResolveCollectionNameTests(unittest.TestCase):
+    def test_configured_collection_by_id(self):
+        prof = Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "Bynx_Plays", collection="Bynx"),
+            ]),
+        )
+        with patch.object(profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(profile_mod, "resolve_profile", return_value=prof):
+            self.assertEqual(
+                profile_mod.resolve_collection_name("Bynx_Plays", "UC1"), "Bynx"
+            )
+
+    def test_fallback_to_channel_title(self):
+        prof = Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "Bynx_Plays"),
+            ]),
+        )
+        with patch.object(profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(profile_mod, "resolve_profile", return_value=prof):
+            self.assertEqual(
+                profile_mod.resolve_collection_name("bynx_plays"), "Bynx_Plays"
+            )
+
+    def test_no_match_returns_empty(self):
+        prof = Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "A"),
+            ]),
+        )
+        with patch.object(profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(profile_mod, "resolve_profile", return_value=prof):
+            self.assertEqual(profile_mod.resolve_collection_name("Unknown"), "")
+
+
+class ProfileStateActiveTests(unittest.TestCase):
+    def test_named_profile_is_active(self):
+        with patch.object(profile_mod, "get_active_profile_name",
+                          return_value="snap"):
+            self.assertTrue(profile_mod.is_profile_state_active())
+
+    def test_legacy_default_not_active(self):
+        with patch.object(profile_mod, "get_active_profile_name",
+                          return_value="default"), \
+             patch.object(profile_mod, "is_multi_profile",
+                          return_value=False):
+            self.assertFalse(profile_mod.is_profile_state_active())
+
+    def test_default_profile_in_profiles_json_is_active(self):
+        with patch.object(profile_mod, "get_active_profile_name",
+                          return_value="default"), \
+             patch.object(profile_mod, "is_multi_profile",
+                          return_value=True), \
+             patch.object(profile_mod, "profile_exists",
+                          return_value=True):
+            self.assertTrue(profile_mod.is_profile_state_active())
+
+
 if __name__ == "__main__":
     unittest.main()

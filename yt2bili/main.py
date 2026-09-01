@@ -633,23 +633,8 @@ def setup_profile(args) -> None:
 
 
 def _resolve_collection_name(channel_title: str, channel_id: str = "") -> str:
-    """
-    Return the active profile's configured 合集名 for a channel.
-
-    Matches by channel_id first, then by case-insensitive channel title.
-    Channels without a ``collection`` setting fall back to their title.
-    Returns "" when the channel is not in the active profile.
-    """
-    prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
-    if prof is None:
-        return ""
-    title = (channel_title or "").strip().lower()
-    for c in prof.youtube.channels:
-        if c.channel_id and channel_id and c.channel_id == channel_id:
-            return c.collection or c.channel_title or ""
-        if c.channel_title and c.channel_title.strip().lower() == title:
-            return c.collection or c.channel_title or ""
-    return ""
+    """Delegate to profile module (see ``profile.resolve_collection_name``)."""
+    return profile_mod.resolve_collection_name(channel_title, channel_id)
 
 
 def _run_collections_command(create_missing: bool = False) -> int:
