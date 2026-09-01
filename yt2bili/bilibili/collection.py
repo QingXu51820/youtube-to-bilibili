@@ -35,8 +35,6 @@ _PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
 
 _AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
-_PAGES_WAIT_TIMEOUT = 60   # 投稿后等待分P信息就绪的总时长（秒）
-_PAGES_WAIT_INTERVAL = 5   # 轮询间隔（秒）
 _COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（秒）
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -478,50 +476,6 @@ def backfill_collections(
     return added
 
 
-async def wait_for_video_pages(
-    credential,
-    bvid: str,
-    timeout: int = _PAGES_WAIT_TIMEOUT,
-    interval: int = _PAGES_WAIT_INTERVAL,
-) -> list[dict]:
-    """
-    Poll the pagelist API until a freshly uploaded video's parts are ready.
-
-    Bilibili processes uploads asynchronously — immediately after submission
-    the pagelist API can return ``code=-404`` (``啥都木有``) or an empty list.
-    Retry on those transient states until the pages (with cids) appear or
-    *timeout* seconds elapse.
-
-    Raises:
-        TimeoutError: The pages were not available within ``timeout`` seconds.
-        BilibiliApiError: The API returns a non-transient error code.
-    """
-    start = time.monotonic()
-    last_error: Exception | None = None
-
-    while True:
-        elapsed = time.monotonic() - start
-        if elapsed >= timeout:
-            raise TimeoutError(
-                f"等待分P信息超时（{timeout}s 内未获取到）"
-                + (f"，最后一次错误: {last_error}" if last_error else "")
-            )
-
-        try:
-            pages = await fetch_video_pages(credential, bvid)
-            if pages:
-                print(f"[合集] 获取到分P信息（等待 {elapsed:.0f}s）")
-                return pages
-            last_error = RuntimeError("分P信息为空")
-        except BilibiliApiError as e:
-            last_error = e
-            if e.code != -404:
-                raise
-
-        print(".", end="", flush=True)
-        await asyncio.sleep(interval)
-
-
 async def add_video_to_collection(
     credential, section_id: int, episodes: list[dict]
 ) -> dict:
@@ -580,8 +534,7 @@ async def add_uploaded_video_to_collection(
     info, created = await ensure_collection(
         credential, collection_name, cover_path
     )
-    print(f"[合集] 等待分P信息就绪（视频刚投稿，B站可能需要几秒~一分钟）...")
-    pages = await wait_for_video_pages(credential, bvid)
+    pages = await fetch_video_pages(credential, bvid)
     if not pages:
         raise RuntimeError("无法获取视频分P信息（cid），未加入合集")
     episodes = build_episodes(aid, pages, part_titles)
@@ -592,3 +545,116 @@ async def add_uploaded_video_to_collection(
         "created": created,
         "episodes": len(episodes),
     }
+
+
+async def _sweep_pending_collections(
+    credential,
+    queue_path: Path,
+    entries: list[dict],
+    retry_interval_seconds: int,
+) -> tuple[int, int, int]:
+    """One sweep over the queue; updates entries in place and persists."""
+    now = datetime.now(timezone.utc)
+    changed = False
+    for entry in entries:
+        if entry.get("status") == "added":
+            continue
+        last = _parse_iso(entry.get("last_attempt_at") or "")
+        if last is not None and (now - last).total_seconds() < retry_interval_seconds:
+            continue
+
+        bvid = str(entry.get("bvid", "") or "")
+        if not bvid:
+            entry["status"] = "failed"
+            entry["last_error"] = "缺少 bvid"
+            entry["last_attempt_at"] = _now_iso()
+            changed = True
+            continue
+
+        entry["attempts"] = int(entry.get("attempts", 0) or 0) + 1
+        entry["last_attempt_at"] = _now_iso()
+        try:
+            pages = await fetch_video_pages(credential, bvid)
+        except BilibiliApiError as e:
+            if e.code == -404:
+                entry["status"] = "pending"
+                entry["last_error"] = ""
+            else:
+                entry["status"] = "failed"
+                entry["last_error"] = str(e)
+            changed = True
+            continue
+        except RuntimeError as e:
+            # HTTP 401/403 → _check_response raises with re-login hint
+            entry["status"] = "failed"
+            entry["last_error"] = str(e)
+            changed = True
+            if "重新扫码登录" in str(e):
+                print(f"[合集] 🔐 {e}")
+            continue
+        except Exception as e:
+            entry["status"] = "pending"  # transient network errors → retry later
+            entry["last_error"] = str(e)
+            changed = True
+            continue
+
+        if not pages:
+            entry["status"] = "pending"
+            entry["last_error"] = ""
+            changed = True
+            continue
+
+        try:
+            info = await add_uploaded_video_to_collection(
+                credential,
+                str(entry.get("collection_name", "") or ""),
+                None,
+                bvid,
+                int(entry.get("aid", 0) or 0),
+            )
+        except Exception as e:
+            entry["status"] = "pending"
+            entry["last_error"] = str(e)
+            changed = True
+            continue
+
+        entry["status"] = "added"
+        entry["last_error"] = ""
+        changed = True
+        print(
+            f"[合集] ✅ 已归入合集「{entry.get('collection_name', '')}」"
+            f" ({bvid}, id={info['season_id']})"
+        )
+
+    if changed:
+        save_pending_collections(queue_path, entries)
+    added = sum(1 for e in entries if e.get("status") == "added")
+    pending = sum(1 for e in entries if e.get("status") == "pending")
+    failed = sum(1 for e in entries if e.get("status") == "failed")
+    return added, pending, failed
+
+
+def process_pending_collections(
+    credential,
+    *,
+    backfill: bool = True,
+    retry_interval_seconds: int = _COLLECTION_RETRY_INTERVAL,
+    state_path: Path | None = None,
+) -> tuple[int, int, int]:
+    """
+    Backfill history, then attempt to add every queued video to its 合集.
+
+    Returns ``(added, pending, failed)`` counts after one sweep.
+    """
+    queue_path = pending_collections_path()
+    if backfill:
+        resolved_state = state_path or (queue_path.parent / "processed_videos.json")
+        n = backfill_collections(queue_path, resolved_state)
+        if n:
+            print(f"[合集] 历史回填: {n} 条")
+    entries = load_pending_collections(queue_path)
+    if not entries:
+        return 0, 0, 0
+    return asyncio.run(
+        _sweep_pending_collections(credential, queue_path, entries, retry_interval_seconds)
+    )
