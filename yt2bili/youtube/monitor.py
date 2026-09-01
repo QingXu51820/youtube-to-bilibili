@@ -47,6 +47,30 @@ def _try_deferred_subtitles() -> None:
         print(f"[字幕] 延迟上传检查失败（非致命）: {e}")
 
 
+def _try_deferred_collections(profile=None) -> None:
+    """Backfill + sweep the pending-collection queue (non-blocking, best-effort)."""
+    try:
+        from yt2bili import profile as profile_mod
+        from yt2bili.bilibili.auth import get_credential
+        from yt2bili.bilibili.collection import process_pending_collections
+
+        prof = profile if profile is not None else profile_mod.resolve_profile(
+            profile_mod.get_active_profile_name()
+        )
+        if prof is None or not prof.bilibili.sessdata:
+            return
+        credential = get_credential(profile_name=prof.name)
+        state_path = None
+        if profile is not None or profile_mod.is_profile_state_active():
+            state_path = profile_mod.get_state_file_path(prof)
+        added, pending, failed = process_pending_collections(
+            credential, state_path=state_path
+        )
+        print(f"[合集] 补归检查: 成功 {added}，待补 {pending}，失败 {failed}")
+    except Exception as e:
+        print(f"[合集] 补归检查失败（非致命）: {e}")
+
+
 LIVE_SKIP_MARKERS = (
     "不是可下载的普通视频",
     "正在直播",
@@ -1043,6 +1067,7 @@ def run_monitor_loop(
                     # Try deferred subtitle uploads (CID may be ready by now)
                     if not skip_subtitle_upload:
                         _try_deferred_subtitles()
+                    _try_deferred_collections(profile=profile)
                 except YouTubeNetworkError as exc:
                     print(f"\n[订阅] ⚠️ 网络错误 ({profile.name}): {exc}")
                     continue
@@ -1075,6 +1100,7 @@ def run_monitor_loop(
             )
             if not skip_subtitle_upload:
                 _try_deferred_subtitles()
+            _try_deferred_collections()
             consecutive_failures = 0  # reset on success
         except YouTubeNetworkError as exc:
             consecutive_failures += 1

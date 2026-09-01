@@ -442,5 +442,34 @@ class FetchVideoQueueDetailsTests(unittest.TestCase):
         self.assertFalse(result["v1"]["is_live_archive"])
 
 
+class DeferredCollectionsTests(unittest.TestCase):
+    def test_try_deferred_collections_profile_mode(self):
+        prof = SimpleNamespace(
+            name="snap",
+            bilibili=SimpleNamespace(sessdata="s", bili_jct="j"),
+        )
+        state = Path("state/snap/processed_videos.json")
+        with patch("yt2bili.bilibili.auth.get_credential",
+                   return_value="cred") as get_cred, \
+             patch("yt2bili.bilibili.collection.process_pending_collections",
+                   return_value=(1, 2, 0)) as sweep, \
+             patch("yt2bili.profile.get_state_file_path",
+                   return_value=state):
+            monitor._try_deferred_collections(profile=prof)
+        get_cred.assert_called_once_with(profile_name="snap")
+        sweep.assert_called_once()
+        self.assertEqual(sweep.call_args.kwargs["state_path"], state)
+
+    def test_try_deferred_collections_unauthenticated_skips(self):
+        prof = SimpleNamespace(
+            name="snap",
+            bilibili=SimpleNamespace(sessdata="", bili_jct=""),
+        )
+        with patch("yt2bili.bilibili.collection.process_pending_collections",
+                   return_value=(0, 0, 0)) as sweep:
+            monitor._try_deferred_collections(profile=prof)
+        sweep.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
