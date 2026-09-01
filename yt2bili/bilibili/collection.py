@@ -32,11 +32,21 @@ _PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
 
 _AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
+_PAGES_WAIT_TIMEOUT = 60   # 投稿后等待分P信息就绪的总时长（秒）
+_PAGES_WAIT_INTERVAL = 5   # 轮询间隔（秒）
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36"
 )
+
+
+class BilibiliApiError(RuntimeError):
+    """Bilibili API returned a non-zero ``code``; carries the code for retry logic."""
+
+    def __init__(self, message: str, code: int = -1):
+        super().__init__(message)
+        self.code = code
 
 
 # ── Data model ──────────────────────────────────────────────────────────
@@ -211,8 +221,9 @@ def _check_response(resp: httpx.Response, label: str) -> dict:
         raise RuntimeError(f"{label} 返回非 JSON 响应: {e}")
     code = data.get("code", -1)
     if code != 0:
-        raise RuntimeError(
-            f"{label}失败: {data.get('message', str(data))} (code={code})"
+        raise BilibiliApiError(
+            f"{label}失败: {data.get('message', str(data))} (code={code})",
+            code=code,
         )
     return data
 
@@ -314,6 +325,50 @@ async def fetch_video_pages(credential, bvid: str) -> list[dict]:
     ]
 
 
+async def wait_for_video_pages(
+    credential,
+    bvid: str,
+    timeout: int = _PAGES_WAIT_TIMEOUT,
+    interval: int = _PAGES_WAIT_INTERVAL,
+) -> list[dict]:
+    """
+    Poll the pagelist API until a freshly uploaded video's parts are ready.
+
+    Bilibili processes uploads asynchronously — immediately after submission
+    the pagelist API can return ``code=-404`` (``啥都木有``) or an empty list.
+    Retry on those transient states until the pages (with cids) appear or
+    *timeout* seconds elapse.
+
+    Raises:
+        TimeoutError: The pages were not available within ``timeout`` seconds.
+        BilibiliApiError: The API returns a non-transient error code.
+    """
+    start = time.monotonic()
+    last_error: Exception | None = None
+
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout:
+            raise TimeoutError(
+                f"等待分P信息超时（{timeout}s 内未获取到）"
+                + (f"，最后一次错误: {last_error}" if last_error else "")
+            )
+
+        try:
+            pages = await fetch_video_pages(credential, bvid)
+            if pages:
+                print(f"[合集] 获取到分P信息（等待 {elapsed:.0f}s）")
+                return pages
+            last_error = RuntimeError("分P信息为空")
+        except BilibiliApiError as e:
+            last_error = e
+            if e.code != -404:
+                raise
+
+        print(".", end="", flush=True)
+        await asyncio.sleep(interval)
+
+
 async def add_video_to_collection(
     credential, section_id: int, episodes: list[dict]
 ) -> dict:
@@ -372,7 +427,8 @@ async def add_uploaded_video_to_collection(
     info, created = await ensure_collection(
         credential, collection_name, cover_path
     )
-    pages = await fetch_video_pages(credential, bvid)
+    print(f"[合集] 等待分P信息就绪（视频刚投稿，B站可能需要几秒~一分钟）...")
+    pages = await wait_for_video_pages(credential, bvid)
     if not pages:
         raise RuntimeError("无法获取视频分P信息（cid），未加入合集")
     episodes = build_episodes(aid, pages, part_titles)

@@ -12,6 +12,7 @@ from PIL import Image
 
 import yt2bili.bilibili.collection as collection_mod
 from yt2bili.bilibili.collection import (
+    BilibiliApiError,
     ChannelCollectionMatch,
     CollectionInfo,
     _check_response,
@@ -28,6 +29,7 @@ from yt2bili.bilibili.collection import (
     resolve_channel_collections,
     sync_list_collections,
     upload_cover,
+    wait_for_video_pages,
 )
 
 
@@ -290,6 +292,81 @@ class FetchVideoPagesTests(unittest.TestCase):
                                  {"cid": 200, "part": "P2"}])
 
 
+class WaitForVideoPagesTests(unittest.TestCase):
+    def test_retries_on_404_then_returns_pages(self):
+        """回归：投稿后 pagelist 返回 -404（啥都木有）时应轮询等待而非直接失败。"""
+        pages = [{"cid": 100, "part": "P1"}]
+        with patch.object(
+            collection_mod, "fetch_video_pages",
+            side_effect=[
+                BilibiliApiError(
+                    "获取分P信息失败: 啥都木有 (code=-404)", code=-404
+                ),
+                pages,
+            ],
+        ) as fetch, \
+             patch.object(collection_mod.asyncio, "sleep", AsyncMock()) as sleep:
+            result = asyncio.run(
+                wait_for_video_pages(_credential(), "BV1",
+                                     timeout=10, interval=1)
+            )
+        self.assertEqual(result, pages)
+        self.assertEqual(fetch.await_count, 2)
+        sleep.assert_awaited_once()
+
+    def test_retries_on_empty_pages(self):
+        pages = [{"cid": 100, "part": "P1"}]
+        with patch.object(
+            collection_mod, "fetch_video_pages",
+            side_effect=[[], pages],
+        ) as fetch, \
+             patch.object(collection_mod.asyncio, "sleep", AsyncMock()):
+            result = asyncio.run(
+                wait_for_video_pages(_credential(), "BV1",
+                                     timeout=10, interval=1)
+            )
+        self.assertEqual(result, pages)
+        self.assertEqual(fetch.await_count, 2)
+
+    def test_non_404_error_raises_immediately(self):
+        err = BilibiliApiError("获取分P信息失败: 鉴权失败 (code=-101)", code=-101)
+        with patch.object(
+            collection_mod, "fetch_video_pages",
+            side_effect=err,
+        ) as fetch, \
+             patch.object(collection_mod.asyncio, "sleep", AsyncMock()) as sleep:
+            with self.assertRaises(BilibiliApiError) as ctx:
+                asyncio.run(
+                    wait_for_video_pages(_credential(), "BV1",
+                                         timeout=10, interval=1)
+                )
+        self.assertEqual(ctx.exception.code, -101)
+        self.assertEqual(fetch.await_count, 1)
+        sleep.assert_not_called()
+
+    def test_gives_up_after_timeout(self):
+        err = BilibiliApiError(
+            "获取分P信息失败: 啥都木有 (code=-404)", code=-404
+        )
+        fetch = AsyncMock(side_effect=err)
+
+        def fake_monotonic():
+            # asyncio.run 初始化时会额外调用 time.monotonic()，
+            # 因此不按“第几次调用”判定，而按已发起的请求次数模拟经过 6s。
+            return 6.0 if fetch.call_count >= 2 else 0.0
+
+        with patch.object(collection_mod, "fetch_video_pages", new=fetch), \
+             patch.object(collection_mod.asyncio, "sleep", AsyncMock()), \
+             patch.object(collection_mod.time, "monotonic",
+                          side_effect=fake_monotonic):
+            with self.assertRaises(TimeoutError) as ctx:
+                asyncio.run(
+                    wait_for_video_pages(_credential(), "BV1",
+                                         timeout=5, interval=1)
+                )
+        self.assertIn("啥都木有", str(ctx.exception))
+
+
 class AddVideoToCollectionTests(unittest.TestCase):
     def test_posts_episodes_json(self):
         episodes = [{"aid": 1, "cid": 2, "title": "T", "charging_pay": 0}]
@@ -358,7 +435,7 @@ class AddUploadedVideoTests(unittest.TestCase):
         pages = [{"cid": 100, "part": "P1"}, {"cid": 200, "part": "P2"}]
         with patch.object(collection_mod, "ensure_collection",
                           AsyncMock(return_value=(info, False))) as ensure, \
-             patch.object(collection_mod, "fetch_video_pages",
+             patch.object(collection_mod, "wait_for_video_pages",
                           AsyncMock(return_value=pages)) as fetch, \
              patch.object(collection_mod, "add_video_to_collection",
                           AsyncMock(return_value={"code": 0})) as add:
@@ -369,7 +446,8 @@ class AddUploadedVideoTests(unittest.TestCase):
                 )
             )
         ensure.assert_awaited_once_with(_credential(), "Bynx", "/tmp/c.jpg")
-        fetch.assert_awaited_once_with(_credential(), "BV1")
+        fetch.assert_awaited_once()
+        self.assertEqual(fetch.await_args.args[1], "BV1")
         add.assert_awaited_once()
         episodes = add.await_args.args[2]
         self.assertEqual([e["title"] for e in episodes], ["译1", "译2"])
@@ -380,7 +458,7 @@ class AddUploadedVideoTests(unittest.TestCase):
         info = CollectionInfo(season_id=1, title="B", section_id=2)
         with patch.object(collection_mod, "ensure_collection",
                           AsyncMock(return_value=(info, False))), \
-             patch.object(collection_mod, "fetch_video_pages",
+             patch.object(collection_mod, "wait_for_video_pages",
                           AsyncMock(return_value=[])):
             with self.assertRaises(RuntimeError):
                 asyncio.run(
