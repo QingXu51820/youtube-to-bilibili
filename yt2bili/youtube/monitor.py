@@ -58,6 +58,16 @@ def _try_deferred_collections(profile=None) -> None:
         def resolve_channel(video_id: str):
             return fetch_channel_identity(f"https://www.youtube.com/watch?v={video_id}")
 
+        youtube = None
+        try:
+            from yt2bili.youtube.subscriptions import get_youtube_service
+            youtube = get_youtube_service(
+                config.PROJECT_ROOT / config.YOUTUBE_CLIENT_SECRET_FILE,
+                config.PROJECT_ROOT / config.YOUTUBE_TOKEN_FILE,
+            )
+        except Exception:
+            youtube = None
+
         prof = profile if profile is not None else profile_mod.resolve_profile(
             profile_mod.get_active_profile_name()
         )
@@ -68,7 +78,8 @@ def _try_deferred_collections(profile=None) -> None:
         if profile is not None or profile_mod.is_profile_state_active():
             state_path = profile_mod.get_state_file_path(prof)
         added, pending, failed = process_pending_collections(
-            credential, state_path=state_path, resolve_channel=resolve_channel
+            credential, state_path=state_path, resolve_channel=resolve_channel,
+            youtube=youtube,
         )
         print(f"[合集] 补归检查: 成功 {added}，待补 {pending}，失败 {failed}")
     except Exception as e:

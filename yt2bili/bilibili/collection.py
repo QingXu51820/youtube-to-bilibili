@@ -28,17 +28,21 @@ from yt2bili import config
 
 _COLLECTIONS_URL = "https://member.bilibili.com/x2/creative/web/seasons"
 _CREATE_COLLECTION_URL = "https://member.bilibili.com/x2/creative/web/season/add"
+_SECTION_URL = "https://member.bilibili.com/x2/creative/web/season/section"
+_SECTION_EDIT_URL = "https://member.bilibili.com/x2/creative/web/season/section/edit"
 _ADD_EPISODES_URL = (
     "https://member.bilibili.com/x2/creative/web/season/section/episodes/add"
 )
 _COVER_UP_URL = "https://member.bilibili.com/x/vu/web/cover/up"
 _PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
+_VIDEO_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
 
 _AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
 _COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（秒）
 _COLLECTION_ADD_DELAY = 3.0        # 每次补归提交之间的间隔（秒），避免触发 B站 限流
 _COLLECTION_SWEEP_BUDGET = 30      # 单轮最多补归条数，剩余留待下一轮
+_REORDER_DELAY = 3.0               # 每次合集重排提交之间的间隔（秒）
 _RATE_LIMIT_CODES = (20111, 20113)  # 合集编辑过于频繁 / 手速太快啦～
 _RATE_LIMIT_COOLDOWN = 300         # 限流条目重试冷却（秒）
 _UA = (
@@ -65,6 +69,7 @@ class CollectionInfo:
     title: str
     section_id: int = 0    # 合集默认小节（"正片"）ID，加视频时使用
     total: int = 0         # 合集内视频数
+    section_mtime: int = 0  # 默认小节修改时间（用于跳过未变化的合集）
 
 
 @dataclass
@@ -268,6 +273,8 @@ async def list_collections(credential) -> list[CollectionInfo]:
                         total=sum(
                             int(sec.get("epCount") or 0) for sec in sections
                         ),
+                        section_mtime=int(sections[0].get("mtime") or 0)
+                        if sections else 0,
                     )
                 )
             total = int(body.get("total") or 0)
@@ -447,6 +454,7 @@ def enqueue_collection(
     aid: int,
     video_id: str = "",
     channel_title: str = "",
+    published_at: str = "",
 ) -> None:
     """Record a just-uploaded video that still needs to join a 合集."""
     path = pending_collections_path()
@@ -457,6 +465,7 @@ def enqueue_collection(
         "aid": int(aid or 0),
         "collection_name": collection,
         "channel_title": channel_title,
+        "published_at": published_at or "",
         "added_at": _now_iso(),
         "last_attempt_at": "",
         "attempts": 0,
@@ -468,6 +477,9 @@ def enqueue_collection(
             if existing.get("video_id") == video_id:
                 if existing.get("status") == "added":
                     return  # already in a collection
+                entry["published_at"] = (
+                    existing.get("published_at") or published_at or ""
+                )
                 entries[i] = entry
                 save_pending_collections(path, entries)
                 return
@@ -519,6 +531,7 @@ def backfill_collections(
             "aid": int(v.get("aid", 0) or 0),
             "collection_name": collection_name,
             "channel_title": channel_title,
+            "published_at": str(v.get("published_at", "") or ""),
             "added_at": _now_iso(),
             "last_attempt_at": "",
             "attempts": 0,
@@ -536,6 +549,48 @@ def backfill_collections(
             "（不在当前账号频道列表或缺少频道信息）"
         )
     return added
+
+
+def enrich_queue_dates(queue_path: Path, state_path: Path) -> int:
+    """
+    Copy ``published_at`` from the processed-videos state into queue entries
+    that are missing it (keyed by video_id / bvid).  Returns the count filled.
+    """
+    if not state_path.exists():
+        return 0
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[合集] ⚠️ 读取历史记录失败（{e}），跳过发布时间回填: {state_path}")
+        return 0
+    videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
+
+    entries = load_pending_collections(queue_path)
+    by_id = {
+        vid: str(v.get("published_at", "") or "")
+        for vid, v in videos.items()
+        if v.get("published_at")
+    }
+    by_bvid = {
+        str(v.get("bvid", "") or ""): str(v.get("published_at", "") or "")
+        for v in videos.values()
+        if v.get("bvid") and v.get("published_at")
+    }
+
+    filled = 0
+    for entry in entries:
+        if entry.get("published_at"):
+            continue
+        date = (
+            by_id.get(str(entry.get("video_id", "") or ""), "")
+            or by_bvid.get(str(entry.get("bvid", "") or ""), "")
+        )
+        if date:
+            entry["published_at"] = date
+            filled += 1
+    if filled:
+        save_pending_collections(queue_path, entries)
+    return filled
 
 
 def enrich_missing_channels(state_path: Path, resolve_channel) -> int:
@@ -584,6 +639,574 @@ def enrich_missing_channels(state_path: Path, resolve_channel) -> int:
         )
         tmp.replace(state_path)
     return enriched
+
+
+# ── 合集内视频排序（按发布时间） ────────────────────────────────
+
+def _normalize_publish_date(value) -> str:
+    """
+    Normalize a publish date to ``YYYY-MM-DD`` for lexicographic sorting.
+
+    Accepts yt-dlp ``upload_date`` (YYYYMMDD), ISO-8601 timestamps, and
+    epoch seconds (B站 pubdate).  Returns "" when the value is unusable.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    match = re.fullmatch(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})", text)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    dt = _parse_iso(text)
+    if dt is not None:
+        return dt.date().isoformat()
+    if text.isdigit():
+        try:
+            return (
+                datetime.fromtimestamp(int(text), tz=timezone.utc)
+                .date()
+                .isoformat()
+            )
+        except (OverflowError, OSError, ValueError):
+            return ""
+    return ""
+
+
+def build_reorder_sorts(
+    episodes: list[dict],
+    published_at_map: dict | None = None,
+    reverse: bool = False,
+) -> list[dict] | None:
+    """
+    Build the ``sorts`` payload that orders episodes by publish date.
+
+    Episodes without a known date keep their relative order and move to the
+    end.  Returns None when the collection is already in the target order
+    (or episode ids are missing) so callers can skip the edit API call.
+    """
+    published_at_map = published_at_map or {}
+
+    def date_of(ep: dict) -> str:
+        bvid = str(ep.get("bvid", "") or "")
+        aid = str(ep.get("aid", 0) or 0)
+        return (
+            published_at_map.get(bvid)
+            or published_at_map.get(aid)
+            or _normalize_publish_date(ep.get("published_at"))
+            or "9999-99-99"
+        )
+
+    current = [int(ep.get("id") or 0) for ep in episodes]
+    if any(not cid for cid in current):
+        return None  # no episode ids → cannot reorder safely
+
+    indexed = list(enumerate(episodes))
+    known = [t for t in indexed if date_of(t[1]) != "9999-99-99"]
+    unknown = [t for t in indexed if date_of(t[1]) == "9999-99-99"]
+    known.sort(key=lambda t: (date_of(t[1]), t[0]), reverse=reverse)
+    ordered = known + unknown
+    target = [int(ep.get("id") or 0) for _, ep in ordered]
+    if target == current:
+        return None
+    return [{"id": ep_id, "sort": i + 1} for i, ep_id in enumerate(target)]
+
+
+def _reorder_cache_path(queue_path: Path) -> Path:
+    """Cache of bvid → YouTube publish date (from yt-dlp metadata)."""
+    return queue_path.parent / "bvid_dates.json"
+
+
+def _reorder_markers_path(queue_path: Path) -> Path:
+    """Per-season mtime markers so full reorder passes skip unchanged 合集."""
+    return queue_path.parent / "collections_reorder.json"
+
+
+def _collect_published_dates(
+    state_path: Path, queue_path: Path
+) -> tuple[dict, set, dict]:
+    """
+    Gather per-video date knowledge for reordering.
+
+    Returns ``(dates, yt_bvids, bvid_to_video_id)``:
+    - *dates*: bvid/aid → ``YYYY-MM-DD`` (YouTube dates preferred, cached)
+    - *yt_bvids*: bvids whose date is YouTube-derived (state/queue/cache)
+    - *bvid_to_video_id*: bvid → YouTube video id, used to look up dates
+    """
+    dates: dict[str, str] = {}
+    yt_bvids: set[str] = set()
+    bvid_to_video_id: dict[str, str] = {}
+
+    def add(key, value) -> None:
+        date = _normalize_publish_date(value)
+        if key and date:
+            dates.setdefault(str(key), date)
+
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        except (json.JSONDecodeError, OSError):
+            state = {}
+        if isinstance(state, dict):
+            for v in (state.get("videos") or {}).values():
+                if not isinstance(v, dict):
+                    continue
+                add(v.get("bvid"), v.get("published_at"))
+                if v.get("published_at") and v.get("bvid"):
+                    yt_bvids.add(str(v.get("bvid")))
+                if v.get("bvid") and v.get("video_id"):
+                    bvid_to_video_id.setdefault(
+                        str(v.get("bvid")), str(v.get("video_id"))
+                    )
+    for entry in load_pending_collections(queue_path):
+        add(entry.get("bvid"), entry.get("published_at"))
+        if entry.get("published_at") and entry.get("bvid"):
+            yt_bvids.add(str(entry.get("bvid")))
+        if entry.get("bvid") and entry.get("video_id"):
+            bvid_to_video_id.setdefault(
+                str(entry.get("bvid")), str(entry.get("video_id"))
+            )
+    cache = _reorder_cache_path(queue_path)
+    if cache.exists():
+        try:
+            cached = json.loads(cache.read_text(encoding="utf-8-sig"))
+        except (json.JSONDecodeError, OSError):
+            cached = {}
+        if isinstance(cached, dict):
+            for key, value in cached.items():
+                add(key, value)
+                if str(key).startswith("BV"):
+                    yt_bvids.add(str(key))
+    return dates, yt_bvids, bvid_to_video_id
+
+
+async def fetch_collection_section(
+    credential,
+    section_id: int,
+    client=None,
+) -> tuple[dict, list[dict]]:
+    """Return ``(section, episodes)`` for a collection's default section."""
+
+    async def _fetch(active_client):
+        resp = await active_client.get(
+            _SECTION_URL, params={"id": section_id}
+        )
+        data = _check_response(resp, "获取合集小节")
+        body = data.get("data") or {}
+        return (body.get("section") or {}), (body.get("episodes") or [])
+
+    if client is not None:
+        return await _fetch(client)
+    async with _client(credential) as own:
+        return await _fetch(own)
+
+
+def _extract_youtube_url(desc: str) -> str:
+    """Extract a YouTube video id from a B站 description, or "" when absent."""
+    match = re.search(
+        r"(?:https?://)?(?:www\.|m\.)?youtu\.?be(?:\.com)?/"
+        r"(?:watch\?v=|shorts/|embed/)?([A-Za-z0-9_-]{11})",
+        desc or "",
+    )
+    if not match:
+        return ""
+    return match.group(1)
+
+
+async def _fill_youtube_api_pubdates(
+    dates: dict,
+    yt_bvids: set,
+    video_id_to_bvid: dict,
+    youtube=None,
+) -> int:
+    """
+    Fill YouTube publish dates via the YouTube Data API (batches of 50).
+
+    *video_id_to_bvid* maps YouTube video ids to B站 bvids.  Returns the
+    number of dates filled.  Best-effort: API errors are swallowed so the
+    reorder can fall back to B站 upload dates.
+    """
+    if youtube is None or not video_id_to_bvid:
+        return 0
+    video_ids = list(video_id_to_bvid)
+    filled = 0
+    for start in range(0, len(video_ids), 50):
+        chunk = video_ids[start:start + 50]
+
+        def _call():
+            return (
+                youtube.videos()
+                .list(part="snippet", id=",".join(chunk), maxResults=50)
+                .execute()
+            )
+
+        try:
+            resp = await asyncio.to_thread(_call)
+        except Exception:
+            continue
+        for item in resp.get("items", []):
+            video_id = str(item.get("id", "") or "")
+            bvid = video_id_to_bvid.get(video_id, "")
+            published = (item.get("snippet") or {}).get("publishedAt", "")
+            date = _normalize_publish_date(published)
+            if bvid and date:
+                dates[bvid] = date
+                yt_bvids.add(bvid)
+                filled += 1
+    return filled
+
+
+async def _fill_bili_pubdates(
+    client,
+    episodes: list[dict],
+    dates: dict,
+) -> tuple[set, dict]:
+    """
+    Fetch B站 pubdate for episodes whose bvid/aid has no known date yet.
+
+    Results are written into *dates* (bvid and aid keys).  Paced to avoid
+    hammering the public view API.  Returns ``(bili_only, desc_video_ids)``:
+    the bvids that only got a B站 date, and a bvid → YouTube video-id map
+    recovered from each description.
+    """
+    missing: list[tuple[str, str]] = []
+    for ep in episodes:
+        bvid = str(ep.get("bvid", "") or "")
+        aid = str(ep.get("aid", 0) or 0)
+        if not bvid:
+            continue
+        if dates.get(bvid) or dates.get(aid):
+            continue
+        missing.append((bvid, aid))
+
+    bili_only: set[str] = set()
+    desc_video_ids: dict[str, str] = {}
+    semaphore = asyncio.Semaphore(6)
+
+    async def _fetch_one(bvid: str, aid: str) -> None:
+        async with semaphore:
+            pub = None
+            desc = ""
+            try:
+                resp = await client.get(
+                    _VIDEO_VIEW_URL, params={"bvid": bvid}
+                )
+                payload = resp.json() if resp.status_code == 200 else {}
+                if payload.get("code") == 0:
+                    body = payload.get("data") or {}
+                    pub = body.get("pubdate")
+                    desc = str(body.get("desc") or "")
+            except Exception:
+                pub = None
+            date = _normalize_publish_date(pub)
+            if date:
+                dates[bvid] = date
+                if aid:
+                    dates[aid] = date
+                bili_only.add(bvid)
+            video_id = _extract_youtube_url(desc)
+            if video_id:
+                desc_video_ids[bvid] = video_id
+
+    if missing:
+        await asyncio.gather(*(_fetch_one(b, a) for b, a in missing))
+    return bili_only, desc_video_ids
+
+
+async def _fill_missing_dates(
+    client,
+    episodes: list[dict],
+    dates: dict,
+    yt_bvids: set,
+    bvid_to_video_id: dict,
+    youtube=None,
+) -> tuple[set, dict]:
+    """
+    Fill dates for every episode: YouTube Data API first (local + desc
+    mappings), then B站 upload date as fallback.  Returns the bvids that
+    only have a B站 date, plus the desc-recovered video-id map.
+    """
+    local_map = {
+        bvid: video_id for bvid, video_id in bvid_to_video_id.items()
+        if not (dates.get(bvid) or "")
+    }
+    video_id_to_bvid = {video_id: bvid for bvid, video_id in local_map.items()}
+    await _fill_youtube_api_pubdates(dates, yt_bvids, video_id_to_bvid, youtube)
+
+    bili_only, desc_video_ids = await _fill_bili_pubdates(
+        client, episodes, dates
+    )
+    desc_map = {
+        bvid: video_id for bvid, video_id in desc_video_ids.items()
+        if not (dates.get(bvid) or "")
+    }
+    video_id_to_bvid = {video_id: bvid for bvid, video_id in desc_map.items()}
+    await _fill_youtube_api_pubdates(dates, yt_bvids, video_id_to_bvid, youtube)
+    return bili_only, desc_video_ids
+
+
+async def reorder_collection_section(
+    credential,
+    section: dict,
+    episodes: list[dict],
+    published_at_map: dict | None = None,
+    reverse: bool = False,
+    client=None,
+) -> dict:
+    """
+    Reorder a collection's default section by publish date (newest last
+    unless *reverse*).  Returns ``{"changed": bool, "season_id", "episodes"}``.
+    """
+    sorts = build_reorder_sorts(episodes, published_at_map, reverse=reverse)
+    season_id = int(section.get("seasonId") or 0)
+    if not sorts:
+        return {"changed": False, "season_id": season_id, "episodes": len(episodes)}
+
+    payload = {
+        "section": {
+            "id": int(section.get("id") or 0),
+            "type": 1,
+            "seasonId": season_id,
+            "title": str(section.get("title") or "正片"),
+        },
+        "sorts": sorts,
+        "captcha_token": "",
+        "csrf": getattr(credential, "bili_jct", "") or "",
+    }
+    csrf = getattr(credential, "bili_jct", "") or ""
+
+    async def _submit(active_client):
+        resp = await active_client.post(
+            _SECTION_EDIT_URL,
+            params={"csrf": csrf},
+            json=payload,
+        )
+        return _check_response(resp, "重排合集")
+
+    if client is not None:
+        await _submit(client)
+    else:
+        async with _client(credential) as own:
+            await _submit(own)
+    return {"changed": True, "season_id": season_id, "episodes": len(episodes)}
+
+
+def _save_reorder_markers(queue_path: Path, markers: dict) -> None:
+    path = _reorder_markers_path(queue_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(markers, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _save_bvid_date_cache(queue_path: Path, dates: dict, yt_bvids: set) -> None:
+    """Persist bvid → YouTube date entries so later reorders skip refetches."""
+    bvid_dates = {
+        key: value for key, value in dates.items()
+        if str(key).startswith("BV") and str(key) in yt_bvids and value
+    }
+    if not bvid_dates:
+        return
+    path = _reorder_cache_path(queue_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update(bvid_dates)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+async def _reorder_touched_collections(
+    credential,
+    touched: dict,
+    state_path: Path,
+    queue_path: Path,
+    reverse: bool = False,
+    youtube=None,
+) -> None:
+    """Reorder every collection that received a new episode this sweep."""
+    if not touched:
+        return
+    dates, yt_bvids, bvid_to_video_id = _collect_published_dates(
+        state_path, queue_path
+    )
+    async with _client(credential) as client:
+        for season_id, (section_id, name) in touched.items():
+            try:
+                section, episodes = await fetch_collection_section(
+                    credential, section_id, client=client
+                )
+                if not section.get("id"):
+                    print(f"[合集] ⚠️ 合集「{name}」小节信息缺失，跳过重排")
+                    continue
+                await _fill_missing_dates(
+                    client, episodes, dates, yt_bvids, bvid_to_video_id,
+                    youtube=youtube,
+                )
+                result = await reorder_collection_section(
+                    credential, section, episodes, dates,
+                    reverse=reverse, client=client,
+                )
+            except BilibiliApiError as e:
+                if e.code in _RATE_LIMIT_CODES:
+                    print(
+                        f"[合集] ⏸️ 重排限流（code={e.code}），剩余合集留待下轮"
+                    )
+                    return
+                print(f"[合集] ⚠️ 重排「{name}」失败: {e}")
+                continue
+            except Exception as e:
+                print(f"[合集] ⚠️ 重排「{name}」失败: {e}")
+                continue
+            if result.get("changed"):
+                print(
+                    f"[合集] 🔀 已按发布时间重排「{name}」"
+                    f"({result.get('episodes', 0)} 集)"
+                )
+                await asyncio.sleep(_REORDER_DELAY)
+            else:
+                print(f"[合集] ✓ 「{name}」顺序已正确")
+    _save_bvid_date_cache(queue_path, dates, yt_bvids)
+
+
+def reorder_collections(
+    credential,
+    *,
+    state_path: Path | None = None,
+    reverse: bool = False,
+    youtube=None,
+) -> tuple[int, int]:
+    """
+    Full reorder pass over every collection owned by the active profile.
+
+    Skips collections whose default-section mtime is unchanged since the
+    last pass (recorded in ``collections_reorder.json``).  Returns
+    ``(reordered, already_ordered)``.
+    """
+    queue_path = pending_collections_path()
+    if not _acquire_sweep_lock(queue_path):
+        print("[合集] ⏸️ 另一进程正在执行补归，跳过全量重排")
+        return 0, 0
+    try:
+        resolved_state = state_path or (queue_path.parent / "processed_videos.json")
+        dates, yt_bvids, bvid_to_video_id = _collect_published_dates(
+            resolved_state, queue_path
+        )
+        markers_path = _reorder_markers_path(queue_path)
+        markers: dict = {}
+        if markers_path.exists():
+            try:
+                markers = json.loads(
+                    markers_path.read_text(encoding="utf-8-sig")
+                ) or {}
+            except (json.JSONDecodeError, OSError):
+                markers = {}
+        collections = sync_list_collections(credential)
+
+        async def run() -> tuple[int, int]:
+            reordered = already = 0
+            async with _client(credential) as client:
+                for c in collections:
+                    if not c.section_id:
+                        continue
+                    marker = markers.get(str(c.season_id))
+                    if (
+                        isinstance(marker, dict)
+                        and marker.get("mtime") == c.section_mtime
+                        and marker.get("complete")
+                    ):
+                        continue
+                    section_mtime = c.section_mtime
+                    try:
+                        section, episodes = await fetch_collection_section(
+                            credential, c.section_id, client=client
+                        )
+                        if not section.get("id"):
+                            print(
+                                f"[合集] ⚠️ 「{c.title}」小节信息缺失，跳过重排"
+                            )
+                            markers[str(c.season_id)] = {
+                                "mtime": section_mtime, "complete": True,
+                            }
+                            continue
+                        _, desc_ids = await _fill_missing_dates(
+                            client, episodes, dates, yt_bvids,
+                            bvid_to_video_id, youtube=youtube,
+                        )
+                        missing_after = [
+                            e for e in episodes
+                            if not (
+                                dates.get(str(e.get("bvid", "") or ""))
+                                or dates.get(str(e.get("aid", 0) or 0))
+                            )
+                        ]
+                        fillable_remaining = [
+                            e for e in episodes
+                            if (
+                                str(e.get("bvid", "") or "")
+                                in bvid_to_video_id
+                                or str(e.get("bvid", "") or "")
+                                in desc_ids
+                            )
+                            and str(e.get("bvid", "") or "") not in yt_bvids
+                        ]
+                        result = await reorder_collection_section(
+                            credential, section, episodes, dates,
+                            reverse=reverse, client=client,
+                        )
+                    except BilibiliApiError as e:
+                        if e.code in _RATE_LIMIT_CODES:
+                            print(
+                                f"[合集] ⏸️ 重排限流（code={e.code}），"
+                                "剩余合集留待下轮"
+                            )
+                            break
+                        print(f"[合集] ⚠️ 重排「{c.title}」失败: {e}")
+                        markers[str(c.season_id)] = {
+                            "mtime": section_mtime, "complete": False,
+                        }
+                        continue
+                    except Exception as e:
+                        print(f"[合集] ⚠️ 重排「{c.title}」失败: {e}")
+                        markers[str(c.season_id)] = {
+                            "mtime": section_mtime, "complete": False,
+                        }
+                        continue
+                    markers[str(c.season_id)] = {
+                        "mtime": section_mtime,
+                        "complete": (
+                            not missing_after and not fillable_remaining
+                        ),
+                    }
+                    if result.get("changed"):
+                        reordered += 1
+                        print(
+                            f"[合集] 🔀 已按发布时间重排「{c.title}」"
+                            f"({result.get('episodes', 0)} 集)"
+                        )
+                        await asyncio.sleep(_REORDER_DELAY)
+                    else:
+                        already += 1
+                        print(f"[合集] ✓ 「{c.title}」顺序已正确")
+            return reordered, already
+
+        reordered, already = asyncio.run(run())
+        _save_reorder_markers(queue_path, markers)
+        _save_bvid_date_cache(queue_path, dates, yt_bvids)
+        return reordered, already
+    finally:
+        _release_sweep_lock(queue_path)
 
 
 async def add_video_to_collection(
@@ -663,11 +1286,16 @@ async def _sweep_pending_collections(
     entries: list[dict],
     retry_interval_seconds: int,
     rate_limit_cooldown_seconds: int = _RATE_LIMIT_COOLDOWN,
+    state_path: Path | None = None,
+    reorder_touched: bool = True,
+    reverse: bool = False,
+    youtube=None,
 ) -> tuple[int, int, int]:
     """One sweep over the queue; updates entries in place and persists."""
     now = datetime.now(timezone.utc)
     changed = False
     added_count = 0
+    touched: dict[int, tuple[int, str]] = {}
     for entry in entries:
         if entry.get("status") == "added":
             continue
@@ -748,6 +1376,14 @@ async def _sweep_pending_collections(
         entry["last_error"] = ""
         changed = True
         added_count += 1
+        if info.get("section_id"):
+            touched.setdefault(
+                info["season_id"],
+                (
+                    info["section_id"],
+                    str(entry.get("collection_name", "") or ""),
+                ),
+            )
         print(
             f"[合集] ✅ 已归入合集「{entry.get('collection_name', '')}」"
             f" ({bvid}, id={info['season_id']})"
@@ -762,6 +1398,15 @@ async def _sweep_pending_collections(
 
     if changed:
         save_pending_collections(queue_path, entries)
+    if reorder_touched and touched:
+        await _reorder_touched_collections(
+            credential,
+            touched,
+            state_path or (queue_path.parent / "processed_videos.json"),
+            queue_path,
+            reverse=reverse,
+            youtube=youtube,
+        )
     added = sum(1 for e in entries if e.get("status") == "added")
     pending = sum(1 for e in entries if e.get("status") == "pending")
     failed = sum(1 for e in entries if e.get("status") == "failed")
@@ -776,6 +1421,9 @@ def process_pending_collections(
     rate_limit_cooldown_seconds: int = _RATE_LIMIT_COOLDOWN,
     state_path: Path | None = None,
     resolve_channel=None,
+    reorder_touched: bool = True,
+    reverse: bool = False,
+    youtube=None,
 ) -> tuple[int, int, int]:
     """
     Enrich missing channels (optional), backfill history, then attempt to add
@@ -797,6 +1445,9 @@ def process_pending_collections(
             n = backfill_collections(queue_path, resolved_state)
             if n:
                 print(f"[合集] 历史回填: {n} 条")
+        n = enrich_queue_dates(queue_path, resolved_state)
+        if n:
+            print(f"[合集] 发布时间回填: {n} 条")
         entries = load_pending_collections(queue_path)
         if not entries:
             return 0, 0, 0
@@ -804,6 +1455,10 @@ def process_pending_collections(
             _sweep_pending_collections(
                 credential, queue_path, entries, retry_interval_seconds,
                 rate_limit_cooldown_seconds,
+                state_path=resolved_state,
+                reorder_touched=reorder_touched,
+                reverse=reverse,
+                youtube=youtube,
             )
         )
     finally:

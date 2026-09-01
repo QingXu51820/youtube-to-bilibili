@@ -851,5 +851,387 @@ class AddUploadedVideoTests(unittest.TestCase):
                     )
                 )
 
+
+class NormalizePublishDateTests(unittest.TestCase):
+    def test_ytdlp_upload_date(self):
+        self.assertEqual(
+            collection_mod._normalize_publish_date("20260831"),
+            "2026-08-31",
+        )
+
+    def test_iso_and_slashed(self):
+        self.assertEqual(
+            collection_mod._normalize_publish_date("2026-08-31T12:00:00Z"),
+            "2026-08-31",
+        )
+        self.assertEqual(
+            collection_mod._normalize_publish_date("2026/08/31"),
+            "2026-08-31",
+        )
+
+    def test_epoch_seconds(self):
+        self.assertEqual(
+            collection_mod._normalize_publish_date(1788237652),
+            "2026-09-01",
+        )
+
+    def test_invalid_returns_empty(self):
+        self.assertEqual(collection_mod._normalize_publish_date(""), "")
+        self.assertEqual(collection_mod._normalize_publish_date(None), "")
+        self.assertEqual(collection_mod._normalize_publish_date("not-a-date"), "")
+        self.assertEqual(collection_mod._normalize_publish_date(99999999999), "")
+
+
+class BuildReorderSortsTests(unittest.TestCase):
+    def _eps(self, dates):
+        return [
+            {"id": i + 1, "bvid": f"BV{i + 1}", "aid": 100 + i,
+             "order": i + 1, "published_at": date}
+            for i, date in enumerate(dates)
+        ]
+
+    def test_ascending_newest_last(self):
+        eps = self._eps(["2026-08-01", "2026-07-01", "2026-09-01"])
+        sorts = collection_mod.build_reorder_sorts(eps)
+        self.assertEqual(sorts, [
+            {"id": 2, "sort": 1},
+            {"id": 1, "sort": 2},
+            {"id": 3, "sort": 3},
+        ])
+
+    def test_uses_bvid_and_aid_map(self):
+        eps = self._eps(["2026-01-01", "2026-02-01"])
+        sorts = collection_mod.build_reorder_sorts(
+            eps, {"BV2": "2025-12-31"}
+        )
+        self.assertEqual(sorts, [
+            {"id": 2, "sort": 1},
+            {"id": 1, "sort": 2},
+        ])
+
+    def test_unknown_dates_stable_at_end(self):
+        eps = [
+            {"id": 1, "bvid": "BV1", "aid": 1},
+            {"id": 2, "bvid": "BV2", "aid": 2},
+            {"id": 3, "bvid": "BV3", "aid": 3},
+            {"id": 4, "bvid": "BV4", "aid": 4},
+        ]
+        sorts = collection_mod.build_reorder_sorts(
+            eps, {"BV3": "2026-01-01"}
+        )
+        self.assertEqual(sorts, [
+            {"id": 3, "sort": 1},
+            {"id": 1, "sort": 2},
+            {"id": 2, "sort": 3},
+            {"id": 4, "sort": 4},
+        ])
+
+    def test_already_sorted_returns_none(self):
+        eps = self._eps(["2026-01-01", "2026-02-01", "2026-03-01"])
+        self.assertIsNone(collection_mod.build_reorder_sorts(eps))
+
+    def test_missing_episode_ids_returns_none(self):
+        eps = [{"id": 0, "bvid": "BV1", "aid": 1}]
+        self.assertIsNone(collection_mod.build_reorder_sorts(eps))
+
+    def test_reverse_newest_first(self):
+        eps = self._eps(["2026-08-01", "2026-07-01", "2026-09-01"])
+        sorts = collection_mod.build_reorder_sorts(eps, reverse=True)
+        self.assertEqual(sorts, [
+            {"id": 3, "sort": 1},
+            {"id": 1, "sort": 2},
+            {"id": 2, "sort": 3},
+        ])
+
+
+class FetchCollectionSectionTests(unittest.TestCase):
+    def test_returns_section_and_episodes(self):
+        payload = {"code": 0, "data": {
+            "section": {"id": 5155061, "seasonId": 4616294, "title": "正片"},
+            "episodes": [{"id": 1, "bvid": "BV1", "order": 1}],
+        }}
+        client = FakeAsyncClient(
+            lambda method, url, kwargs: FakeResponse(payload)
+        )
+        section, episodes = asyncio.run(
+            collection_mod.fetch_collection_section(
+                _credential(), 5155061, client=client
+            )
+        )
+        self.assertEqual(section["seasonId"], 4616294)
+        self.assertEqual(episodes[0]["bvid"], "BV1")
+        self.assertEqual(client.calls[0][0], "get")
+        self.assertEqual(client.calls[0][2]["params"], {"id": 5155061})
+
+
+class ReorderCollectionSectionTests(unittest.TestCase):
+    def test_posts_sorts_payload(self):
+        payload = {"code": 0, "data": None}
+        client = FakeAsyncClient(
+            lambda method, url, kwargs: FakeResponse(payload)
+        )
+        section = {"id": 5155061, "seasonId": 4616294, "title": "正片", "type": 1}
+        episodes = [
+            {"id": 1, "bvid": "BV1", "aid": 1},
+            {"id": 2, "bvid": "BV2", "aid": 2},
+        ]
+        result = asyncio.run(
+            collection_mod.reorder_collection_section(
+                _credential(), section, episodes,
+                {"BV1": "2026-02-01", "BV2": "2026-01-01"},
+                client=client,
+            )
+        )
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["season_id"], 4616294)
+        method, url, kwargs = client.calls[0]
+        self.assertEqual(method, "post")
+        self.assertIn("/season/section/edit", url)
+        self.assertEqual(kwargs["params"]["csrf"], "jct")
+        body = kwargs["json"]
+        self.assertEqual(body["section"]["id"], 5155061)
+        self.assertEqual(body["sorts"], [
+            {"id": 2, "sort": 1},
+            {"id": 1, "sort": 2},
+        ])
+
+    def test_skips_post_when_already_ordered(self):
+        client = FakeAsyncClient(
+            lambda method, url, kwargs: FakeResponse({"code": 0})
+        )
+        section = {"id": 1, "seasonId": 2, "title": "正片", "type": 1}
+        episodes = [
+            {"id": 1, "bvid": "BV1", "aid": 1},
+            {"id": 2, "bvid": "BV2", "aid": 2},
+        ]
+        result = asyncio.run(
+            collection_mod.reorder_collection_section(
+                _credential(), section, episodes,
+                {"BV1": "2026-01-01", "BV2": "2026-02-01"},
+                client=client,
+            )
+        )
+        self.assertFalse(result["changed"])
+        self.assertEqual(client.calls, [])
+
+
+class ReorderDateCollectionTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.queue = Path(self._tmp.name) / "pending_collections.json"
+        self.state = Path(self._tmp.name) / "processed_videos.json"
+
+    def _write_state(self, videos):
+        self.state.write_text(
+            json.dumps({"videos": videos}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_enrich_queue_dates_copies_from_state(self):
+        self._write_state({
+            "v1": {"status": "uploaded", "bvid": "BV1",
+                   "published_at": "20260831"},
+            "v2": {"status": "uploaded", "bvid": "BV2",
+                   "published_at": ""},
+        })
+        self.queue.write_text(json.dumps([
+            {"video_id": "v1", "bvid": "BV1", "published_at": ""},
+            {"video_id": "v2", "bvid": "BV2", "published_at": ""},
+            {"video_id": "v3", "bvid": "BV3", "published_at": "20260101"},
+        ]), encoding="utf-8")
+        n = collection_mod.enrich_queue_dates(self.queue, self.state)
+        self.assertEqual(n, 1)
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        by_id = {e["video_id"]: e["published_at"] for e in entries}
+        self.assertEqual(by_id["v1"], "20260831")
+        self.assertEqual(by_id["v3"], "20260101")
+
+    def test_collect_published_dates_merges_sources(self):
+        self._write_state({
+            "v1": {"status": "uploaded", "bvid": "BV1",
+                   "published_at": "20260831", "video_id": "vid1"},
+        })
+        self.queue.write_text(json.dumps([
+            {"video_id": "v2", "bvid": "BV2", "published_at": "20260701"},
+        ]), encoding="utf-8")
+        dates, yt_bvids, bvid_to_video_id = (
+            collection_mod._collect_published_dates(
+            self.state, self.queue
+            )
+        )
+        self.assertEqual(dates["BV1"], "2026-08-31")
+        self.assertEqual(dates["BV2"], "2026-07-01")
+        self.assertEqual(yt_bvids, {"BV1", "BV2"})
+        self.assertEqual(bvid_to_video_id, {"BV1": "vid1", "BV2": "v2"})
+
+    def test_extract_youtube_url(self):
+        self.assertEqual(
+            collection_mod._extract_youtube_url(
+                "来源：https://www.youtube.com/watch?v=abc123XYZ99 点赞！"
+            ),
+            "abc123XYZ99",
+        )
+        self.assertEqual(
+            collection_mod._extract_youtube_url("youtu.be/abc123XYZ99"),
+            "abc123XYZ99",
+        )
+        self.assertEqual(collection_mod._extract_youtube_url("无链接"), "")
+
+    def test_fill_youtube_api_pubdates_batches(self):
+        class FakeVideosList:
+            def __init__(self, result):
+                self._result = result
+
+            def execute(self):
+                return self._result
+
+        class FakeYoutube:
+            def __init__(self, result):
+                self._result = result
+
+            def videos(self):
+                return SimpleNamespace(
+                    list=lambda part, id, maxResults: FakeVideosList(
+                        self._result
+                    )
+                )
+
+        result = {"items": [
+            {"id": "vid1", "snippet": {"publishedAt": "2026-08-01T00:00:00Z"}},
+            {"id": "vid2", "snippet": {"publishedAt": "2026-07-01T00:00:00Z"}},
+        ]}
+        dates = {}
+        yt_bvids = set()
+        filled = asyncio.run(
+            collection_mod._fill_youtube_api_pubdates(
+                dates, yt_bvids,
+                {"vid1": "BV1", "vid2": "BV2"},
+                youtube=FakeYoutube(result),
+            )
+        )
+        self.assertEqual(filled, 2)
+        self.assertEqual(dates["BV1"], "2026-08-01")
+        self.assertEqual(dates["BV2"], "2026-07-01")
+        self.assertEqual(yt_bvids, {"BV1", "BV2"})
+
+    def test_fill_youtube_api_pubdates_skips_without_service(self):
+        filled = asyncio.run(
+            collection_mod._fill_youtube_api_pubdates(
+                {}, set(), {"vid1": "BV1"}, youtube=None
+            )
+        )
+        self.assertEqual(filled, 0)
+
+    def test_fill_bili_pubdates_fills_and_recovers_desc_ids(self):
+        payload = {"code": 0, "data": {
+            "desc": "原视频: https://www.youtube.com/watch?v=yt999YYY999",
+            "pubdate": 1788237652,
+        }}
+        client = FakeAsyncClient(
+            lambda method, url, kwargs: FakeResponse(payload)
+        )
+        episodes = [
+            {"id": 1, "bvid": "BV2", "aid": 2},
+        ]
+        dates = {}
+        bili_only, desc_ids = asyncio.run(
+            collection_mod._fill_bili_pubdates(
+                client, episodes, dates
+            )
+        )
+        self.assertEqual(bili_only, {"BV2"})
+        self.assertEqual(dates["BV2"], "2026-09-01")
+        self.assertEqual(desc_ids, {"BV2": "yt999YYY999"})
+
+    def test_fill_bili_pubdates_skips_known_dates(self):
+        client = FakeAsyncClient(
+            lambda method, url, kwargs: FakeResponse({"code": 0, "data": {}})
+        )
+        episodes = [{"id": 1, "bvid": "BV1", "aid": 1}]
+        bili_only, desc_ids = asyncio.run(
+            collection_mod._fill_bili_pubdates(
+                client, episodes, {"BV1": "2026-08-01", "1": "2026-08-01"}
+            )
+        )
+        self.assertEqual(bili_only, set())
+        self.assertEqual(desc_ids, {})
+        self.assertEqual(client.calls, [])
+
+    def test_backfill_copies_published_at(self):
+        self._write_state({
+            "v1": {"status": "uploaded", "bvid": "BV1", "aid": 1,
+                   "channel_title": "Bynx_Plays", "title": "T1",
+                   "published_at": "20260831"},
+        })
+        collection_mod.backfill_collections(
+            self.queue, self.state,
+            resolve_collection_name=lambda title: "Bynx",
+        )
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(entries[0]["published_at"], "20260831")
+
+
+class ReorderCollectionsFullPassTests(unittest.TestCase):
+    def test_skips_unchanged_and_reorders_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            queue = tmp / "pending_collections.json"
+            state = tmp / "processed_videos.json"
+            queue.write_text(json.dumps([]), encoding="utf-8")
+            state.write_text(json.dumps({"videos": {
+                "v1": {"status": "uploaded", "bvid": "BV1",
+                       "published_at": "20260701"},
+            }}), encoding="utf-8")
+
+            def fake_list(credential):
+                return [
+                    CollectionInfo(season_id=10, title="A", section_id=20,
+                                   section_mtime=100),
+                    CollectionInfo(season_id=11, title="B", section_id=21,
+                                   section_mtime=200),
+                ]
+
+            calls = []
+
+            async def fake_section(credential, section_id, client=None):
+                if section_id == 21:
+                    return ({"id": 21, "seasonId": 11, "title": "正片"},
+                            [{"id": 1, "bvid": "BV1", "aid": 1}])
+                return ({"id": 20, "seasonId": 10, "title": "正片"}, [])
+
+            async def fake_reorder(credential, section, episodes,
+                                   published_at_map=None, reverse=False,
+                                   client=None):
+                calls.append((section.get("seasonId"), episodes))
+                return {"changed": True, "season_id": section["seasonId"],
+                        "episodes": len(episodes)}
+
+            markers = tmp / "collections_reorder.json"
+            markers.write_text(json.dumps(
+                {"10": {"mtime": 100, "complete": True}}
+            ), encoding="utf-8")
+
+            with patch.object(collection_mod, "pending_collections_path",
+                              return_value=queue), \
+                 patch.object(collection_mod, "sync_list_collections",
+                              side_effect=fake_list), \
+                 patch.object(collection_mod, "fetch_collection_section",
+                              side_effect=fake_section), \
+                 patch.object(collection_mod, "reorder_collection_section",
+                              side_effect=fake_reorder):
+                reordered, already = collection_mod.reorder_collections(
+                    _credential(), state_path=state
+                )
+
+            self.assertEqual(reordered, 1)
+            self.assertEqual(already, 0)
+            self.assertEqual([c[0] for c in calls], [11])
+            saved = json.loads(markers.read_text(encoding="utf-8"))
+            self.assertEqual(saved["11"]["mtime"], 200)
+            self.assertTrue(saved["11"]["complete"])
+            self.assertEqual(saved["10"]["mtime"], 100)
+
+
 if __name__ == "__main__":
     unittest.main()

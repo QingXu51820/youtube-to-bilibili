@@ -141,6 +141,7 @@ class ProcessResult:
     aid: int = 0
     original_title: str = ""
     channel_title: str = ""
+    published_at: str = ""
     translated_title: str = ""
     video_path: str = ""
     thumbnail_path: str = ""
@@ -289,6 +290,7 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
     record.video_path = video.file_path
     record.thumbnail_path = video.thumbnail_path
     record.original_title = video.title
+    record.published_at = video.published_at
     channel_title = video.channel_title or channel_title or ""
     record.channel_title = channel_title
     collection_name = _resolve_collection_name(channel_title, video.channel_id or "")
@@ -374,6 +376,7 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
             collection=collection_name or None,
             video_id=video.video_id,
             channel_title=channel_title,
+            published_at=video.published_at,
         )
         if not result.success:
             raise RuntimeError(result.message)
@@ -711,8 +714,8 @@ def _run_collections_command(create_missing: bool = False) -> int:
     return 0
 
 
-def _run_fix_collections_command() -> int:
-    """回填历史记录并尝试补归所有待处理合集（单次执行）。"""
+def _run_fix_collections_command(reorder_collections: bool = False) -> int:
+    """回填历史记录、补归待处理合集，并可选按发布时间重排全部合集。"""
     prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
     if prof is None:
         print("没有可用的账号配置。")
@@ -729,13 +732,33 @@ def _run_fix_collections_command() -> int:
     def resolve_channel(video_id: str):
         return fetch_channel_identity(f"https://www.youtube.com/watch?v={video_id}")
 
+    youtube = None
+    try:
+        from yt2bili.youtube.subscriptions import get_youtube_service
+        youtube = get_youtube_service(
+            Path(config.PROJECT_ROOT) / config.YOUTUBE_CLIENT_SECRET_FILE,
+            Path(config.PROJECT_ROOT) / config.YOUTUBE_TOKEN_FILE,
+        )
+    except Exception as e:
+        print(f"[合集] ⚠️ YouTube API 不可用（{e}），老视频暂用 B站 上传时间兜底")
+
     state_path = None
     if profile_mod.is_profile_state_active():
         state_path = profile_mod.get_state_file_path(prof)
     added, pending, failed = process_pending_collections(
-        credential, state_path=state_path, resolve_channel=resolve_channel
+        credential, state_path=state_path, resolve_channel=resolve_channel,
+        youtube=youtube,
     )
     print(f"\n[合集] 补归完成: 成功 {added}，待补 {pending}，失败 {failed}")
+    if reorder_collections:
+        from yt2bili.bilibili.collection import reorder_collections
+        reordered, already = reorder_collections(
+            credential, state_path=state_path, youtube=youtube,
+        )
+        print(
+            f"[合集] 重排完成: 已重排 {reordered} 个合集，"
+            f"顺序已正确 {already} 个"
+        )
     return 0
 
 
@@ -822,6 +845,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fix-collections", action="store_true",
         help="回填历史并补归所有已上传但未加入合集的视频（调用 B站 接口）",
+    )
+    parser.add_argument(
+        "--reorder-collections", action="store_true",
+        help="配合 --fix-collections：按发布时间重排当前账号全部合集"
+             "（最新发布放最后，可从旧到新顺序播放）",
     )
     parser.add_argument(
         "--all-profiles", action="store_true",
@@ -937,7 +965,7 @@ def main():
 
     # ── 补归合集（回填历史 + 扫描待办队列） ─────────────────
     if args.fix_collections:
-        sys.exit(_run_fix_collections_command())
+        sys.exit(_run_fix_collections_command(args.reorder_collections))
 
     # ── 频道 → 合集 对照 / 创建缺失合集 ───────────────────────
     if args.list_collections or args.create_collections:
@@ -1245,6 +1273,8 @@ def main():
         print("                                          频道→合集 对照（只读）")
         print("  python main.py --create-collections --profile snap")
         print("                                          创建缺失合集并核对")
+        print("  python main.py --fix-collections --reorder-collections --profile snap")
+        print("                                          补归合集并按发布时间重排")
         print("  python main.py --resolve-channel @Handle      解析频道句柄")
         print("  python main.py                                自动读取 urls.txt 或交互输入")
         return 0

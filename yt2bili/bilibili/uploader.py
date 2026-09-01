@@ -181,6 +181,7 @@ async def _upload_async(
     collection: str | None = None,
     video_id: str = "",
     channel_title: str = "",
+    published_at: str = "",
 ) -> UploadResult:
     """
     Async upload a video to Bilibili (single or multi-part).
@@ -340,6 +341,7 @@ async def _upload_async(
                     aid=aid,
                     video_id=video_id,
                     channel_title=channel_title,
+                    published_at=published_at,
                 )
                 print(
                     f"[合集] 已加入待补归队列"
@@ -388,6 +390,7 @@ def upload_video(
     collection: str | None = None,
     video_id: str = "",
     channel_title: str = "",
+    published_at: str = "",
 ) -> UploadResult:
     """
     Upload a video to Bilibili (synchronous wrapper).
@@ -403,6 +406,7 @@ def upload_video(
         cover_path: Optional cover image path
         credential: Optional pre-built Credential (uses active profile when omitted)
         collection: Optional B站 合集名 — 上传成功后自动归入该合集
+        published_at: 原视频 YouTube 发布时间（YYYYMMDD），合集排序用
 
     Returns:
         UploadResult
@@ -451,6 +455,7 @@ def upload_video(
                 file_paths, title, desc, tags, tid, original_url, cover, cred,
                 collection,
                 video_id=video_id, channel_title=channel_title,
+                published_at=published_at,
             )
         )
     except RuntimeError:
@@ -460,6 +465,7 @@ def upload_video(
                 file_paths, title, desc, tags, tid, original_url, cover, cred,
                 collection,
                 video_id=video_id, channel_title=channel_title,
+                published_at=published_at,
             )
         )
 
