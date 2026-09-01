@@ -2,14 +2,18 @@
 
 import asyncio
 import base64
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from PIL import Image
 
+from yt2bili import config
+from yt2bili import profile as profile_mod
 import yt2bili.bilibili.collection as collection_mod
 from yt2bili.bilibili.collection import (
     BilibiliApiError,
@@ -176,6 +180,78 @@ class CheckResponseTests(unittest.TestCase):
     def test_ok_returns_data(self):
         data = _check_response(FakeResponse({"code": 0, "data": {"url": "x"}}), "上传封面")
         self.assertEqual(data["data"]["url"], "x")
+
+
+class PendingCollectionQueueTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.queue = Path(self._tmp.name) / "pending_collections.json"
+
+    def test_enqueue_writes_entry(self):
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue):
+            collection_mod.enqueue_collection(
+                collection="Bynx", bvid="BV1", aid=1,
+                video_id="vid1", channel_title="Chan",
+            )
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["collection_name"], "Bynx")
+        self.assertEqual(entries[0]["bvid"], "BV1")
+        self.assertEqual(entries[0]["status"], "pending")
+        self.assertEqual(entries[0]["video_id"], "vid1")
+
+    def test_enqueue_upserts_by_video_id(self):
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue):
+            collection_mod.enqueue_collection(
+                collection="A", bvid="BV1", aid=1, video_id="v1"
+            )
+            collection_mod.enqueue_collection(
+                collection="B", bvid="BV2", aid=2, video_id="v1"
+            )
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["collection_name"], "B")
+
+    def test_enqueue_skips_when_already_added(self):
+        self.queue.write_text(json.dumps([
+            {"video_id": "v1", "status": "added", "bvid": "BV1",
+             "collection_name": "Bynx"},
+        ]), encoding="utf-8")
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue):
+            collection_mod.enqueue_collection(
+                collection="Bynx", bvid="BV1", aid=1, video_id="v1"
+            )
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["status"], "added")
+
+    def test_load_corrupt_backs_up_and_returns_empty(self):
+        self.queue.write_text("{broken", encoding="utf-8")
+        entries = collection_mod.load_pending_collections(self.queue)
+        self.assertEqual(entries, [])
+        self.assertTrue(self.queue.with_suffix(".json.bak").exists())
+
+    def test_pending_collections_path_legacy_and_profile(self):
+        with patch.object(profile_mod, "is_profile_state_active",
+                          return_value=False), \
+             patch.object(config, "PROJECT_ROOT", Path("/proj")):
+            self.assertEqual(
+                collection_mod.pending_collections_path(),
+                Path("/proj/state/pending_collections.json"),
+            )
+        with patch.object(profile_mod, "is_profile_state_active",
+                          return_value=True), \
+             patch.object(profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(config, "PROJECT_ROOT", Path("/proj")):
+            self.assertEqual(
+                collection_mod.pending_collections_path(),
+                Path("/proj/state/snap/pending_collections.json"),
+            )
 
 
 class ListCollectionsTests(unittest.TestCase):

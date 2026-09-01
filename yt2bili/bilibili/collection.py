@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+from yt2bili import config
 
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -34,6 +37,7 @@ _AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
 _PAGES_WAIT_TIMEOUT = 60   # 投稿后等待分P信息就绪的总时长（秒）
 _PAGES_WAIT_INTERVAL = 5   # 轮询间隔（秒）
+_COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（秒）
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -323,6 +327,98 @@ async def fetch_video_pages(credential, bvid: str) -> list[dict]:
         {"cid": int(p.get("cid") or 0), "part": str(p.get("part") or "")}
         for p in pages
     ]
+
+
+# ── Deferred collection queue ─────────────────────────────────────────
+
+def _now_iso() -> str:
+    """UTC ISO-8601 second-precision string (same format as monitor.utc_now)."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _parse_iso(value: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp, or None when missing/invalid."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def pending_collections_path() -> Path:
+    """
+    Path of the pending-collection queue for the active profile.
+
+    Named profiles keep their own queue under ``state/{profile}/``; legacy
+    .env mode keeps the shared ``state/pending_collections.json``.
+    """
+    from yt2bili import profile as profile_mod
+    root = Path(config.PROJECT_ROOT)
+    if not profile_mod.is_profile_state_active():
+        return root / "state" / "pending_collections.json"
+    return root / "state" / profile_mod.get_active_profile_name() / "pending_collections.json"
+
+
+def load_pending_collections(path: Path) -> list[dict]:
+    """Read the queue; back up and rebuild when corrupted."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError) as e:
+        try:
+            backup = path.with_suffix(path.suffix + ".bak")
+            backup.write_bytes(path.read_bytes())
+            print(f"[合集] ⚠️ 待补归队列损坏（{e}），已备份到 {backup.name} 并重建空队列")
+        except OSError:
+            print(f"[合集] ⚠️ 待补归队列损坏（{e}），重建空队列")
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_pending_collections(path: Path, entries: list[dict]) -> None:
+    """Atomically write the queue."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    tmp.replace(path)
+
+
+def enqueue_collection(
+    *,
+    collection: str,
+    bvid: str,
+    aid: int,
+    video_id: str = "",
+    channel_title: str = "",
+) -> None:
+    """Record a just-uploaded video that still needs to join a 合集."""
+    path = pending_collections_path()
+    entries = load_pending_collections(path)
+    entry = {
+        "video_id": video_id,
+        "bvid": bvid,
+        "aid": int(aid or 0),
+        "collection_name": collection,
+        "channel_title": channel_title,
+        "added_at": _now_iso(),
+        "last_attempt_at": "",
+        "attempts": 0,
+        "status": "pending",
+        "last_error": "",
+    }
+    if video_id:
+        for i, existing in enumerate(entries):
+            if existing.get("video_id") == video_id:
+                if existing.get("status") == "added":
+                    return  # already in a collection
+                entries[i] = entry
+                save_pending_collections(path, entries)
+                return
+    entries.append(entry)
+    save_pending_collections(path, entries)
 
 
 async def wait_for_video_pages(
