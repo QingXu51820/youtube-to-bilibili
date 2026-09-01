@@ -36,6 +36,10 @@ _PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
 _AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
 _COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（秒）
+_COLLECTION_ADD_DELAY = 3.0        # 每次补归提交之间的间隔（秒），避免触发 B站 限流
+_COLLECTION_SWEEP_BUDGET = 30      # 单轮最多补归条数，剩余留待下一轮
+_RATE_LIMIT_CODES = (20111, 20113)  # 合集编辑过于频繁 / 手速太快啦～
+_RATE_LIMIT_COOLDOWN = 300         # 限流条目重试冷却（秒）
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -344,6 +348,21 @@ def _parse_iso(value: str) -> datetime | None:
         return None
 
 
+def _is_rate_limited(entry: dict) -> bool:
+    """True when the entry's last error was a B站 collection rate limit."""
+    error = entry.get("last_error") or ""
+    return any(str(code) in error for code in _RATE_LIMIT_CODES)
+
+
+def _entry_cooldown(
+    entry: dict, retry_interval_seconds: int, rate_limit_cooldown_seconds: int
+) -> int:
+    """Cooldown for an entry: short for rate-limited, long otherwise."""
+    if _is_rate_limited(entry):
+        return rate_limit_cooldown_seconds
+    return retry_interval_seconds
+
+
 def pending_collections_path() -> Path:
     """
     Path of the pending-collection queue for the active profile.
@@ -558,15 +577,20 @@ async def _sweep_pending_collections(
     queue_path: Path,
     entries: list[dict],
     retry_interval_seconds: int,
+    rate_limit_cooldown_seconds: int = _RATE_LIMIT_COOLDOWN,
 ) -> tuple[int, int, int]:
     """One sweep over the queue; updates entries in place and persists."""
     now = datetime.now(timezone.utc)
     changed = False
+    added_count = 0
     for entry in entries:
         if entry.get("status") == "added":
             continue
         last = _parse_iso(entry.get("last_attempt_at") or "")
-        if last is not None and (now - last).total_seconds() < retry_interval_seconds:
+        if last is not None and \
+                (now - last).total_seconds() < _entry_cooldown(
+                    entry, retry_interval_seconds, rate_limit_cooldown_seconds
+                ):
             continue
 
         bvid = str(entry.get("bvid", "") or "")
@@ -618,6 +642,17 @@ async def _sweep_pending_collections(
                 bvid,
                 int(entry.get("aid", 0) or 0),
             )
+        except BilibiliApiError as e:
+            entry["status"] = "pending"
+            entry["last_error"] = str(e)
+            changed = True
+            if e.code in _RATE_LIMIT_CODES:
+                print(
+                    f"[合集] ⏸️ B站补归限流（code={e.code}），本轮暂停，"
+                    "剩余留待下轮重试"
+                )
+                break
+            continue
         except Exception as e:
             entry["status"] = "pending"
             entry["last_error"] = str(e)
@@ -627,10 +662,18 @@ async def _sweep_pending_collections(
         entry["status"] = "added"
         entry["last_error"] = ""
         changed = True
+        added_count += 1
         print(
             f"[合集] ✅ 已归入合集「{entry.get('collection_name', '')}」"
             f" ({bvid}, id={info['season_id']})"
         )
+        if added_count >= _COLLECTION_SWEEP_BUDGET:
+            print(
+                f"[合集] 本轮已达补归上限 {_COLLECTION_SWEEP_BUDGET} 条，"
+                "剩余留待下轮"
+            )
+            break
+        await asyncio.sleep(_COLLECTION_ADD_DELAY)
 
     if changed:
         save_pending_collections(queue_path, entries)
@@ -645,6 +688,7 @@ def process_pending_collections(
     *,
     backfill: bool = True,
     retry_interval_seconds: int = _COLLECTION_RETRY_INTERVAL,
+    rate_limit_cooldown_seconds: int = _RATE_LIMIT_COOLDOWN,
     state_path: Path | None = None,
 ) -> tuple[int, int, int]:
     """
@@ -662,5 +706,8 @@ def process_pending_collections(
     if not entries:
         return 0, 0, 0
     return asyncio.run(
-        _sweep_pending_collections(credential, queue_path, entries, retry_interval_seconds)
+        _sweep_pending_collections(
+            credential, queue_path, entries, retry_interval_seconds,
+            rate_limit_cooldown_seconds,
+        )
     )

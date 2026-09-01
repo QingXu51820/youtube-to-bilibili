@@ -541,6 +541,32 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
         self.assertEqual((added, pending, failed), (0, 1, 0))
         fetch.assert_not_awaited()
 
+    def test_rate_limited_entries_use_short_cooldown(self):
+        """回归：限流条目用短冷却重试，不必等满 1 小时。"""
+        recent = collection_mod._now_iso()
+        rate_limited = self._entry(last_attempt_at=recent)
+        rate_limited["last_error"] = "加入合集失败: 手速太快啦～ (code=20113)"
+        normal = self._entry(last_attempt_at=recent)
+        normal["video_id"] = "v2"
+        normal["bvid"] = "BV2"
+        self.queue.write_text(json.dumps([rate_limited, normal]), encoding="utf-8")
+        fetch = AsyncMock(return_value=[{"cid": 1, "part": "P1"}])
+        add = AsyncMock(return_value={"season_id": 7, "episodes": 1})
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "_COLLECTION_ADD_DELAY", 0.01), \
+             patch.object(collection_mod, "fetch_video_pages", new=fetch), \
+             patch.object(collection_mod, "add_uploaded_video_to_collection",
+                          new=add):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=3600,
+                rate_limit_cooldown_seconds=0,
+            )
+        self.assertEqual((added, pending, failed), (1, 1, 0))
+        self.assertEqual(add.await_count, 1)  # 只重试了限流那条，普通条仍受 1h 节流
+
     def test_network_error_keeps_pending(self):
         self.queue.write_text(json.dumps([self._entry()]), encoding="utf-8")
         with patch.object(collection_mod, "pending_collections_path",
@@ -555,6 +581,67 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
                 self.cred, retry_interval_seconds=0
             )
         self.assertEqual((added, pending, failed), (0, 1, 0))
+
+    def test_sweep_stops_after_budget(self):
+        """回归：单轮补归有预算，避免一次性打爆 B站 限流。"""
+        entries = []
+        for i in range(4):
+            entry = self._entry()
+            entry["video_id"] = f"v{i}"
+            entries.append(entry)
+        self.queue.write_text(json.dumps(entries), encoding="utf-8")
+        sleep = AsyncMock()
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "_COLLECTION_SWEEP_BUDGET", 2), \
+             patch.object(collection_mod, "_COLLECTION_ADD_DELAY", 0.01), \
+             patch.object(collection_mod, "fetch_video_pages",
+                          AsyncMock(return_value=[{"cid": 1, "part": "P1"}])), \
+             patch.object(collection_mod, "add_uploaded_video_to_collection",
+                          AsyncMock(return_value={"season_id": 7, "episodes": 1})), \
+             patch.object(collection_mod.asyncio, "sleep", new=sleep):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0
+            )
+        self.assertEqual((added, pending, failed), (2, 2, 0))
+        self.assertEqual(sleep.await_count, 1)  # 第一次补归后短暂停顿，到预算即停
+
+    def test_sweep_breaks_on_rate_limit(self):
+        """回归：撞上 20113/20111 限流码立即停止本轮，不再继续提交。"""
+        entries = []
+        for i in range(4):
+            entry = self._entry()
+            entry["video_id"] = f"v{i}"
+            entry["bvid"] = f"BV{i}"
+            entries.append(entry)
+        self.queue.write_text(json.dumps(entries), encoding="utf-8")
+
+        async def add_side_effect(*args, **kwargs):
+            if args[3] == "BV2":  # 第三条开始被限流
+                raise BilibiliApiError(
+                    "加入合集失败: 手速太快啦～休息几分钟，稍后再试！ (code=20113)",
+                    code=20113,
+                )
+            return {"season_id": 7, "episodes": 1}
+
+        sleep = AsyncMock()
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "_COLLECTION_ADD_DELAY", 0.01), \
+             patch.object(collection_mod, "fetch_video_pages",
+                          AsyncMock(return_value=[{"cid": 1, "part": "P1"}])), \
+             patch.object(collection_mod, "add_uploaded_video_to_collection",
+                          AsyncMock(side_effect=add_side_effect)) as add, \
+             patch.object(collection_mod.asyncio, "sleep", new=sleep):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0
+            )
+        self.assertEqual((added, pending, failed), (2, 2, 0))
+        self.assertEqual(add.await_count, 3)  # 第三条撞限流后不再尝试第四条
 
 
 class AddVideoToCollectionTests(unittest.TestCase):
