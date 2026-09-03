@@ -89,6 +89,64 @@ class DictToProfileTests(unittest.TestCase):
         self.assertIsNone(p.settings.default_tid)
         self.assertIsNone(p.settings.default_tags)
 
+    def test_glossary_game_parsed(self):
+        p = _dict_to_profile("x", {"settings": {"glossary_game": "brawl_stars"}})
+        self.assertEqual(p.settings.glossary_game, "brawl_stars")
+        p2 = _dict_to_profile("x", {"settings": {"glossary_game": 123}})
+        self.assertIsNone(p2.settings.glossary_game)
+        p3 = _dict_to_profile("x", {})
+        self.assertIsNone(p3.settings.glossary_game)
+
+
+class GlossaryGameTests(unittest.TestCase):
+    """config.apply_glossary_game must enable exactly one game glossary."""
+
+    def setUp(self):
+        self._saved = (
+            config.SNAP_GLOSSARY_ENABLED,
+            config.DEADLOCK_GLOSSARY_ENABLED,
+            config.BRAWL_STARS_GLOSSARY_ENABLED,
+        )
+
+    def tearDown(self):
+        (config.SNAP_GLOSSARY_ENABLED,
+         config.DEADLOCK_GLOSSARY_ENABLED,
+         config.BRAWL_STARS_GLOSSARY_ENABLED) = self._saved
+
+    def test_each_game_enables_exactly_one(self):
+        config.apply_glossary_game("snap")
+        self.assertTrue(config.SNAP_GLOSSARY_ENABLED)
+        self.assertFalse(config.DEADLOCK_GLOSSARY_ENABLED)
+        self.assertFalse(config.BRAWL_STARS_GLOSSARY_ENABLED)
+
+        config.apply_glossary_game("deadlock")
+        self.assertFalse(config.SNAP_GLOSSARY_ENABLED)
+        self.assertTrue(config.DEADLOCK_GLOSSARY_ENABLED)
+        self.assertFalse(config.BRAWL_STARS_GLOSSARY_ENABLED)
+
+        config.apply_glossary_game("brawl_stars")
+        self.assertFalse(config.SNAP_GLOSSARY_ENABLED)
+        self.assertFalse(config.DEADLOCK_GLOSSARY_ENABLED)
+        self.assertTrue(config.BRAWL_STARS_GLOSSARY_ENABLED)
+
+    def test_aliases_and_empty(self):
+        config.apply_glossary_game("brawl-stars")
+        self.assertTrue(config.BRAWL_STARS_GLOSSARY_ENABLED)
+        self.assertFalse(config.SNAP_GLOSSARY_ENABLED)
+
+        config.apply_glossary_game("bs")
+        self.assertTrue(config.BRAWL_STARS_GLOSSARY_ENABLED)
+
+        # Empty string keeps .env defaults untouched
+        saved = (config.SNAP_GLOSSARY_ENABLED, config.DEADLOCK_GLOSSARY_ENABLED,
+                 config.BRAWL_STARS_GLOSSARY_ENABLED)
+        config.apply_glossary_game("")
+        self.assertEqual(
+            (config.SNAP_GLOSSARY_ENABLED, config.DEADLOCK_GLOSSARY_ENABLED,
+             config.BRAWL_STARS_GLOSSARY_ENABLED),
+            saved,
+        )
+
 
 class ProfileDictRoundtripTests(unittest.TestCase):
     def test_roundtrip_preserves_data(self):

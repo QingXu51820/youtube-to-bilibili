@@ -165,6 +165,14 @@ DEADLOCK_GLOSSARY_CACHE = _get(
 )
 DEADLOCK_GLOSSARY_TTL = _get_int("DEADLOCK_GLOSSARY_TTL", 86400)  # 1 day
 
+# ── Brawl Stars Glossary ─────────────────────────────────────────────
+# Static file built by tools/update_brawl_stars_glossary.py — no network fetch.
+BRAWL_STARS_GLOSSARY_ENABLED = _get("BRAWL_STARS_GLOSSARY_ENABLED", "false").lower() == "true"
+BRAWL_STARS_GLOSSARY_CACHE = _get(
+    "BRAWL_STARS_GLOSSARY_CACHE",
+    str(PROJECT_ROOT / "data" / "brawl_stars_glossary.json"),
+)
+
 # ── Source Language ───────────────────────────────────────────────
 SOURCE_LANG = _get("SOURCE_LANG", "auto")  # source language for translation
 
@@ -259,6 +267,23 @@ def find_tool(name: str) -> str | None:
     return None
 
 
+def apply_glossary_game(game: str) -> None:
+    """Enable exactly one game glossary; empty string keeps .env defaults.
+
+    Values: "snap" / "deadlock" / "brawl_stars" (aliases "brawl-stars", "bs").
+    Used by profiles (settings.glossary_game) and manual tools (--game), so
+    every run translates with the matching game's terms only — no
+    cross-game contamination.
+    """
+    if not game:
+        return
+    game = game.strip().lower()
+    global SNAP_GLOSSARY_ENABLED, DEADLOCK_GLOSSARY_ENABLED, BRAWL_STARS_GLOSSARY_ENABLED
+    SNAP_GLOSSARY_ENABLED = game == "snap"
+    DEADLOCK_GLOSSARY_ENABLED = game == "deadlock"
+    BRAWL_STARS_GLOSSARY_ENABLED = game in ("brawl_stars", "brawl-stars", "bs")
+
+
 def apply_profile_overrides(profile_name: str = "default") -> None:
     """
     Overlay profile-specific settings onto module-level config variables.
@@ -293,6 +318,9 @@ def apply_profile_overrides(profile_name: str = "default") -> None:
     if s.content_filter_keywords is not None:
         global CONTENT_FILTER_KEYWORDS
         CONTENT_FILTER_KEYWORDS = s.content_filter_keywords
+
+    if s.glossary_game:
+        apply_glossary_game(s.glossary_game)
 
 
 def validate() -> list[str]:

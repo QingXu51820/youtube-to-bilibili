@@ -50,6 +50,7 @@ class ProfileSettings:
     default_tags: str | None = None
     content_filter_enabled: bool | None = None
     content_filter_keywords: str | None = None
+    glossary_game: str | None = None  # "snap"/"deadlock"/"brawl_stars" — 只启用该游戏术语表
 
 
 @dataclass
@@ -257,6 +258,9 @@ def _dict_to_profile(name: str, d: dict) -> Profile:
     cfe = settings_raw.get("content_filter_enabled")
     if isinstance(cfe, str):
         cfe = cfe.strip().lower() in ("1", "true", "yes", "on")
+    gg = settings_raw.get("glossary_game")
+    if not isinstance(gg, str):
+        gg = None
 
     return Profile(
         name=name,
@@ -277,6 +281,7 @@ def _dict_to_profile(name: str, d: dict) -> Profile:
             default_tags=settings_raw.get("default_tags"),
             content_filter_enabled=cfe,
             content_filter_keywords=settings_raw.get("content_filter_keywords"),
+            glossary_game=(gg or "").strip() or None,
         ),
     )
 
@@ -309,6 +314,7 @@ def _profile_to_dict(profile: Profile) -> dict:
                 "default_tags": profile.settings.default_tags,
                 "content_filter_enabled": profile.settings.content_filter_enabled,
                 "content_filter_keywords": profile.settings.content_filter_keywords,
+                "glossary_game": profile.settings.glossary_game,
             }.items() if v is not None
         },
     }

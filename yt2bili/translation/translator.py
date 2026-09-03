@@ -86,6 +86,26 @@ def _match_content_keyword(text: str, keywords: str) -> str:
                 if any(pattern.search(haystack) for pattern in _content_keyword_patterns(term)):
                     return term
 
+    # 3. Check Brawl Stars glossary entries as additional keywords
+    if config.BRAWL_STARS_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_brawl_stars_glossary
+            bs_glossary = get_brawl_stars_glossary()
+        except Exception:
+            bs_glossary = {}
+
+        if bs_glossary:
+            # Check both EN names (keys) and CN names (values)
+            # Longest-match-first to avoid partial matches
+            all_terms = sorted(
+                list(bs_glossary.keys()) + list(bs_glossary.values()),
+                key=len,
+                reverse=True,
+            )
+            for term in all_terms:
+                if any(pattern.search(haystack) for pattern in _content_keyword_patterns(term)):
+                    return term
+
     return ""
 
 
@@ -155,6 +175,14 @@ def _preserve_terms() -> list[str]:
         except Exception:
             pass
 
+    if config.BRAWL_STARS_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_brawl_stars_glossary
+            bs_glossary = get_brawl_stars_glossary()
+            terms.extend(bs_glossary.values())
+        except Exception:
+            pass
+
     return sorted(dict.fromkeys(terms), key=len, reverse=True)
 
 
@@ -186,32 +214,28 @@ def _restore_terms(text: str, replacements: dict[str, str]) -> str:
 
 
 def _apply_glossary(text: str) -> str:
-    """Replace English card/location names with official Chinese translations.
+    """Replace English game names with official Chinese translations.
 
-    Scans the input text for known English names from the SNAP glossary
-    and replaces them with their Chinese equivalents.  Matches whole words
-    only (\\b boundaries), case-insensitive, longest-names-first to avoid
-    partial-match clashes.
+    Applies each enabled game glossary (SNAP / Deadlock / Brawl Stars)
+    independently.  Matches whole words only (\\b boundaries),
+    case-insensitive, longest-names-first to avoid partial-match clashes.
     """
-    if not config.SNAP_GLOSSARY_ENABLED:
-        return text
-
-    try:
-        from yt2bili.glossary import get_glossary
-        glossary = get_glossary()
-    except Exception:
-        return text
-
-    if not glossary:
-        return text
-
     result = text
-    # Sort by English name length descending — "Altar of Death" before "Death"
-    sorted_terms = sorted(glossary.items(), key=lambda x: len(x[0]), reverse=True)
-    for en, cn in sorted_terms:
-        # Only match standalone words (not parts of other words)
-        pattern = re.compile(rf"\b{re.escape(en)}\b", re.IGNORECASE)
-        result = pattern.sub(cn, result)
+
+    if config.SNAP_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_glossary
+            glossary = get_glossary()
+        except Exception:
+            glossary = {}
+
+        if glossary:
+            # Sort by English name length descending — "Altar of Death" before "Death"
+            sorted_terms = sorted(glossary.items(), key=lambda x: len(x[0]), reverse=True)
+            for en, cn in sorted_terms:
+                # Only match standalone words (not parts of other words)
+                pattern = re.compile(rf"\b{re.escape(en)}\b", re.IGNORECASE)
+                result = pattern.sub(cn, result)
 
     # Also apply Deadlock glossary if enabled
     if config.DEADLOCK_GLOSSARY_ENABLED:
@@ -224,6 +248,20 @@ def _apply_glossary(text: str) -> str:
         if dl_glossary:
             dl_sorted = sorted(dl_glossary.items(), key=lambda x: len(x[0]), reverse=True)
             for en, cn in dl_sorted:
+                pattern = re.compile(rf"\b{re.escape(en)}\b", re.IGNORECASE)
+                result = pattern.sub(cn, result)
+
+    # Also apply Brawl Stars glossary if enabled
+    if config.BRAWL_STARS_GLOSSARY_ENABLED:
+        try:
+            from yt2bili.glossary import get_brawl_stars_glossary
+            bs_glossary = get_brawl_stars_glossary()
+        except Exception:
+            bs_glossary = {}
+
+        if bs_glossary:
+            bs_sorted = sorted(bs_glossary.items(), key=lambda x: len(x[0]), reverse=True)
+            for en, cn in bs_sorted:
                 pattern = re.compile(rf"\b{re.escape(en)}\b", re.IGNORECASE)
                 result = pattern.sub(cn, result)
 

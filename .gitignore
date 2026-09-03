@@ -55,3 +55,5 @@ Thumbs.db
 
 # 本地工作文档（superpowers 计划等，不入库）
 /docs/superpowers/
+/docs/《荒野乱斗》中英文数据维护工作流程.md
+/data/brawl_stars_glossary.json

@@ -24,7 +24,8 @@
         "default_tid": 172,
         "default_tags": "转载,YouTube,Marvel SNAP",
         "content_filter_enabled": true,
-        "content_filter_keywords": "Marvel SNAP"
+        "content_filter_keywords": "Marvel SNAP",
+        "glossary_game": "snap"
       }
     },
     "deadlock": {
@@ -50,7 +51,8 @@
       "settings": {
         "default_tid": 171,
         "default_tags": "转载,YouTube,Deadlock",
-        "content_filter_enabled": false
+        "content_filter_enabled": false,
+        "glossary_game": "deadlock"
       }
     }
   }

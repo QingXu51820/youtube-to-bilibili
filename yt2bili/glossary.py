@@ -12,6 +12,7 @@ Usage:
     game_terms = get_snap_game_terms()  # {"On Reveal": "揭示", ...}
 """
 
+import csv
 import json
 import os
 import re
@@ -545,3 +546,89 @@ def get_deadlock_glossary() -> dict[str, str]:
             t.start()
 
         return _deadlock_glossary or {}
+
+
+# ── Brawl Stars Glossary (static data/brawl_stars_glossary.json) ─────
+
+# Subset of game_terms safe to auto-apply to arbitrary subtitle text.
+# Generic common words are excluded (Tank/Support/Assassin/Rare/Epic/...,
+# and game_terms like "Bolt" whose brawler-name meaning wins) — mirrors
+# SNAP's curated auto-apply terms.
+_BS_AUTO_APPLY_GAME_TERMS = [
+    "Star Power", "Hypercharge", "Gadget", "Gear",
+    "Gem Grab", "Showdown", "Solo Showdown", "Duo Showdown", "Brawl Ball",
+    "Heist", "Siege", "Hot Zone", "Knockout", "Wipeout", "Duels", "Bounty",
+    "Starr Drop", "Chaos Drop", "Power Cube", "Brawl Box", "Mega Box",
+    "Trophy Box", "Energy Drink", "Meteor Shower", "Teleporter",
+    "Tier List", "Balance Changes", "Buff", "Nerf", "Brawler",
+    "Gems", "Coins", "Power Points", "Bling", "XP Doublers",
+    "Damage Dealer", "Super Rare",
+]
+
+_brawl_glossary: dict[str, str] | None = None
+_brawl_glossary_lock = threading.Lock()
+
+
+def get_brawl_stars_glossary() -> dict[str, str]:
+    """Return the Brawl Stars EN→CN glossary for translation pre-replacement.
+
+    Reads the static data/brawl_stars_glossary.json (built by
+    tools/update_brawl_stars_glossary.py) — hero names plus a curated subset
+    of game terms, plus multi-word verified ability names.  No network fetch.
+    """
+    global _brawl_glossary
+
+    if not config.BRAWL_STARS_GLOSSARY_ENABLED:
+        return {}
+
+    with _brawl_glossary_lock:
+        if _brawl_glossary is not None:
+            return _brawl_glossary
+
+        terms: dict[str, str] = {}
+        try:
+            data = json.loads(
+                Path(config.BRAWL_STARS_GLOSSARY_CACHE).read_text(encoding="utf-8")
+            )
+            terms.update(data.get("glossary", {}))
+            game_terms = data.get("game_terms", {})
+            for key in _BS_AUTO_APPLY_GAME_TERMS:
+                if key in game_terms:
+                    terms[key] = game_terms[key]
+            _add_bs_multiword_abilities(terms)
+        except Exception:
+            pass
+        _brawl_glossary = terms
+        return terms
+
+
+def _add_bs_multiword_abilities(terms: dict[str, str]) -> None:
+    """Add verified ability names with 2+ space-separated words from the
+    client TID-join table.
+
+    Single-word abilities ("Curveball", "Band-Aid", "Stomper"...) are common
+    English words — too risky for blanket replacement.  Multi-word names
+    ("Fast Forward", "Silver Bullet", "Slick Boots") are Brawl-Stars-specific
+    enough to auto-apply in a BS video.
+    """
+    csv_path = (
+        config.PROJECT_ROOT / "tools" / "_bs_data" / "brawl_stars_abilities_zh_cn.csv"
+    )
+    if not csv_path.exists():
+        return
+    try:
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception:
+        return
+    for r in rows:
+        if r.get("status") != "client_zh_cn+en_verified":
+            continue
+        en = (r.get("item_en") or "").strip()
+        zh = (r.get("item_zh_cn") or "").strip()
+        if len(en.split()) < 2 or not zh or en == zh:
+            continue
+        if en in terms and terms[en] != zh:
+            continue  # keep the existing (brawler-name / curated) mapping
+        if en not in terms:
+            terms[en] = zh
