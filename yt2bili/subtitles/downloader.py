@@ -11,6 +11,7 @@ import copy
 from pathlib import Path
 
 from yt2bili import config
+from yt2bili.subtitles import resegment
 from yt2bili.youtube.downloader import (
     _with_yt_dlp_cookies,
     _yt_dlp_network_opts,
@@ -128,14 +129,64 @@ def _list_languages(video_url: str) -> tuple[dict, dict]:
     return subtitles, auto_captions
 
 
-def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str) -> str | None:
+def _find_subtitle_file(
+    subtitle_dir: str | Path,
+    video_id: str,
+    lang: str,
+    formats: tuple[str, ...] = ("json3", "srt"),
+) -> str | None:
+    """Return the first existing ``{video_id}.{lang}.{fmt}`` file.
+
+    yt-dlp naming for subtitles is ``{id}.{lang}.{ext}``.  Formats are
+    checked in order — json3 (word-level) is preferred over plain srt.
+    """
+    base = Path(subtitle_dir) / f"{video_id}.{lang}"
+    for fmt in formats:
+        candidate = Path(f"{base}.{fmt}")
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _resegment_json3_to_srt(json3_path: str | Path, srt_path: str | Path) -> str | None:
+    """Re-segment a downloaded json3 into the canonical ``.srt`` source file.
+
+    On success the json3 intermediate is deleted and the srt path returned.
+    On any failure the json3 is kept for debugging and ``None`` returned —
+    the caller falls back to a plain srt download.
+    """
+    try:
+        path = resegment.resegment_file(json3_path, srt_path)
+        Path(json3_path).unlink(missing_ok=True)
+        print(f"[字幕] json3 重分段完成: {Path(path).name}")
+        return path
+    except Exception as e:
+        print(f"[字幕] [WARN]json3 重分段失败，回退普通 srt 字幕: {e}")
+        return None
+
+
+def _download_subtitles_for_lang(
+    video_url: str,
+    lang: str,
+    output_template: str,
+    video_id: str,
+    force_srt: bool = False,
+) -> str | None:
     """
     Run yt-dlp to download subtitles for a specific language.
+
+    When ``SUBTITLE_RESEGMENT_ENABLED`` is on (and ``force_srt`` is False),
+    requests json3 word-level captions and re-segments them into
+    sentence-based ``{video_id}.{lang}.srt`` — the canonical source file
+    downstream consumers expect.  Falls back to a plain srt download when
+    json3 is unavailable or re-segmentation fails.
 
     Args:
         video_url: YouTube video URL.
         lang: Language code to download.
         output_template: yt-dlp output template.
+        video_id: YouTube video ID (for file naming).
+        force_srt: Skip the json3/resegment path entirely.
 
     Returns:
         Path to the downloaded subtitle file, or ``None`` if download failed.
@@ -143,6 +194,11 @@ def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str
     from yt_dlp import YoutubeDL
 
     subtitle_dir = str(Path(output_template).parent)
+
+    if force_srt or not config.SUBTITLE_RESEGMENT_ENABLED:
+        sub_format = "srt"
+    else:
+        sub_format = "json3/srt"
 
     ydl_opts = {
         "quiet": True,
@@ -153,7 +209,7 @@ def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str
         "writesubtitles": True,       # Download manual subtitles
         "writeautomaticsub": True,   # Also download auto-generated
         "subtitleslangs": [lang],
-        "subtitlesformat": "srt",    # Prefer SRT format
+        "subtitlesformat": sub_format,
         "outtmpl": output_template,
     }
     ydl_opts.update(copy.deepcopy(_yt_dlp_network_opts()))
@@ -169,14 +225,9 @@ def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str
     ydl_opts["progress_hooks"] = [_progress_hook]
 
     def _download(ydl):
-        info = ydl.extract_info(video_url, download=True)
-        # yt-dlp saves subtitles next to the video; try to find the .srt file
-        if info:
-            info_id = info.get("id", "")
-            # yt-dlp naming for subtitles: {id}.{lang}.srt
-            expected = Path(subtitle_dir) / f"{info_id}.{lang}.srt"
-            if expected.exists():
-                downloaded_path[0] = str(expected)
+        ydl.extract_info(video_url, download=True)
+        # yt-dlp saves subtitles next to the video; find the produced file
+        downloaded_path[0] = _find_subtitle_file(subtitle_dir, video_id, lang)
 
     # Phase 1: try without cookies first (avoids "format not available" errors)
     try:
@@ -202,7 +253,32 @@ def _download_subtitles_for_lang(video_url: str, lang: str, output_template: str
             except Exception as e2:
                 print(f"[字幕] [WARN]字幕下载 fallback 也失败: {e2}")
 
-    return downloaded_path[0]
+    # Authoritative post-chain check (also covers the last-resort bare retry,
+    # whose progress hook may not fire reliably)
+    if not downloaded_path[0]:
+        downloaded_path[0] = _find_subtitle_file(subtitle_dir, video_id, lang)
+
+    path = downloaded_path[0]
+    if not path:
+        return None
+
+    # ── json3 re-segmentation post-processing ────────────────────────
+    if sub_format == "srt":
+        return path  # toggle off or forced srt — old behavior exactly
+
+    if Path(path).suffix == ".json3":
+        srt_path = Path(path).with_suffix(".srt")
+        reseg = _resegment_json3_to_srt(path, srt_path)
+        if reseg:
+            return reseg
+        if srt_path.exists():
+            return str(srt_path)  # defensive: leftover srt from a prior run
+        print("[字幕] [WARN]json3 重分段失败且无 srt，改用普通 srt 下载")
+        return _download_subtitles_for_lang(
+            video_url, lang, output_template, video_id, force_srt=True
+        )
+
+    return path
 
 
 def download_subtitles(video_url: str, video_id: str) -> str | None:
@@ -213,7 +289,8 @@ def download_subtitles(video_url: str, video_id: str) -> str | None:
     1. Extract video info to list available subtitle languages.
     2. Match against ``SUBTITLE_SOURCE_LANGS`` regex patterns.
     3. Prefer manual (author-uploaded) over auto-generated captions.
-    4. Download the matched language as SRT.
+    4. Download the matched language — json3 (re-segmented into sentence-based
+       SRT) when ``SUBTITLE_RESEGMENT_ENABLED``, otherwise plain SRT.
 
     Args:
         video_url: YouTube video URL.
@@ -239,7 +316,7 @@ def download_subtitles(video_url: str, video_id: str) -> str | None:
         return None
 
     print(f"[字幕] 下载 {lang} 字幕...")
-    path = _download_subtitles_for_lang(video_url, lang, output_template)
+    path = _download_subtitles_for_lang(video_url, lang, output_template, video_id)
     if path:
         print(f"[字幕] 下载完成: {Path(path).name}")
     else:

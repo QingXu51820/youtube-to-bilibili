@@ -188,6 +188,9 @@ SUBTITLE_TRANSLATE_WORKERS = _get_int("SUBTITLE_TRANSLATE_WORKERS", 3)  # parall
 # 视频被设为私有 / YouTube 上根本没有字幕轨道时重新生成必然失败，不放弃会每轮白试。
 SUBTITLE_REGEN_MAX_FAILURES = _get_int("SUBTITLE_REGEN_MAX_FAILURES", 3)
 SUBTITLE_UPLOAD_TO_BILIBILI = _get("SUBTITLE_UPLOAD_TO_BILIBILI", "true").lower() == "true"
+# 下载 json3 逐词字幕并按句子边界重分段（改善 DeepSeek 翻译的上下文质量）；
+# json3 不可用或重分段失败时自动回退普通 srt。
+SUBTITLE_RESEGMENT_ENABLED = _get("SUBTITLE_RESEGMENT_ENABLED", "true").lower() == "true"
 SUBTITLE_LAN = _get("SUBTITLE_LAN", "zh")
 SUBTITLE_LAN_DOC = _get("SUBTITLE_LAN_DOC", "中文（简体）")
 SUBTITLE_WAIT_CID_SECONDS = _get_int("SUBTITLE_WAIT_CID_SECONDS", 300)
