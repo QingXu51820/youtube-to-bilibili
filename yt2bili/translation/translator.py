@@ -539,7 +539,8 @@ def classify_content(title: str, description: str, keywords: str, *, channel_tit
             ],
             temperature=0,
             max_tokens=10,
-            extra_body={"thinking": {"type": config.DEEPSEEK_THINKING}},
+            # 分类只回 YES/NO，思考模式会吃掉 max_tokens=10 的预算导致空回复
+            extra_body={"thinking": {"type": "disabled"}},
         )
 
         result = response.choices[0].message.content or ""

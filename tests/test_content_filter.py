@@ -67,7 +67,7 @@ class ContentFilterTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(
-            {"thinking": {"type": translator.config.DEEPSEEK_THINKING}},
+            {"thinking": {"type": "disabled"}},
             fake_openai.last_create_kwargs["extra_body"],
         )
 
