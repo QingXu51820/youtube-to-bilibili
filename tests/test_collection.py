@@ -27,6 +27,7 @@ from yt2bili.bilibili.collection import (
     build_episodes,
     create_collection,
     ensure_collection,
+    fetch_follower_count,
     fetch_video_pages,
     find_collection_by_name,
     list_collections,
@@ -537,6 +538,82 @@ class FetchVideoPagesTests(unittest.TestCase):
                                  {"cid": 200, "part": "P2"}])
 
 
+class FetchFollowerCountTests(unittest.TestCase):
+    def test_returns_follower_from_nav_then_relation_stat(self):
+        responses = [
+            FakeResponse({"code": 0, "data": {"mid": 123456}}),
+            FakeResponse({"code": 0, "data": {"follower": 42}}),
+        ]
+
+        async def handler(method, url, kwargs):
+            if len(client.calls) == 1:  # 当前调用已入 calls，首个即 nav
+                self.assertEqual(url, collection_mod._NAV_URL)
+            else:
+                self.assertEqual(url, collection_mod._RELATION_STAT_URL)
+                self.assertEqual(kwargs["params"]["vmid"], 123456)
+            return responses[len(client.calls) - 1]
+
+        client = FakeAsyncClient(handler)
+        with patch("yt2bili.bilibili.collection.httpx.AsyncClient",
+                   return_value=client):
+            followers = asyncio.run(fetch_follower_count(_credential()))
+        self.assertEqual(followers, 42)
+        self.assertEqual(len(client.calls), 2)
+
+    def test_nav_not_logged_in_raises(self):
+        async def handler(method, url, kwargs):
+            return FakeResponse({"code": -101, "message": "未登录"})
+
+        client = FakeAsyncClient(handler)
+        with patch("yt2bili.bilibili.collection.httpx.AsyncClient",
+                   return_value=client):
+            with self.assertRaises(BilibiliApiError):
+                asyncio.run(fetch_follower_count(_credential()))
+        self.assertEqual(len(client.calls), 1)  # 未登录不再请求粉丝数
+
+    def test_stat_error_raises(self):
+        responses = [
+            FakeResponse({"code": 0, "data": {"mid": 1}}),
+            FakeResponse({"code": -400, "message": "bad"}),  # 账号被封禁等
+        ]
+
+        async def handler(method, url, kwargs):
+            return responses[len(client.calls) - 1]
+
+        client = FakeAsyncClient(handler)
+        with patch("yt2bili.bilibili.collection.httpx.AsyncClient",
+                   return_value=client):
+            with self.assertRaises(BilibiliApiError):
+                asyncio.run(fetch_follower_count(_credential()))
+        self.assertEqual(len(client.calls), 2)
+
+    def test_missing_mid_raises_runtime_error(self):
+        async def handler(method, url, kwargs):
+            return FakeResponse({"code": 0, "data": {}})
+
+        client = FakeAsyncClient(handler)
+        with patch("yt2bili.bilibili.collection.httpx.AsyncClient",
+                   return_value=client):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(fetch_follower_count(_credential()))
+        self.assertEqual(len(client.calls), 1)  # 缺 mid 视为无法验证，不再请求
+
+    def test_missing_follower_raises_runtime_error(self):
+        responses = [
+            FakeResponse({"code": 0, "data": {"mid": 1}}),
+            FakeResponse({"code": 0, "data": {}}),
+        ]
+
+        async def handler(method, url, kwargs):
+            return responses[len(client.calls) - 1]
+
+        client = FakeAsyncClient(handler)
+        with patch("yt2bili.bilibili.collection.httpx.AsyncClient",
+                   return_value=client):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(fetch_follower_count(_credential()))
+
+
 class ProcessPendingCollectionsTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -773,6 +850,85 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
         self.assertEqual((added, pending, failed), (2, 2, 0))
         self.assertEqual(add.await_count, 3)  # 第三条撞限流后不再尝试第四条
 
+    def test_sweep_stops_round_when_followers_below_threshold(self):
+        """回归：粉丝 <100 无法创建合集 → 只查一次粉丝、打一条提示、整轮暂停。"""
+        entries = []
+        for i in range(2):
+            entry = self._entry()
+            entry["video_id"] = f"v{i}"
+            entry["bvid"] = f"BV{i}"
+            entries.append(entry)
+        self.queue.write_text(json.dumps(entries), encoding="utf-8")
+        buf = io.StringIO()
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "fetch_video_pages",
+                          AsyncMock(return_value=[{"cid": 100, "part": "P1"}])), \
+             patch.object(collection_mod, "list_collections",
+                          AsyncMock(return_value=[])), \
+             patch.object(collection_mod, "fetch_follower_count",
+                          AsyncMock(return_value=50)) as followers, \
+             patch.object(collection_mod, "upload_cover") as up, \
+             patch.object(collection_mod, "create_collection") as create, \
+             patch.object(collection_mod, "add_video_to_collection") as add, \
+             contextlib.redirect_stdout(buf):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0
+            )
+        self.assertEqual((added, pending, failed), (0, 2, 0))
+        followers.assert_awaited_once()
+        up.assert_not_called()
+        create.assert_not_called()
+        add.assert_not_called()
+        text = buf.getvalue()
+        self.assertIn("⏸️", text)
+        self.assertIn("粉丝数 50", text)
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(entries[0]["status"], "pending")
+        self.assertEqual(entries[0]["attempts"], 1)  # 触发条目照常计次
+        self.assertIn("不足 100", entries[0]["last_error"])
+        self.assertEqual(entries[1]["attempts"], 0)  # 余下条目未被触碰
+        self.assertEqual(entries[1]["status"], "pending")
+
+    def test_sweep_creates_missing_collection_when_followers_ok(self):
+        """粉丝达标（=100 边界）→ 照常创建缺失合集并归入。"""
+        self.queue.write_text(json.dumps([self._entry()]), encoding="utf-8")
+        after_create = [CollectionInfo(season_id=9, title="Bynx", section_id=10)]
+        buf = io.StringIO()
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "list_collections",
+                          side_effect=[[], after_create]), \
+             patch.object(collection_mod, "fetch_follower_count",
+                          AsyncMock(return_value=100)), \
+             patch.object(collection_mod, "upload_cover",
+                          AsyncMock(return_value="http://cov")), \
+             patch.object(collection_mod, "create_collection",
+                          AsyncMock(return_value=9)) as create, \
+             patch.object(collection_mod, "fetch_video_pages",
+                          AsyncMock(return_value=[{"cid": 100, "part": "P1"}])), \
+             patch.object(collection_mod, "add_video_to_collection",
+                          AsyncMock(return_value={"code": 0})) as add, \
+             patch.object(collection_mod, "_reorder_touched_collections",
+                          AsyncMock()) as reorder, \
+             patch.object(collection_mod, "_COLLECTION_ADD_DELAY", 0.01), \
+             contextlib.redirect_stdout(buf):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0
+            )
+        self.assertEqual((added, pending, failed), (1, 0, 0))
+        create.assert_awaited_once_with(
+            self.cred, "Bynx", "http://cov"
+        )
+        add.assert_awaited_once()
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(entries[0]["status"], "added")
+        self.assertIn("已归入合集", buf.getvalue())
+
 
 class AddVideoToCollectionTests(unittest.TestCase):
     def test_posts_episodes_json(self):
@@ -813,6 +969,8 @@ class EnsureCollectionTests(unittest.TestCase):
         after_create = [CollectionInfo(season_id=9, title="New", section_id=10)]
         with patch.object(collection_mod, "list_collections",
                           side_effect=[empty, after_create]) as lst, \
+             patch.object(collection_mod, "fetch_follower_count",
+                          AsyncMock(return_value=100)) as followers, \
              patch.object(collection_mod, "upload_cover",
                           AsyncMock(return_value="http://cov")) as up, \
              patch.object(collection_mod, "create_collection",
@@ -824,16 +982,51 @@ class EnsureCollectionTests(unittest.TestCase):
         up.assert_awaited_once_with(_credential(), "/tmp/x.jpg")
         create.assert_awaited_once_with(_credential(), "New", "http://cov")
         self.assertEqual(lst.call_count, 2)
+        followers.assert_awaited_once()
 
     def test_raises_when_created_but_not_found(self):
         with patch.object(collection_mod, "list_collections",
                           side_effect=[[], []]), \
+             patch.object(collection_mod, "fetch_follower_count",
+                          AsyncMock(return_value=100)), \
              patch.object(collection_mod, "upload_cover",
                           AsyncMock(return_value="http://cov")), \
              patch.object(collection_mod, "create_collection",
                           AsyncMock(return_value=9)):
             with self.assertRaises(RuntimeError):
                 asyncio.run(ensure_collection(_credential(), "New", None))
+
+    def test_below_threshold_raises_gate_skips_cover_and_create(self):
+        with patch.object(collection_mod, "list_collections",
+                          AsyncMock(return_value=[])), \
+             patch.object(collection_mod, "fetch_follower_count",
+                          AsyncMock(return_value=50)) as followers, \
+             patch.object(collection_mod, "upload_cover") as up, \
+             patch.object(collection_mod, "create_collection") as create:
+            with self.assertRaises(
+                    collection_mod.CollectionFollowerGateError
+            ) as ctx:
+                asyncio.run(ensure_collection(_credential(), "New", None))
+        self.assertIn("粉丝数 50", str(ctx.exception))
+        self.assertIn("不足 100", str(ctx.exception))
+        followers.assert_awaited_once()
+        up.assert_not_called()
+        create.assert_not_called()
+
+    def test_follower_fetch_failure_propagates_not_gate(self):
+        """粉丝数获取失败 → 按"无法验证"传播（pending 重试），不闸也不创建。"""
+        with patch.object(collection_mod, "list_collections",
+                          AsyncMock(return_value=[])), \
+             patch.object(collection_mod, "fetch_follower_count",
+                          AsyncMock(side_effect=BilibiliApiError(
+                              "获取粉丝数失败: x (code=-1)", code=-1
+                          ))), \
+             patch.object(collection_mod, "upload_cover") as up, \
+             patch.object(collection_mod, "create_collection") as create:
+            with self.assertRaises(BilibiliApiError):
+                asyncio.run(ensure_collection(_credential(), "New", None))
+        up.assert_not_called()
+        create.assert_not_called()
 
 
 class AddUploadedVideoTests(unittest.TestCase):

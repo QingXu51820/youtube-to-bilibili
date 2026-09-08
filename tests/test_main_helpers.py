@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from yt2bili import config
 from yt2bili import main as main_mod
 from yt2bili import profile as profile_mod
-from yt2bili.bilibili.collection import CollectionInfo
+from yt2bili.bilibili.collection import CollectionFollowerGateError, CollectionInfo
 from yt2bili.bilibili.uploader import UploadResult
 from yt2bili.main import ProcessResult, _cleanup_old_runs, _write_run_report
 from yt2bili.profile import (
@@ -228,6 +228,39 @@ class CollectionsReportTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("已创建合集「MarvelSnap」", text)
         self.assertIn("(id=9)", text)
+
+    def test_create_missing_gate_prints_skip_and_stops(self):
+        """回归：粉丝 <100 → 打印 ⏸️ 跳过，且只问一次、不逐个失败。"""
+        prof = self._profile()  # Bynx(已匹配) + MarvelSnap + 第三个都待新建
+        prof.youtube.channels.append(
+            YouTubeChannel("UC3", "DeadlockPlays", collection="Deadlock")
+        )
+        cred = SimpleNamespace(sessdata="s", bili_jct="j")
+        existing = [CollectionInfo(season_id=7, title="Bynx", section_id=8)]
+        gate = CollectionFollowerGateError(
+            "创建合集「MarvelSnap」跳过：账号粉丝数 42 不足 100"
+            "（B站要求粉丝 ≥100 才能创建合集）"
+        )
+        with patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=prof), \
+             patch.object(main_mod.auth, "get_credential",
+                          return_value=cred), \
+             patch("yt2bili.bilibili.collection.sync_list_collections",
+                   return_value=existing), \
+             patch("yt2bili.bilibili.collection.ensure_collection",
+                   new=AsyncMock(side_effect=gate)) as ensure:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = main_mod._run_collections_command(create_missing=True)
+        text = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("⏸️", text)
+        self.assertIn("粉丝数 42", text)
+        self.assertNotIn("❌", text)
+        self.assertEqual(ensure.await_count, 1)  # 账号级限制 → 首个闸后即停
+        self.assertIn("仍缺失", text)  # 尾部对照表如实显示未创建
 
 
 class ProcessVideoCollectionWiringTests(unittest.TestCase):

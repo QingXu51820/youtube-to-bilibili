@@ -655,6 +655,7 @@ def _run_collections_command(create_missing: bool = False) -> int:
     import asyncio
 
     from yt2bili.bilibili.collection import (
+        CollectionFollowerGateError,
         ensure_collection,
         resolve_channel_collections,
         sync_list_collections,
@@ -699,6 +700,10 @@ def _run_collections_command(create_missing: bool = False) -> int:
                 ensure_collection(credential, m.collection_name, None)
             )
             print(f"  ➕ 已创建合集「{m.collection_name}」 (id={info.season_id})")
+        except CollectionFollowerGateError as e:
+            # 粉丝数不足是账号级限制：其余缺失合集本轮同样无法创建，直接结束
+            print(f"  ⏸️ {e}")
+            break
         except Exception as e:
             print(f"  ❌ 创建合集「{m.collection_name}」失败: {e}")
 

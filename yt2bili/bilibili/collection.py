@@ -39,6 +39,8 @@ _ADD_EPISODES_URL = (
 _COVER_UP_URL = "https://member.bilibili.com/x/vu/web/cover/up"
 _PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
 _VIDEO_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
+_NAV_URL = "https://api.bilibili.com/x/web-interface/nav"          # 登录态 → 自己的 mid
+_RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"    # 公开接口 → 粉丝数
 
 _AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
@@ -50,6 +52,7 @@ _REORDER_DELAY = 3.0               # 每次合集重排提交之间的间隔（�
 _REORDER_VIEW_DELAY = 0.2          # 反查 B站 视频信息的最小间隔（秒）
 _RATE_LIMIT_CODES = (20111, 20113)  # 合集编辑过于频繁 / 手速太快啦～
 _RATE_LIMIT_COOLDOWN = 300         # 限流条目重试冷却（秒）
+_MIN_FOLLOWERS_TO_CREATE = 100     # B站要求粉丝 ≥100 才能创建合集；低于该值不尝试创建
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -63,6 +66,14 @@ class BilibiliApiError(RuntimeError):
     def __init__(self, message: str, code: int = -1):
         super().__init__(message)
         self.code = code
+
+
+class CollectionFollowerGateError(BilibiliApiError):
+    """账号粉丝数不足 _MIN_FOLLOWERS_TO_CREATE，当前无法创建合集。
+
+    靠类型区分（code 无意义），消息不带 20111/20113 字样以免被
+    ``_is_rate_limited`` 误判为限流。粉丝达标后自动恢复，不会把条目标 failed。
+    """
 
 
 # ── Data model ──────────────────────────────────────────────────────────
@@ -332,6 +343,29 @@ async def create_collection(credential, title: str, cover_url: str) -> int:
         resp = await client.post(_CREATE_COLLECTION_URL, data=body)
         data = _check_response(resp, "创建合集")
     return int(data.get("data") or 0)
+
+
+async def fetch_follower_count(credential) -> int:
+    """
+    Return the credential account's B站 粉丝数.
+
+    两次轻量 GET（公开接口，无需 wbi）：``x/web-interface/nav``（由
+    SESSDATA cookie 鉴权）返回 ``data.mid``，再以 ``x/relation/stat?vmid=``
+    返回 ``data.follower``。失败（网络/API/缺字段）一律抛出，调用方按
+    "无法验证" 处理；只有确认低于门槛时才抛 CollectionFollowerGateError。
+    """
+    async with _client(credential) as client:
+        nav = await client.get(_NAV_URL)
+        data = _check_response(nav, "获取账号信息")
+        mid = int((data.get("data") or {}).get("mid") or 0)
+        if not mid:
+            raise RuntimeError("获取账号信息失败: nav 响应缺少 mid")
+        stat = await client.get(_RELATION_STAT_URL, params={"vmid": mid})
+        data = _check_response(stat, "获取粉丝数")
+    body = data.get("data") or {}
+    if "follower" not in body:
+        raise RuntimeError("获取粉丝数失败: relation/stat 响应缺少 follower")
+    return int(body["follower"])
 
 
 async def fetch_video_pages(credential, bvid: str) -> list[dict]:
@@ -1286,6 +1320,16 @@ async def ensure_collection(
     if found is not None:
         return found, False
 
+    # 粉丝 <100 的账号无法创建合集：确认低于门槛就抛闸（每轮首次缺失
+    # 合集触发一次粉丝查询），不再执行 upload_cover/season.add 的无用重试。
+    followers = await fetch_follower_count(credential)
+    if followers < _MIN_FOLLOWERS_TO_CREATE:
+        raise CollectionFollowerGateError(
+            f"创建合集「{name}」跳过：账号粉丝数 {followers} 不足 "
+            f"{_MIN_FOLLOWERS_TO_CREATE}（B站要求粉丝 ≥100 才能创建合集），"
+            "本轮不再尝试创建；粉丝达标后（每小时自动复查）将自动恢复"
+        )
+
     cover_path = cover_path or make_placeholder_cover(name)
     cover_url = await upload_cover(credential, cover_path)
     season_id = await create_collection(credential, name, cover_url)
@@ -1413,6 +1457,14 @@ async def _sweep_pending_collections(
                 bvid,
                 int(entry.get("aid", 0) or 0),
             )
+        except CollectionFollowerGateError as e:
+            # 粉丝 <100 无法创建合集：账号级限制，每轮只查一次粉丝数。
+            # 触发条目及余下条目保持 pending（不标 failed），粉丝达标后自动恢复。
+            entry["status"] = "pending"
+            entry["last_error"] = str(e)
+            changed = True
+            print(f"[合集] ⏸️ {e}")
+            break
         except BilibiliApiError as e:
             entry["status"] = "pending"
             entry["last_error"] = str(e)
