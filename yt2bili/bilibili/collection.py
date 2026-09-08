@@ -45,6 +45,7 @@ _DEFAULT_TIMEOUT = 15.0
 _COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（秒）
 _COLLECTION_ADD_DELAY = 3.0        # 每次补归提交之间的间隔（秒），避免触发 B站 限流
 _COLLECTION_SWEEP_BUDGET = 30      # 单轮最多补归条数，剩余留待下一轮
+_MAX_404_ATTEMPTS = 24             # 稿件 -404（不存在/已删除）连续重试上限，超过则放弃，防止死循环
 _REORDER_DELAY = 3.0               # 每次合集重排提交之间的间隔（秒）
 _REORDER_VIEW_DELAY = 0.2          # 反查 B站 视频信息的最小间隔（秒）
 _RATE_LIMIT_CODES = (20111, 20113)  # 合集编辑过于频繁 / 手速太快啦～
@@ -1365,8 +1366,20 @@ async def _sweep_pending_collections(
             pages = await fetch_video_pages(credential, bvid)
         except BilibiliApiError as e:
             if e.code == -404:
-                entry["status"] = "pending"
-                entry["last_error"] = ""
+                if int(entry.get("attempts", 0) or 0) >= _MAX_404_ATTEMPTS:
+                    # 已连续一天以上查不到分 P：稿件已被删除/下架，不再重试
+                    entry["status"] = "failed"
+                    entry["last_error"] = (
+                        f"稿件不存在（-404）连续 {_MAX_404_ATTEMPTS} 次查询无果，"
+                        "视为已删除，放弃归入合集"
+                    )
+                    print(
+                        f"[合集] ⚠️ {bvid} 稿件不存在（-404），已放弃归入合集"
+                        f"「{entry.get('collection_name', '')}」"
+                    )
+                else:
+                    entry["status"] = "pending"  # 可能刚上传还在过审，下轮再试
+                    entry["last_error"] = ""
             else:
                 entry["status"] = "failed"
                 entry["last_error"] = str(e)

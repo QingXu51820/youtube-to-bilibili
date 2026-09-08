@@ -590,6 +590,29 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
         self.assertEqual(entries[0]["status"], "pending")
         self.assertEqual(entries[0]["attempts"], 1)
 
+    def test_404_gives_up_after_max_attempts(self):
+        # 连续 -404 超过上限（如稿件已被 B站 删除）→ failed，不再无限重试
+        entry = self._entry(attempts=collection_mod._MAX_404_ATTEMPTS - 1)
+        self.queue.write_text(json.dumps([entry]), encoding="utf-8")
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(
+                 collection_mod, "fetch_video_pages",
+                 AsyncMock(side_effect=BilibiliApiError(
+                     "获取分P信息失败: 啥都木有 (code=-404)", code=-404
+                 )),
+             ):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0
+            )
+        self.assertEqual((added, pending, failed), (0, 0, 1))
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(entries[0]["status"], "failed")
+        self.assertEqual(entries[0]["attempts"], collection_mod._MAX_404_ATTEMPTS)
+        self.assertIn("视为已删除", entries[0]["last_error"])
+
     def test_auth_error_marks_failed(self):
         self.queue.write_text(json.dumps([self._entry()]), encoding="utf-8")
         with patch.object(collection_mod, "pending_collections_path",
