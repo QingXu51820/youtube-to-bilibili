@@ -67,6 +67,71 @@ class BuildDescriptionTests(unittest.TestCase):
         result = _build_description("desc", huge_title, "原")
         self.assertTrue(result.startswith("原标题: 原"))
 
+    def test_pure_url_lines_dropped(self):
+        desc = "Intro text\nhttps://example.com/some/page\nMore text"
+        result = _build_description(desc, "译", "原")
+        self.assertNotIn("example.com", result)
+        self.assertIn("Intro text", result)
+        self.assertIn("More text", result)
+
+    def test_inline_url_and_email_lines_dropped(self):
+        """含外链或邮箱的行整行丢弃，其余内容原样保留。"""
+        desc = (
+            "Join us on Twitch! https://www.twitch.tv/alexandercoccia\n"
+            "Business Inquires: lyngatemediagroup@gmail.com\n"
+            "Plain sentence stays.\n"
+            "Sign up via http://snap.untapped.gg/?utm_medium=affiliate (link!)"
+        )
+        result = _build_description(desc, "译", "原")
+        self.assertNotIn("twitch.tv", result)
+        self.assertNotIn("gmail.com", result)
+        self.assertNotIn("untapped.gg", result)
+        self.assertIn("Plain sentence stays.", result)
+
+    def test_all_lines_dropped_omits_section(self):
+        desc = "https://a.example\nwww.b.example\nuser@c.example"
+        result = _build_description(desc, "译", "原")
+        self.assertNotIn("原视频简介", result)
+        self.assertNotIn("example", result)
+
+    def test_blank_runs_collapsed_after_dropped_lines(self):
+        desc = "Intro\n\nhttps://a.example\n\nOutro"
+        result = _build_description(desc, "译", "原")
+        self.assertEqual(result, "原标题: 原\n翻译标题: 译\n\n原视频简介:\nIntro\n\nOutro")
+
+    def test_kluh_style_description_has_no_links_left(self):
+        """真实失败样例（21010）：Coccia 卡牌评测简介，含 Twitch/邮箱/Untapped 联盟链接。"""
+        desc = (
+            "Marvel Snap's newest card, KLUH is here! Is it good? Find out in this video!\n"
+            "\n"
+            "Join us on Twitch! https://www.twitch.tv/alexandercoccia\n"
+            "\n"
+            "Business Inquires: lyngatemediagroup@gmail.com\n"
+            "\n"
+            "-- DECK CODES--\n"
+            "KLUH OVE\n"
+            "https://snap.untapped.gg/en/decks/Abomination-Cyclops-Wasp_KLUH%20OVE?utm_medium=affiliate&utm_campaign=alexcoccia\n"
+            "\n"
+            "Kluh's Nightmare\n"
+            "https://snap.untapped.gg/en/decks/AntiPolarMagneto-TyphoidMary_Kluh's%20Nightmare?utm_medium=affiliate&utm_campaign=alexcoccia\n"
+            "\n"
+            "Thumbnail art by Arlo! https://twitter.com/kenarlo_\n"
+            "--------------------------\n"
+            "Marvel Snap: https://www.marvelsnap.com/\n"
+            "--------------------------\n"
+            "Timestamps\n"
+            "0:00 is Kluh good?\n"
+            "#marvelsnap #marvelsnapcreator"
+        )
+        result = _build_description(desc, "KLUH 的诚实评测 | Marvel SNAP 初印象", "An HONEST REVIEW of KLUH | Marvel Snap First Impressions")
+        self.assertNotIn("http", result)
+        self.assertNotIn("gmail", result)
+        self.assertNotIn("www.", result)
+        # 文字内容保留，卡名行（无链接）不受影响
+        self.assertIn("Marvel Snap's newest card, KLUH is here!", result)
+        self.assertIn("0:00 is Kluh good?", result)
+        self.assertIn("KLUH OVE", result)
+
 
 class EnsureCoverTests(unittest.TestCase):
     def test_valid_cover_returns_as_is(self):

@@ -6,6 +6,7 @@ Uploads videos with copyright=2 (转载/repost).
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 
 import tqdm
@@ -99,6 +100,18 @@ def _build_credential(credential: Credential | None = None):
 _TRUNCATION_SUFFIX = "..."
 _RESERVE_BYTES = len(_TRUNCATION_SUFFIX.encode("utf-8"))  # 3
 
+# B站 简介校验会拒绝含外链/联系方式的内容（接口错误 21010 描述信息不合法）。
+# 原视频简介区按整行过滤：命中 URL / www 域名 / 邮箱地址的行直接丢弃。
+_LINK_LINE_RE = re.compile(
+    r"https?://\S+|www\.\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+",
+    re.IGNORECASE,
+)
+
+
+def _is_link_line(line: str) -> bool:
+    """True if a description line carries an external link or email address."""
+    return bool(_LINK_LINE_RE.search(line))
+
 
 def _build_description(
     original_description: str,
@@ -116,6 +129,10 @@ def _build_description(
     as many *complete* lines of the original description as fit within
     `byte_limit` UTF-8 bytes are appended.  Lines are never split mid-way;
     if truncation is needed a trailing "..." is added.
+
+    Lines carrying external links (URLs, www domains, email addresses) are
+    dropped whole — B站 rejects such descriptions with error 21010
+    (描述信息不合法); the 转载 source link lives in VideoMeta.source instead.
     """
     # ── header (title lines only, no description section yet) ──────────
     header_parts = []
@@ -127,7 +144,22 @@ def _build_description(
     if not original_description:
         return header
 
-    desc_lines = original_description.strip().split("\n")
+    desc_lines = [
+        line
+        for line in original_description.strip().split("\n")
+        if not _is_link_line(line)
+    ]
+
+    # Collapse blank runs left behind by dropped lines, and drop any
+    # leading blanks so the section starts directly with content.
+    packed: list[str] = []
+    for line in desc_lines:
+        if line == "":
+            if packed and packed[-1] != "":
+                packed.append(line)
+        else:
+            packed.append(line)
+    desc_lines = packed
 
     # ── prefix = header + section label ──────────────────────────────
     prefix = header + "\n\n原视频简介:\n"
