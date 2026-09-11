@@ -690,6 +690,69 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
         self.assertEqual(entries[0]["attempts"], collection_mod._MAX_404_ATTEMPTS)
         self.assertIn("视为已删除", entries[0]["last_error"])
 
+    def test_given_up_404_entries_skipped_in_later_rounds(self):
+        """回归：-404 已放弃（failed + 标记）的条目不再每轮重复查询/打印。"""
+        entry = self._entry(attempts=collection_mod._MAX_404_ATTEMPTS)
+        entry["status"] = "failed"
+        entry["last_error"] = (
+            f"稿件不存在（-404）连续 {collection_mod._MAX_404_ATTEMPTS} 次查询无果，"
+            f"{collection_mod._404_GIVE_UP_MARKER}"
+        )
+        self.queue.write_text(json.dumps([entry]), encoding="utf-8")
+        fetch = AsyncMock(return_value=[{"cid": 100, "part": "P1"}])
+        buf = io.StringIO()
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "fetch_video_pages", new=fetch), \
+             contextlib.redirect_stdout(buf):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0
+            )
+        self.assertEqual((added, pending, failed), (0, 0, 1))
+        fetch.assert_not_awaited()
+        self.assertNotIn("已放弃归入合集", buf.getvalue())
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(entries[0]["attempts"], collection_mod._MAX_404_ATTEMPTS)
+        self.assertEqual(entries[0]["status"], "failed")
+
+    def test_404_giveup_prints_first_only_and_summarizes(self):
+        """回归：同轮多条 -404 撞线 → 只打第一条 + 汇总，不再 14 连刷。"""
+        entries = []
+        for i in range(3):
+            entry = self._entry(
+                attempts=collection_mod._MAX_404_ATTEMPTS - 1
+            )
+            entry["video_id"] = f"v{i}"
+            entry["bvid"] = f"BV{i}"
+            entries.append(entry)
+        self.queue.write_text(json.dumps(entries), encoding="utf-8")
+        buf = io.StringIO()
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(
+                 collection_mod, "fetch_video_pages",
+                 AsyncMock(side_effect=BilibiliApiError(
+                     "获取分P信息失败: 啥都木有 (code=-404)", code=-404
+                 )),
+             ), \
+             contextlib.redirect_stdout(buf):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=0
+            )
+        self.assertEqual((added, pending, failed), (0, 0, 3))
+        text = buf.getvalue()
+        self.assertEqual(text.count("稿件不存在（-404），已放弃归入合集"), 1)
+        self.assertIn("另有 2 条稿件同样不存在（-404）", text)
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertTrue(all(e["status"] == "failed" for e in entries))
+        self.assertTrue(
+            all(e["attempts"] == collection_mod._MAX_404_ATTEMPTS for e in entries)
+        )
+
     def test_auth_error_marks_failed(self):
         self.queue.write_text(json.dumps([self._entry()]), encoding="utf-8")
         with patch.object(collection_mod, "pending_collections_path",

@@ -48,6 +48,7 @@ _COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（�
 _COLLECTION_ADD_DELAY = 3.0        # 每次补归提交之间的间隔（秒），避免触发 B站 限流
 _COLLECTION_SWEEP_BUDGET = 30      # 单轮最多补归条数，剩余留待下一轮
 _MAX_404_ATTEMPTS = 24             # 稿件 -404（不存在/已删除）连续重试上限，超过则放弃，防止死循环
+_404_GIVE_UP_MARKER = "视为已删除，放弃归入合集"  # -404 放弃条目的 last_error 标记（后续轮次跳过）
 _REORDER_DELAY = 3.0               # 每次合集重排提交之间的间隔（秒）
 _REORDER_VIEW_DELAY = 0.2          # 反查 B站 视频信息的最小间隔（秒）
 _RATE_LIMIT_CODES = (20111, 20113)  # 合集编辑过于频繁 / 手速太快啦～
@@ -1385,9 +1386,15 @@ async def _sweep_pending_collections(
     now = datetime.now(timezone.utc)
     changed = False
     added_count = 0
+    gave_up_404 = 0
     touched: dict[int, tuple[int, str]] = {}
     for entry in entries:
         if entry.get("status") == "added":
+            continue
+        if entry.get("status") == "failed" and _404_GIVE_UP_MARKER in (
+                entry.get("last_error") or ""):
+            # -404 已放弃（稿件删除/下架）：标记后永不再试，避免每小时
+            # 重复 -404 查询与重复打印
             continue
         last = _parse_iso(entry.get("last_attempt_at") or "")
         if last is not None and \
@@ -1411,16 +1418,21 @@ async def _sweep_pending_collections(
         except BilibiliApiError as e:
             if e.code == -404:
                 if int(entry.get("attempts", 0) or 0) >= _MAX_404_ATTEMPTS:
-                    # 已连续一天以上查不到分 P：稿件已被删除/下架，不再重试
+                    # 已连续一天以上查不到分 P：稿件已被删除/下架，放弃归入。
+                    # 条目带 _404_GIVE_UP_MARKER 标记 failed，后续轮次直接跳过，
+                    # 不会每小时重复请求/重复打印。
                     entry["status"] = "failed"
                     entry["last_error"] = (
                         f"稿件不存在（-404）连续 {_MAX_404_ATTEMPTS} 次查询无果，"
-                        "视为已删除，放弃归入合集"
+                        f"{_404_GIVE_UP_MARKER}"
                     )
-                    print(
-                        f"[合集] ⚠️ {bvid} 稿件不存在（-404），已放弃归入合集"
-                        f"「{entry.get('collection_name', '')}」"
-                    )
+                    changed = True
+                    gave_up_404 += 1
+                    if gave_up_404 == 1:  # 同轮多条撞线只打第一条，循环后补汇总
+                        print(
+                            f"[合集] ⚠️ {bvid} 稿件不存在（-404），已放弃归入合集"
+                            f"「{entry.get('collection_name', '')}」"
+                        )
                 else:
                     entry["status"] = "pending"  # 可能刚上传还在过审，下轮再试
                     entry["last_error"] = ""
@@ -1506,6 +1518,11 @@ async def _sweep_pending_collections(
             break
         await asyncio.sleep(_COLLECTION_ADD_DELAY)
 
+    if gave_up_404 > 1:
+        print(
+            f"[合集] ⚠️ 另有 {gave_up_404 - 1} 条稿件同样不存在（-404），"
+            "本轮已放弃归入合集"
+        )
     if changed:
         save_pending_collections(queue_path, entries)
     if reorder_touched and touched:
