@@ -121,7 +121,7 @@ from yt2bili.media.video_splitter import split_video
 from yt2bili.bilibili import auth
 from yt2bili.subtitles.downloader import download_subtitles
 from yt2bili.subtitles.parser import parse_subtitle
-from yt2bili.subtitles.queue import enqueue_translation
+from yt2bili.subtitles.queue import enqueue_translation, find_existing_translation
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -260,6 +260,16 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
             subtitle_source_error = "无法从视频信息获取 video_id"
             return
         try:
+            # Retry of a video whose translation already finished → reuse the
+            # existing SRT instead of re-downloading captions and re-running
+            # every DeepSeek batch (write_srt is atomic, so presence = done).
+            reuse_path = find_existing_translation(video_id)
+            if reuse_path:
+                print(f"[字幕] 已有翻译好的字幕，跳过下载与重译: {Path(reuse_path).name}")
+                subtitle_job = enqueue_translation(
+                    video_id, [], reuse_path, reuse_path=reuse_path
+                )
+                return
             source_path = download_subtitles(url, video_id)
             if not source_path:
                 raise RuntimeError("YouTube 上未找到匹配的字幕语言")
