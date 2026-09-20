@@ -9,7 +9,7 @@ from pathlib import Path
 
 from yt2bili.subtitles import downloader
 from yt2bili.subtitles import resegment
-from yt2bili.subtitles.parser import parse_srt
+from yt2bili.subtitles.parser import Cue, parse_srt
 from yt2bili.subtitles.resegment import resegment_file, resegment_json3
 
 
@@ -169,6 +169,42 @@ class ResegmentJson3Tests(unittest.TestCase):
         cues = resegment_json3(j)
         self.assertEqual(cues[0].text, "こんにちは世界")
 
+    def test_manual_caption_uses_window_duration(self):
+        # 人工字幕：整句一个 seg 且无 tOffsetMs —— 时长必须取窗口自身的
+        # dDurationMs，不能给整句编一个 ~0.35s 的"单词"时长（否则每句只闪现
+        # 0.43s）
+        j = _json3(_event(950, 2350, [_seg("Get Trash Goblin Darryl")]))
+        cues = resegment_json3(j)
+        self.assertEqual(len(cues), 1)
+        self.assertAlmostEqual(cues[0].start, 0.95)
+        self.assertAlmostEqual(cues[0].end, 3.38)
+        self.assertGreater(cues[0].end - cues[0].start, 2.0)
+
+    def test_manual_caption_windows_merge_into_sentence(self):
+        # 人工字幕窗口之间只隔 33ms，句子未结束 → 合并成一句（不再复现
+        # YouTube 的窗口切分），且窗口内的换行折叠为空格
+        j = _json3(
+            _event(950, 2350, [_seg("Get Trash Goblin Darryl\nand all of these rewards")]),
+            _event(3333, 1350, [_seg("by working together as a community.")]),
+        )
+        cues = resegment_json3(j)
+        self.assertEqual(len(cues), 1)
+        self.assertEqual(
+            cues[0].text,
+            "Get Trash Goblin Darryl and all of these rewards "
+            "by working together as a community.",
+        )
+
+    def test_manual_caption_marker_window_standalone(self):
+        # 无 tOffsetMs 的窗口整体是标记 → 独立成条
+        j = _json3(
+            _event(0, 2000, [_seg("a b")]),
+            _event(2000, 500, [_seg("[Music]")]),
+            _event(4000, 1000, [_seg("c d")]),
+        )
+        cues = resegment_json3(j)
+        self.assertEqual(_texts(cues), ["a b", "[Music]", "c d"])
+
     def test_empty_events_returns_empty_list(self):
         self.assertEqual(resegment_json3('{"events": []}'), [])
 
@@ -203,6 +239,60 @@ class ResegmentFileTests(unittest.TestCase):
             ret = resegment_file(p)
             self.assertTrue(Path(ret).exists())
             self.assertTrue(Path(ret).name.endswith(".reseg.srt"))
+
+
+# ── 时长自检（防"字幕一闪而过"传出去） ────────────────────────────────
+
+class TimingDefectTests(unittest.TestCase):
+    """字幕在处理阶段就要发现时长崩坏，而不是等上传后才被观众发现。
+
+    事故原型：人工字幕窗口没有逐词偏移，每句都吃了一个 ~0.35s 的"单词"
+    估算 → 每句停留 0.43s，整片字幕一闪而过，直到观众反馈才暴露。
+    """
+
+    @staticmethod
+    def _cues(durations):
+        return [
+            Cue(index=i + 1, start=i * 2.0, end=i * 2.0 + d, text=f"line {i}")
+            for i, d in enumerate(durations)
+        ]
+
+    def test_broken_median_is_reported(self):
+        reason = resegment.timing_defect(self._cues([0.43] * 6))
+        self.assertIsNotNone(reason)
+        self.assertIn("0.43", reason)
+
+    def test_normal_median_passes(self):
+        # 真实数据实测：快节奏视频 1.27s，普通视频 4.06s
+        for d in (1.27, 4.06):
+            self.assertIsNone(resegment.timing_defect(self._cues([d] * 6)), d)
+
+    def test_short_sample_is_not_judged(self):
+        # 条数太少分不清"短片"和"坏数据"，不判罚
+        self.assertIsNone(resegment.timing_defect(self._cues([0.43, 0.43, 0.43])))
+
+    def test_boundary(self):
+        self.assertIsNotNone(
+            resegment.timing_defect(self._cues([resegment.MIN_MEDIAN_S - 0.1] * 5)))
+        self.assertIsNone(
+            resegment.timing_defect(self._cues([resegment.MIN_MEDIAN_S + 0.1] * 5)))
+
+    def test_resegment_file_refuses_broken_output(self):
+        """坏数据必须在写文件之前抛错，且不留半成品。"""
+        with tempfile.TemporaryDirectory() as d:
+            # 词级 json3 但 tOffsetMs 全是 0（脏数据）→ 退化成 DEFAULT_GAP_S
+            events = [
+                _event(i * 3000, 2500, [_seg(f"w{j}", 0) for j in range(3)])
+                for i in range(6)
+            ]
+            p = Path(d, "abc.en.json3")
+            p.write_text(_json3(*events), encoding="utf-8")
+            out = Path(d, "abc.en.srt")
+
+            with self.assertRaises(RuntimeError) as ctx:
+                resegment_file(p, out)
+            self.assertIn("时长", str(ctx.exception))
+            self.assertFalse(out.exists())  # 不留半成品 srt
 
 
 # ── downloader 助手 ───────────────────────────────────────────────────
@@ -246,6 +336,22 @@ class DownloaderHelperTests(unittest.TestCase):
             self.assertIsNone(ret)
             self.assertTrue(jp.exists())  # 失败时保留 json3 便于排查
             self.assertIn("重分段失败", buf.getvalue())
+
+    def test_resegment_json3_to_srt_broken_timing_falls_back(self):
+        """时长崩坏 → 返回 None → 走下载器已有的普通 srt 回退，而不是传坏字幕。"""
+        with tempfile.TemporaryDirectory() as d:
+            jp = Path(d, "abc.en.json3")
+            events = [
+                _event(i * 3000, 2500, [_seg(f"w{j}", 0) for j in range(3)])
+                for i in range(6)
+            ]
+            jp.write_text(_json3(*events), encoding="utf-8")
+            buf = StringIO()
+            with redirect_stdout(buf):
+                ret = downloader._resegment_json3_to_srt(jp, Path(d, "abc.en.srt"))
+            self.assertIsNone(ret)
+            self.assertIn("时长", buf.getvalue())
+            self.assertFalse(Path(d, "abc.en.srt").exists())
 
 
 if __name__ == "__main__":

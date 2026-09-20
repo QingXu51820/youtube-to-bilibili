@@ -12,6 +12,7 @@ from pathlib import Path
 
 from yt2bili import config
 from yt2bili.subtitles import resegment
+from yt2bili.subtitles.parser import parse_subtitle
 from yt2bili.youtube.downloader import (
     _with_yt_dlp_cookies,
     _yt_dlp_network_opts,
@@ -321,5 +322,12 @@ def download_subtitles(video_url: str, video_id: str) -> str | None:
         print(f"[字幕] 下载完成: {Path(path).name}")
     else:
         print(f"[字幕] [WARN]字幕下载未产生文件")
+
+    # 最后一道关卡：普通 srt 回退不走重分段，所以这里再验一次最终产物。
+    # 时长崩坏的字幕比没有字幕更糟——它会直接传上 B 站，没人发现。
+    if path:
+        defect = resegment.timing_defect(parse_subtitle(path))
+        if defect:
+            raise RuntimeError(f"字幕时长不可用，放弃该字幕: {defect}")
 
     return path

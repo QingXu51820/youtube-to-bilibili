@@ -38,6 +38,8 @@ MIN_CUE_S = 0.4      # minimum cue duration
 NEXT_GAP_S = 0.02    # gap kept before the next cue starts
 MIN_WORD_S = 0.2     # degenerate-word fallback duration
 DEFAULT_GAP_S = 0.35  # window-end word duration when no intra-window gaps
+MIN_MEDIAN_S = 0.8   # below this median cue duration the output is broken
+_MIN_JUDGED_CUES = 4  # fewer cues than this is too little to judge
 
 _BRACKET_RE = re.compile(r"^\[[^\]]+\]$")
 _END_PUNCT_RE = re.compile(r"[.!?…。！？]['\")\]]?$")
@@ -55,6 +57,39 @@ _CJK_RE = re.compile(
 )
 
 
+def _window_token(
+    base: int, ev_end: int, segs: list[dict]
+) -> list[tuple[float, float, str, str]]:
+    """Token(s) for a window whose segs carry no per-word offsets.
+
+    Author-uploaded (manual) captions ship one whole phrase per window and
+    omit ``tOffsetMs`` entirely.  There is no intra-window timing to
+    interpolate from, so the window's own start/duration is the only real
+    signal — and unlike auto-captions it is not padded (it *is* the intended
+    display time).  Treating the seg as a "word" instead would invent a
+    ~0.35 s duration for it and make every cue flash by for a fraction of a
+    second.
+    """
+    text = " ".join(s.get("utf8", "") for s in segs)
+    # Display line breaks inside a window are layout, not text — collapse
+    # them so a window merged with its neighbours reads as one line.
+    text = " ".join(text.split())
+    if not text:
+        return []
+
+    start, end = base / 1000, ev_end / 1000
+    if end < start:
+        start, end = end, start
+
+    speaker_change = text.startswith(">>")
+    stripped = text.replace(">>", "").strip()
+    if _BRACKET_RE.match(stripped):
+        return [(start, end, stripped, "marker")]
+    if speaker_change:
+        return [(start, end, "", "break"), (start, end, stripped, "word")]
+    return [(start, end, text, "word")]
+
+
 def _load_words(json_text: str) -> list[tuple[float, float, str, str]]:
     """Return tokens: ``(start_s, end_s, text, kind)`` kind ∈ word|break|marker.
 
@@ -63,6 +98,9 @@ def _load_words(json_text: str) -> list[tuple[float, float, str, str]]:
     display padding, so the LAST word of a window uses the window's median
     inter-word gap as its estimated duration instead — otherwise cue
     durations get inflated and total speech exceeds the video length.
+
+    Windows with no per-word offsets at all (manual captions) are handled by
+    :func:`_window_token` — their own duration is authoritative.
     """
     data = json.loads(json_text)
     events = sorted(data.get("events", []), key=lambda e: e.get("tStartMs", 0))
@@ -73,6 +111,9 @@ def _load_words(json_text: str) -> list[tuple[float, float, str, str]]:
         ev_end = base + ev.get("dDurationMs", 0)
         segs = [s for s in ev.get("segs", []) if s.get("utf8", "").strip() != "\n"]
         if not segs:
+            continue
+        if not any(s.get("tOffsetMs") is not None for s in segs):
+            tokens.extend(_window_token(base, ev_end, segs))
             continue
         word_starts = [(base + (s.get("tOffsetMs") or 0), s.get("utf8", "")) for s in segs]
         gaps = [
@@ -249,6 +290,34 @@ def resegment_json3(
     return cues
 
 
+def timing_defect(cues: list[Cue]) -> str | None:
+    """Return why *cues* look machine-broken, or ``None`` when they look sane.
+
+    Guards the failure that shipped broken subtitles: manual-caption json3
+    windows carry no per-word offsets, so every window inherited a ~0.35 s
+    "word" estimate and each sentence stayed on screen ~0.43 s — unreadable,
+    and invisible until a viewer complained. Nothing downstream can repair
+    timings like that, so a source producing them has to be rejected while
+    the subtitles are being processed, not after they are live.
+
+    The signal is the median cue duration. Real speech, even dense gameplay
+    commentary, keeps sentences up for well over a second (1.27 s observed on
+    a fast-paced video, 4.06 s on a typical one); a broken source collapses
+    to a few hundred milliseconds. Samples below ``_MIN_JUDGED_CUES`` are not
+    judged — too few cues to tell a short clip from a defect.
+    """
+    if len(cues) < _MIN_JUDGED_CUES:
+        return None
+    durations = sorted(c.end - c.start for c in cues)
+    median = durations[len(durations) // 2]
+    if median < MIN_MEDIAN_S:
+        return (
+            f"{len(cues)} 条字幕的中位时长仅 {median:.2f}s"
+            f"（下限 {MIN_MEDIAN_S}s），整片字幕会一闪而过"
+        )
+    return None
+
+
 def resegment_file(
     json3_path: str | Path,
     out_srt_path: str | Path | None = None,
@@ -266,9 +335,20 @@ def resegment_file(
         Absolute path to the written SRT file.
 
     Raises:
+        RuntimeError: When the re-segmented timings are unusable (see
+            :func:`timing_defect`) — nothing is written, so the caller can
+            fall back to the plain srt.
         json.JSONDecodeError / OSError: On corrupt input or write failure.
     """
     in_path = Path(json3_path)
     out_path = Path(out_srt_path) if out_srt_path else in_path.with_suffix(".reseg.srt")
     cues = resegment_json3(in_path.read_text(encoding="utf-8-sig"), **overrides)
+
+    defect = timing_defect(cues)
+    if defect:
+        # Raise *before* writing: the downloader catches this and falls back
+        # to the unsegmented srt, whose window timings are still trustworthy —
+        # chunky captions beat captions nobody can read.
+        raise RuntimeError(f"重分段结果时长不可用: {defect}")
+
     return write_srt(cues, out_path)
