@@ -786,6 +786,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--check-auth", action="store_true", help="检查所有凭据（Bilibili/YouTube OAuth/YouTube Cookie）的有效期和状态")
     parser.add_argument("--monitor", action="store_true", help="每小时检查 YouTube 订阅更新并自动上传")
     parser.add_argument("--subtitle-only", action="store_true", help="仅轮询上传待处理字幕（不上传视频）")
+    parser.add_argument(
+        "--subtitle-url", default=None, metavar="URL",
+        help="只处理这一条视频的字幕：下载 + 翻译 + 对齐时间（不下载视频、不上传 B站）",
+    )
+    parser.add_argument(
+        "--game", default="", choices=("", "snap", "deadlock", "brawl_stars"),
+        help="锁定游戏术语表；留空时 --subtitle-url 默认荒野乱斗，其余情况沿用 profile/.env",
+    )
     parser.add_argument("--requeue-subtitles", action="store_true",
                         help="一次性恢复：检查 upload_log 中缺少 B站 中文字幕的视频并重新入队（多账号模式需配合 --profile）")
     parser.add_argument("--subtitle-interval", type=int, default=600, help="字幕轮询间隔秒数（默认 600=10分钟）")
@@ -978,6 +986,11 @@ def main():
     # ── Profile setup (before credential checks) ───────────────
     setup_profile(args)
 
+    # 显式 --game 优先于 profile 的 settings.glossary_game（后者在
+    # setup_profile 里已经应用过）。
+    if args.game:
+        config.apply_glossary_game(args.game)
+
     # ── 补归合集（回填历史 + 扫描待办队列） ─────────────────
     if args.fix_collections:
         sys.exit(_run_fix_collections_command(args.reorder_collections))
@@ -985,6 +998,35 @@ def main():
     # ── 频道 → 合集 对照 / 创建缺失合集 ───────────────────────
     if args.list_collections or args.create_collections:
         sys.exit(_run_collections_command(create_missing=args.create_collections))
+
+    # ── --subtitle-url: 一条链接 → 字幕（下载 + 翻译 + 对齐时间） ──
+    # 故意不过 work-hours 门禁：这是手动触发的本地处理，不产出任何对外内容，
+    # 门禁的目的是约束自动搬运。
+    if args.subtitle_url:
+        from yt2bili.subtitles.fetch import fetch_and_translate, resolve_glossary_game
+
+        profile_game = ""
+        if args.profile:
+            prof = profile_mod.resolve_profile(args.profile)
+            if prof is not None and prof.settings is not None:
+                profile_game = prof.settings.glossary_game or ""
+        game = resolve_glossary_game(args.game, profile_game)
+        config.apply_glossary_game(game)
+        print(f"[字幕] 游戏术语表: {game}\n")
+
+        try:
+            result = fetch_and_translate(args.subtitle_url)
+        except Exception as e:
+            print(f"❌ 字幕处理失败: {e}")
+            return 1
+
+        print(f"\n✅ 完成: {result['cues']} 条字幕（中位时长 {result['median_cue_s']:.2f}s）")
+        print(f"   英文原文: {result['source_path']}")
+        print(f"   中文翻译: {result['translated_path']}")
+        if result["dropped"] or result["clamped"]:
+            print(f"   已对齐视频时长: 丢弃 {result['dropped']} 条，"
+                  f"截断 {result['clamped']} 条")
+        return 0
 
     # ── --resolve-channel helper ───────────────────────────────
     if args.resolve_channel:
