@@ -1,5 +1,7 @@
 """自测：YouTube 订阅模块（时间解析、排序去重、频道解析、RSS/API 错误分类）。"""
 
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -15,6 +17,8 @@ from yt2bili.youtube.subscriptions import (
     VideoItem,
     YouTubeNetworkError,
     _api_http_error,
+    _load_token_credentials,
+    _persist_token,
     _write_token_atomic,
     load_channels_file,
     load_subscriptions_cache,
@@ -246,6 +250,80 @@ class AtomicTokenWriteTests(unittest.TestCase):
         token = Path(self._tmp.name) / "nested" / "youtube_token.json"
         _write_token_atomic(token, "x")
         self.assertEqual(token.read_text(encoding="utf-8"), "x")
+
+
+class PersistTokenTests(unittest.TestCase):
+    """回归：另一个监控进程占用 token 文件时，写回失败不得中断监控进程。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.token = Path(self._tmp.name) / "youtube_token.json"
+
+    @staticmethod
+    def _creds():
+        return SimpleNamespace(to_json=lambda: '{"refresh_token": "rt"}')
+
+    def test_writes_refreshed_credentials(self):
+        _persist_token(self.token, self._creds())
+        self.assertEqual(
+            self.token.read_text(encoding="utf-8"), '{"refresh_token": "rt"}'
+        )
+
+    def test_sharing_violation_warns_instead_of_raising(self):
+        buf = io.StringIO()
+        with patch(
+            "yt2bili.youtube.subscriptions._write_token_atomic",
+            side_effect=PermissionError(13, "另一个程序正在使用此文件"),
+        ):
+            with contextlib.redirect_stdout(buf):
+                _persist_token(self.token, self._creds())
+        self.assertIn("写回失败", buf.getvalue())
+        self.assertFalse(self.token.exists())
+
+
+class LoadTokenCredentialsTests(unittest.TestCase):
+    """回归：读 token 时撞上"另一个进程正在替换该文件"必须降级，不能抛异常。"""
+
+    class FakeCredentials:
+        def __init__(self, info):
+            self.info = info
+
+        @classmethod
+        def from_authorized_user_info(cls, info, scopes):
+            return cls(info)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.token = Path(self._tmp.name) / "youtube_token.json"
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(
+            _load_token_credentials(self.token, self.FakeCredentials)
+        )
+
+    def test_corrupt_json_returns_none(self):
+        self.token.write_text("not json{{", encoding="utf-8")
+        self.assertIsNone(
+            _load_token_credentials(self.token, self.FakeCredentials)
+        )
+
+    def test_loads_valid_token(self):
+        self.token.write_text('{"refresh_token": "rt"}', encoding="utf-8")
+        creds = _load_token_credentials(self.token, self.FakeCredentials)
+        self.assertIsNotNone(creds)
+        self.assertEqual(creds.info["refresh_token"], "rt")
+
+    def test_sharing_violation_returns_none_instead_of_raising(self):
+        self.token.write_text('{"refresh_token": "rt"}', encoding="utf-8")
+        with patch(
+            "yt2bili.youtube.subscriptions.read_text_with_retry",
+            side_effect=PermissionError(13, "另一个程序正在使用此文件"),
+        ):
+            self.assertIsNone(
+                _load_token_credentials(self.token, self.FakeCredentials)
+            )
 
 
 if __name__ == "__main__":

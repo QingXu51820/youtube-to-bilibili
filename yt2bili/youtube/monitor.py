@@ -1126,8 +1126,11 @@ def run_monitor_loop(
                     if not skip_subtitle_upload:
                         _try_deferred_subtitles()
                     _try_deferred_collections(profile=profile)
-                except YouTubeNetworkError as exc:
-                    print(f"\n[订阅] ⚠️ 网络错误 ({profile.name}): {exc}")
+                except (YouTubeNetworkError, OSError) as exc:
+                    # OSError 覆盖 Windows 文件占用（WinError 32）：并发进程共用
+                    # token/队列文件时的瞬时冲突不该让整个监控进程退出。
+                    kind = "网络错误" if isinstance(exc, YouTubeNetworkError) else "本地文件占用"
+                    print(f"\n[订阅] ⚠️ {kind} ({profile.name}): {exc}")
                     continue
 
             if once:
@@ -1160,7 +1163,9 @@ def run_monitor_loop(
                 _try_deferred_subtitles()
             _try_deferred_collections()
             consecutive_failures = 0  # reset on success
-        except YouTubeNetworkError as exc:
+        # OSError 覆盖 Windows 文件占用（WinError 32）：并发进程共用
+        # youtube_token.json / 状态文件时的瞬时冲突不该杀死长跑监控进程。
+        except (YouTubeNetworkError, OSError) as exc:
             consecutive_failures += 1
             if once and consecutive_failures > monitor_max_retries:
                 print(f"\n[订阅] ❌ 单次检查失败，已达最大重试次数 {monitor_max_retries}: {exc}")
@@ -1178,7 +1183,8 @@ def run_monitor_loop(
                 consecutive_failures = 0
                 continue
             delay = min(monitor_retry_base * (2 ** (consecutive_failures - 1)), 600.0)
-            print(f"\n[订阅] ⚠️ 网络错误，{delay:.0f}s 后重试 ({consecutive_failures}/{monitor_max_retries}): {exc}")
+            kind = "网络错误" if isinstance(exc, YouTubeNetworkError) else "本地文件占用"
+            print(f"\n[订阅] ⚠️ {kind}，{delay:.0f}s 后重试 ({consecutive_failures}/{monitor_max_retries}): {exc}")
             try:
                 time.sleep(delay)
             except KeyboardInterrupt:

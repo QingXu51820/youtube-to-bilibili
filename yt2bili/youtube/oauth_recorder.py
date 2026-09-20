@@ -21,12 +21,12 @@ test policy.  Password input values are never recorded.
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional, Protocol, Tuple
 
+from yt2bili.atomic_io import atomic_write_text
 from yt2bili.youtube.oauth_consent import PageSnapshot, PlaywrightDriver
 
 MAX_RECORDED_STEPS = 60
@@ -332,10 +332,7 @@ def steps_from_json(text: str) -> list[RecordedStep]:
 
 def save_recording(path: Path, steps: list[RecordedStep]) -> None:
     """Atomically write the recording (temp file + os.replace)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(steps_to_json(steps), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(path, steps_to_json(steps))
 
 
 def load_recording(path: Path) -> list[RecordedStep]:

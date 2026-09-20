@@ -618,5 +618,24 @@ class AutoConsentOrchestrationTests(unittest.TestCase):
         robot_cls.assert_called_once()
 
 
+class SaveRecordingAtomicityTests(unittest.TestCase):
+    """回归：录制文件与 token 同目录、同样被并发进程写，不能共用固定 .tmp 名。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.rec_file = Path(self._tmp.name) / "youtube_token.recording.json"
+
+    def test_leaves_another_processes_temp_file_alone(self):
+        foreign = self.rec_file.with_name(self.rec_file.name + ".tmp")
+        foreign.write_text("other-process", encoding="utf-8")
+        steps = [rec.RecordedStep(seq=1, kind="click", url=CONSENT, text="Continue", x=5, y=5)]
+
+        rec.save_recording(self.rec_file, steps)
+
+        self.assertEqual(len(rec.load_recording(self.rec_file)), 1)
+        self.assertEqual(foreign.read_text(encoding="utf-8"), "other-process")
+
+
 if __name__ == "__main__":
     unittest.main()

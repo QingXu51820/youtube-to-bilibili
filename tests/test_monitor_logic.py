@@ -556,5 +556,80 @@ class DeferredCollectionsTests(unittest.TestCase):
         sweep.assert_not_called()
 
 
+class MonitorLoopErrorHandlingTests(unittest.TestCase):
+    """回归：文件占用类 OSError（WinError 32）不得杀死长跑监控进程。
+
+    两个 ``--profile`` 进程共用 ``config/youtube_token.json``，刷新令牌后写回
+    撞上 WinError 32 时，旧实现只捕获 YouTubeNetworkError，异常直接冒到顶层，
+    整个监控进程退出码 1 —— 整个账号的轮询就此停摆。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.state = Path(self._tmp.name) / "processed_videos.json"
+
+    def _run_loop(self, cycle_side_effect, *, max_retries):
+        with patch.object(monitor, "run_monitor_cycle", side_effect=cycle_side_effect), \
+             patch.object(monitor.time, "sleep"), \
+             patch.object(monitor, "_respect_repost_windows", return_value=True), \
+             patch.object(monitor, "_try_deferred_subtitles"), \
+             patch.object(monitor, "_try_deferred_collections"), \
+             patch.object(config, "YOUTUBE_MONITOR_MAX_RETRIES", max_retries):
+            return monitor.run_monitor_loop(
+                process_video=Mock(),
+                write_run_report=None,
+                interval_seconds=60,
+                once=True,
+                dry_run=True,
+            )
+
+    def test_lock_error_returns_failure_code_instead_of_raising(self):
+        code = self._run_loop(
+            PermissionError(13, "另一个程序正在使用此文件"), max_retries=0
+        )
+        self.assertEqual(code, 1)
+
+    def test_recovers_after_a_transient_lock_error(self):
+        calls = []
+
+        def flaky(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise PermissionError(13, "另一个程序正在使用此文件")
+            return []
+
+        code = self._run_loop(flaky, max_retries=3)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 2)
+
+    def test_profile_mode_survives_lock_error(self):
+        prof = SimpleNamespace(
+            name="snap",
+            youtube=SimpleNamespace(channels=[], monitor_source="rss"),
+        )
+        with patch.object(monitor, "run_monitor_cycle",
+                          side_effect=PermissionError(13, "另一个程序正在使用此文件")) as cycle, \
+             patch("yt2bili.profile.set_active_profile"), \
+             patch("yt2bili.profile.get_state_file_path", return_value=self.state), \
+             patch("yt2bili.profile.get_cache_file_path", return_value=self.state), \
+             patch.object(config, "apply_profile_overrides"), \
+             patch.object(monitor, "_try_deferred_subtitles"), \
+             patch.object(monitor, "_try_deferred_collections"), \
+             patch.object(monitor, "_respect_repost_windows", return_value=True), \
+             patch.object(monitor.time, "sleep"):
+            code = monitor.run_monitor_loop(
+                process_video=Mock(),
+                write_run_report=None,
+                interval_seconds=60,
+                once=True,
+                dry_run=True,
+                profiles=[prof],
+            )
+        self.assertEqual(code, 0)
+        cycle.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

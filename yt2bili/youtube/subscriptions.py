@@ -26,6 +26,11 @@ import time as _time
 
 
 from yt2bili.config import PROJECT_ROOT
+from yt2bili.atomic_io import (
+    atomic_write_text,
+    read_text_with_retry,
+    remove_best_effort,
+)
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v={video_id}"
 YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
@@ -417,11 +422,59 @@ def _write_token_atomic(token_file: Path, text: str) -> None:
     A concurrent monitor process polls ``token_file.exists()`` and may read
     the file the instant it appears — a plain ``write_text`` would let it
     see a half-written token.
+
+    Windows specifics (``yt2bili.atomic_io``): a *unique* temp filename per
+    process, plus a short retry loop, so two ``--profile`` monitors sharing
+    one ``youtube_token.json`` never trample each other's temp file and a
+    momentarily-open destination does not raise ``WinError 32``.
     """
-    tmp = token_file.with_name(token_file.name + ".tmp")
-    token_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, token_file)
+    atomic_write_text(token_file, text)
+
+
+def _persist_token(token_file: Path, creds) -> None:
+    """写回刷新后的凭据，**绝不抛异常**。
+
+    并发监控进程（多个 ``--profile``）共用同一个 ``youtube_token.json``：
+    另一个进程可能正持有该文件，Windows 下 rename 会报 ``WinError 32``。
+    内存里的 ``creds`` 已经可用，本轮监控继续跑即可，下次刷新时会再写一次。
+    """
+    try:
+        _write_token_atomic(token_file, creds.to_json())
+    except OSError as exc:
+        print(
+            f"[API] ⚠️ Token 写回失败（可能被其他监控进程占用），"
+            f"本轮继续使用内存中的凭据: {exc}"
+        )
+
+
+def _read_text_or_none(path: Path) -> str | None:
+    try:
+        return read_text_with_retry(path)
+    except OSError:
+        return None
+
+
+def _load_token_credentials(token_file: Path, credentials_cls):
+    """读取 token 文件并构造凭据；读不到/内容坏了返回 None。
+
+    并发监控进程可能正在替换这个文件（Windows 下读取会撞上 ``WinError 32``），
+    ``read_text_with_retry`` 会重试几次。返回 None 表示"本进程没拿到凭据"，
+    调用方会走授权流程 —— 但 ``oauth_consent_lock`` 会先让位给已经写好的 token，
+    所以不会白开一个浏览器窗口。
+    """
+    try:
+        text = read_text_with_retry(token_file)
+        info = json.loads(text)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(info, dict):
+        return None
+    try:
+        return credentials_cls.from_authorized_user_info(
+            info, [YOUTUBE_READONLY_SCOPE]
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 def get_youtube_service(client_secret_file: Path, token_file: Path):
@@ -436,8 +489,13 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
         ) from exc
 
     creds = None
+    # 失效 token 的原文：若删除失败（被其他进程占用），用来识别"磁盘上还是那把
+    # 已失效的 token"，避免把它当成"另一个进程刚授权成功"而复用。
+    revoked_token_text: str | None = None
     if token_file.exists():
-        creds = Credentials.from_authorized_user_file(str(token_file), [YOUTUBE_READONLY_SCOPE])
+        # 另一个监控进程可能正在替换该文件 —— 读失败就当作"没有凭据"，交给
+        # 下面的授权/复用逻辑，不能因为一次文件占用把进程打死。
+        creds = _load_token_credentials(token_file, Credentials)
 
     session = build_requests_session()
     auth_request = Request(session=session)
@@ -450,7 +508,9 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
                 if _is_token_expired(exc):
                     # Token expired/revoked — delete old token and re-auth from scratch
                     print("[API] Token 已过期，删除旧 token 并重新授权...")
-                    token_file.unlink(missing_ok=True)
+                    revoked_token_text = _read_text_or_none(token_file)
+                    if not remove_best_effort(token_file):
+                        print("[API] ⚠️ 旧 token 文件正被其他进程占用，稍后由授权流程覆盖。")
                     creds = None
                 else:
                     raise _api_network_error(exc) from exc
@@ -465,9 +525,14 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
 
             with oauth_consent_lock(token_file) as should_consent:
                 if not should_consent:
-                    creds = Credentials.from_authorized_user_file(
-                        str(token_file), [YOUTUBE_READONLY_SCOPE]
-                    )
+                    creds = _load_token_credentials(token_file, Credentials)
+                    if (
+                        creds is not None
+                        and revoked_token_text is not None
+                        and _read_text_or_none(token_file) == revoked_token_text
+                    ):
+                        # 已知失效的 token 没能删掉（被占用）—— 不能复用
+                        creds = None
                 if creds is None or not creds.refresh_token:
                     flow = InstalledAppFlow.from_client_secrets_file(
                         str(client_secret_file), [YOUTUBE_READONLY_SCOPE]
@@ -510,10 +575,10 @@ def get_youtube_service(client_secret_file: Path, token_file: Path):
                 # would otherwise run its own consent flow (second browser
                 # window, second grant for the same account).
                 if creds is not None and creds.refresh_token:
-                    _write_token_atomic(token_file, creds.to_json())
+                    _persist_token(token_file, creds)
         else:
             # Token loaded/refreshed without consent — persist the new expiry.
-            _write_token_atomic(token_file, creds.to_json())
+            _persist_token(token_file, creds)
 
     return YouTubeClient(creds, session=session)
 
