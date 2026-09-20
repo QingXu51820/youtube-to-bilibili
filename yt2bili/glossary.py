@@ -561,9 +561,40 @@ _BS_AUTO_APPLY_GAME_TERMS = [
     "Starr Drop", "Chaos Drop", "Power Cube", "Brawl Box", "Mega Box",
     "Trophy Box", "Energy Drink", "Meteor Shower", "Teleporter",
     "Tier List", "Balance Changes", "Buff", "Nerf", "Brawler",
-    "Gems", "Coins", "Power Points", "Bling", "XP Doublers",
+    "Gems", "Coins", "Power Points", "Bling", "XP Doublers", "Credits",
     "Damage Dealer", "Super Rare",
 ]
+
+
+def _english_plural(term: str) -> str | None:
+    """Plural form of a game term, or ``None`` when there is nothing to add.
+
+    ``_apply_glossary`` matches whole words (``\\b``), so the key
+    "Starr Drop" never matched the plural "Starr Drops" — the official CN
+    name silently failed to apply on exactly the sentences that use it most
+    ("5 Chaos Drops, 10 random Starr Drops").  Registering the plural as an
+    extra key fixes that without loosening the matcher.
+
+    Only the final word inflects ("Starr Drop" → "Starr Drops",
+    "Brawl Box" → "Brawl Boxes", "Bounty" → "Bounties").  Terms already
+    ending in "s" are plurals or mass nouns ("Gems", "Coins",
+    "Power Points", "Balance Changes") and are left alone.
+
+    Deliberately applied to the auto-apply whitelist only: those are
+    mechanics nouns, so their plurals are never a different English word.
+    Brawler names stay exact-matched — "Berry" must not claim "Berries".
+    """
+    if not term or not term[-1].isalpha():
+        return None
+    low = term.lower()
+    if low.endswith("s"):
+        return None
+    if low.endswith(("x", "z", "ch", "sh")):
+        return term + "es"
+    if low.endswith("y") and len(low) > 1 and low[-2] not in "aeiou":
+        return term[:-1] + "ies"
+    return term + "s"
+
 
 _brawl_glossary: dict[str, str] | None = None
 _brawl_glossary_lock = threading.Lock()
@@ -575,6 +606,10 @@ def get_brawl_stars_glossary() -> dict[str, str]:
     Reads the static data/brawl_stars_glossary.json (built by
     tools/update_brawl_stars_glossary.py) — hero names plus a curated subset
     of game terms, plus multi-word verified ability names.  No network fetch.
+
+    Auto-applied game terms also get their English plural registered
+    (:func:`_english_plural`) so "Starr Drops" / "Brawl Boxes" hit the same
+    official CN name as the singular.
     """
     global _brawl_glossary
 
@@ -595,6 +630,11 @@ def get_brawl_stars_glossary() -> dict[str, str]:
             for key in _BS_AUTO_APPLY_GAME_TERMS:
                 if key in game_terms:
                     terms[key] = game_terms[key]
+                    plural = _english_plural(key)
+                    # setdefault: a plural that happens to be a brawler name
+                    # ("Brawlers") must not clobber the hero entry.
+                    if plural:
+                        terms.setdefault(plural, game_terms[key])
             _add_bs_multiword_abilities(terms)
         except Exception:
             pass

@@ -1,4 +1,4 @@
-"""自测：SNAP / Deadlock 词表（缓存容错、空键污染回归、构建逻辑）。"""
+"""自测：SNAP / Deadlock / 荒野乱斗词表（缓存容错、空键污染回归、构建逻辑）。"""
 
 import json
 import tempfile
@@ -197,6 +197,90 @@ class GetGlossaryTests(unittest.TestCase):
              patch.object(gl, "_load_game_terms", return_value={"On Reveal": "揭示"}):
             result = gl.get_snap_game_terms()
         self.assertEqual(result, {"On Reveal": "揭示"})
+
+
+class BrawlStarsGlossaryTests(unittest.TestCase):
+    """回归：荒野乱斗术语的复数形式必须命中官方简中名。
+
+    字幕里说的是 "Starr Drops" / "Brawl Boxes"，而术语表键是单数
+    "Starr Drop" / "Brawl Box"。_apply_glossary 按整词匹配（\\b 边界），
+    复数一律匹配不上 → 官方译名静默失效，模型只好自己翻（星妙掉落）。
+    """
+
+    def tearDown(self):
+        gl._brawl_glossary = None
+
+    def _load(self, glossary=None, game_terms=None):
+        """按给定词表内容跑一遍 get_brawl_stars_glossary()。"""
+        payload = {"glossary": glossary or {}, "game_terms": game_terms or {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bs.json"
+            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            with patch.object(gl.config, "BRAWL_STARS_GLOSSARY_ENABLED", True), \
+                 patch.object(gl.config, "BRAWL_STARS_GLOSSARY_CACHE", str(path)), \
+                 patch.object(gl, "_add_bs_multiword_abilities"):
+                return gl.get_brawl_stars_glossary()
+
+    def test_english_plural(self):
+        self.assertEqual(gl._english_plural("Starr Drop"), "Starr Drops")
+        self.assertEqual(gl._english_plural("Chaos Drop"), "Chaos Drops")
+        self.assertEqual(gl._english_plural("Brawl Box"), "Brawl Boxes")
+        self.assertEqual(gl._english_plural("Bounty"), "Bounties")
+        self.assertEqual(gl._english_plural("Gear"), "Gears")
+
+    def test_english_plural_skips_already_plural_terms(self):
+        # 已是复数或不可数：不能再叠一层（Gemses / Blinges）
+        for term in ("Gems", "Coins", "Power Points", "Balance Changes", "Duels"):
+            self.assertIsNone(gl._english_plural(term), term)
+
+    def test_auto_apply_terms_get_plural_keys(self):
+        result = self._load(game_terms={
+            "Starr Drop": "星妙惊喜", "Chaos Drop": "混沌惊喜",
+            "Brawl Box": "乱斗宝箱", "Bounty": "赏金猎人",
+        })
+        self.assertEqual(result["Starr Drops"], "星妙惊喜")
+        self.assertEqual(result["Chaos Drops"], "混沌惊喜")
+        self.assertEqual(result["Brawl Boxes"], "乱斗宝箱")
+        self.assertEqual(result["Bounties"], "赏金猎人")
+
+    def test_credits_is_auto_applied(self):
+        # 英雄券 之前漏在白名单外，字幕里原样残留英文 "Credits"
+        self.assertEqual(self._load(game_terms={"Credits": "英雄券"})["Credits"], "英雄券")
+
+    def test_terms_outside_whitelist_get_no_plural(self):
+        # 白名单外的词（英雄名）不加复数：Berry 不能认领水果 "Berries"
+        result = self._load(
+            glossary={"Berry": "贝里"},
+            game_terms={"Berry": "贝里", "Starr Drop": "星妙惊喜"},
+        )
+        self.assertEqual(result["Berry"], "贝里")
+        self.assertNotIn("Berries", result)
+
+    def test_plural_colliding_with_hero_name_keeps_hero(self):
+        # 复数与英雄名撞车时英雄名优先，不被术语覆盖
+        result = self._load(glossary={"Gears": "吉尔斯"}, game_terms={"Gear": "装备"})
+        self.assertEqual(result["Gears"], "吉尔斯")
+
+    def test_apply_glossary_replaces_plural_terms(self):
+        """端到端：字幕里的复数术语替换成官方简中名。"""
+        from yt2bili.translation import translator  # 匹配逻辑在翻译模块
+
+        game_terms = {
+            "Starr Drop": "星妙惊喜", "Chaos Drop": "混沌惊喜", "Credits": "英雄券",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bs.json"
+            path.write_text(json.dumps({"game_terms": game_terms}, ensure_ascii=False),
+                            encoding="utf-8")
+            with patch.object(gl.config, "BRAWL_STARS_GLOSSARY_ENABLED", True), \
+                 patch.object(gl.config, "BRAWL_STARS_GLOSSARY_CACHE", str(path)), \
+                 patch.object(gl.config, "SNAP_GLOSSARY_ENABLED", False), \
+                 patch.object(gl.config, "DEADLOCK_GLOSSARY_ENABLED", False), \
+                 patch.object(gl, "_add_bs_multiword_abilities"):
+                out = translator._apply_glossary(
+                    "5 Chaos Drops, 10 random Starr Drops, 1,000 Credits"
+                )
+        self.assertEqual(out, "5 混沌惊喜, 10 random 星妙惊喜, 1,000 英雄券")
 
 
 if __name__ == "__main__":
