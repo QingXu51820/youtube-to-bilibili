@@ -346,5 +346,73 @@ class FixCollectionsCommandTests(unittest.TestCase):
         self.assertTrue(args.fix_collections)
 
 
+class CleanupDeletedCommandTests(unittest.TestCase):
+    def _prof(self):
+        return Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+        )
+
+    def test_parser_has_cleanup_deleted_flag(self):
+        args = main_mod._build_parser().parse_args(
+            ["--cleanup-deleted", "--all-profiles", "--dry-run"])
+        self.assertTrue(args.cleanup_deleted)
+        self.assertTrue(args.all_profiles)
+        self.assertTrue(args.dry_run)
+
+    def test_run_cleanup_scans_active_profile(self):
+        prof = self._prof()
+        with patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=prof), \
+             patch("yt2bili.bilibili.cleanup.scan_profile",
+                   return_value=SimpleNamespace(
+                       profile="snap", gone=[], dry_run=False)) as scan:
+            code = main_mod._run_cleanup_deleted_command(dry_run=True)
+        self.assertEqual(code, 0)
+        scan.assert_called_once()
+        self.assertTrue(scan.call_args.kwargs["dry_run"])
+        self.assertIs(scan.call_args.kwargs["profile"], prof)
+
+    def test_run_cleanup_all_profiles_activates_each(self):
+        profiles = {
+            "snap": Profile(name="snap", bilibili=BiliCredentials("s", "j"),
+                            youtube=YouTubeSettings(channels=[
+                                YouTubeChannel("UC1", "Bynx_Plays"),
+                            ])),
+            "deadlock": Profile(name="deadlock", bilibili=BiliCredentials("s", "j"),
+                                youtube=YouTubeSettings(channels=[
+                                    YouTubeChannel("UC2", "Zerggy"),
+                                ])),
+        }
+        activated = []
+        with patch.object(main_mod.profile_mod, "load_profiles",
+                          return_value=profiles), \
+             patch.object(main_mod.profile_mod, "set_active_profile",
+                          side_effect=activated.append), \
+             patch.object(main_mod.config, "apply_profile_overrides"), \
+             patch("yt2bili.bilibili.cleanup.scan_profile",
+                   return_value=SimpleNamespace(
+                       profile="x", gone=[], dry_run=False)) as scan:
+            code = main_mod._run_cleanup_deleted_command(all_profiles=True)
+        self.assertEqual(code, 0)
+        self.assertEqual(activated, ["snap", "deadlock"])
+        self.assertEqual(scan.call_count, 2)
+
+    def test_run_cleanup_all_profiles_without_channels(self):
+        with patch.object(main_mod.profile_mod, "load_profiles", return_value={}):
+            code = main_mod._run_cleanup_deleted_command(all_profiles=True)
+        self.assertEqual(code, 1)
+
+    def test_run_cleanup_without_profile_config(self):
+        with patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="default"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=None):
+            code = main_mod._run_cleanup_deleted_command()
+        self.assertEqual(code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

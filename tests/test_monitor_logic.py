@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from yt2bili import config
 from yt2bili.youtube import monitor
 from yt2bili.youtube.monitor import (
+    STATUS_DELETED,
     STATUS_SKIPPED_CONTENT,
     STATUS_SKIPPED_LIVE,
     STATUS_SKIPPED_LONG,
@@ -165,6 +166,7 @@ class SkipClassificationTests(unittest.TestCase):
             (STATUS_SKIPPED_LONG, "超长视频已永久跳过"),
             (STATUS_SKIPPED_VERTICAL, "竖屏视频已永久跳过"),
             (STATUS_SKIPPED_CONTENT, "内容筛选已跳过"),
+            (STATUS_DELETED, "B站稿件已删除"),
         ]
         for status, expected in cases:
             with self.subTest(status=status):
@@ -320,6 +322,50 @@ class SeedStateTests(unittest.TestCase):
         self.assertNotIn("dl1", state["videos"])
         self.assertNotIn("old_dl", state["videos"])
         self.assertNotIn("old_unknown", state["videos"])
+
+    def test_upload_log_does_not_resurrect_deleted(self):
+        """回归：B站 已删除的条目不得被 upload_log 回填改回 uploaded。
+
+        旧行为会把 deleted 覆盖成 uploaded（还带着失效的 bvid），
+        随后 backfill_collections 重新入队 → 永远 -404 → 每轮报失败。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "upload_log.json"
+            path.write_text(json.dumps([{
+                "video_id": "xyz789", "url": "u", "title": "T",
+                "channel_title": "C", "bvid": "BV2", "aid": 2,
+                "translated_title": "译", "uploaded_at": "2026-08-01T00:00:00Z",
+            }]), encoding="utf-8")
+            with patch.object(monitor, "_upload_log_path", return_value=path):
+                state = {"version": 1, "videos": {
+                    "xyz789": {"video_id": "xyz789", "status": STATUS_DELETED,
+                               "bvid": "BV2"},
+                }}
+                seeded = monitor.seed_state_from_upload_log(state)
+        self.assertEqual(seeded, 0)
+        self.assertEqual(state["videos"]["xyz789"]["status"], STATUS_DELETED)
+
+    def test_runs_do_not_resurrect_deleted(self):
+        """回归：runs 报告回填同样不得覆盖 deleted。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            runs.mkdir()
+            report = {
+                "generated_at": "2026-08-01T00:00:00+08:00",
+                "results": [{
+                    "success": True, "url": "https://youtu.be/abc123",
+                    "original_title": "T", "translated_title": "译",
+                    "bvid": "BV1", "aid": 1,
+                }],
+            }
+            (runs / "r1.json").write_text(json.dumps(report), encoding="utf-8")
+            state = {"version": 1, "videos": {
+                "abc123": {"video_id": "abc123", "status": STATUS_DELETED,
+                           "bvid": "BV1"},
+            }}
+            seeded = monitor.seed_state_from_runs(state, runs)
+        self.assertEqual(seeded, 0)
+        self.assertEqual(state["videos"]["abc123"]["status"], STATUS_DELETED)
 
     def test_seed_from_runs_filters_by_profile(self):
         """回归：runs 报告按 profile 字段隔离，旧报告只归 legacy default。"""

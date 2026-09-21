@@ -82,6 +82,10 @@ YouTube → Bilibili 自动转载流水线 / Discord → Bilibili 动态搬运
   # 刷新 YouTube Cookie
   python main.py --refresh-youtube-cookies
 
+  # 清理 B站 已消失视频的本地记录（合集队列 / 字幕队列 / processed）
+  python main.py --cleanup-deleted --profile snap
+  python main.py --cleanup-deleted --all-profiles --dry-run
+
 ────────────────────────────────────────────────────────────────
   流水线步骤
 ────────────────────────────────────────────────────────────────
@@ -777,6 +781,39 @@ def _run_fix_collections_command(reorder_collections: bool = False) -> int:
     return 0
 
 
+def _run_cleanup_deleted_command(dry_run: bool = False, all_profiles: bool = False) -> int:
+    """清理已在 B站 消失的视频的本地记录（合集队列 / 字幕队列 / processed 状态）。"""
+    from yt2bili.bilibili.cleanup import scan_profile
+
+    def cleanup_one(prof) -> int:
+        report = scan_profile(dry_run=dry_run, profile=prof)
+        if dry_run and report.gone:
+            print(f"\n[清理] 账号 '{report.profile}' 待清理 {len(report.gone)} 条：")
+            for cand in report.gone:
+                print(
+                    f"  {cand.bvid} {(cand.channel_title or '?')} | "
+                    f"{(cand.title or '')[:40]} ← {', '.join(cand.sources)}"
+                )
+        return 0
+
+    if all_profiles:
+        profiles = [p for p in profile_mod.load_profiles().values() if p.youtube.channels]
+        if not profiles:
+            print("❌ 没有配置了频道的账号。请先在 profiles.json 中为账号添加 channels。")
+            return 1
+        for prof in profiles:
+            profile_mod.set_active_profile(prof.name)
+            config.apply_profile_overrides(prof.name)
+            cleanup_one(prof)
+        return 0
+
+    prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
+    if prof is None:
+        print("没有可用的账号配置。")
+        return 1
+    return cleanup_one(prof)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="YouTube → Bilibili 自动转载流水线")
     parser.add_argument("urls", nargs="*", help="YouTube 视频链接")
@@ -873,6 +910,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reorder-collections", action="store_true",
         help="配合 --fix-collections：按发布时间重排当前账号全部合集"
              "（最新发布放最后，可从旧到新顺序播放）",
+    )
+    parser.add_argument(
+        "--cleanup-deleted", action="store_true",
+        help="扫描本地记录，把已在 B站 消失（删除/下架）的视频从合集队列、"
+             "字幕队列中清除并标记 processed 为 deleted（调用 B站 接口）",
     )
     parser.add_argument(
         "--all-profiles", action="store_true",
@@ -998,6 +1040,10 @@ def main():
     # ── 频道 → 合集 对照 / 创建缺失合集 ───────────────────────
     if args.list_collections or args.create_collections:
         sys.exit(_run_collections_command(create_missing=args.create_collections))
+
+    # ── 清理 B站 已消失视频的本地记录 ────────────────────────
+    if args.cleanup_deleted:
+        sys.exit(_run_cleanup_deleted_command(args.dry_run, args.all_profiles))
 
     # ── --subtitle-url: 一条链接 → 字幕（下载 + 翻译 + 对齐时间） ──
     # 故意不过 work-hours 门禁：这是手动触发的本地处理，不产出任何对外内容，
@@ -1332,6 +1378,8 @@ def main():
         print("                                          创建缺失合集并核对")
         print("  python main.py --fix-collections --reorder-collections --profile snap")
         print("                                          补归合集并按发布时间重排")
+        print("  python main.py --cleanup-deleted --all-profiles")
+        print("                                          清理 B站 已消失视频的本地记录")
         print("  python main.py --resolve-channel @Handle      解析频道句柄")
         print("  python main.py                                自动读取 urls.txt 或交互输入")
         return 0

@@ -37,6 +37,12 @@ STATUS_SKIPPED_LONG = "skipped_long"
 STATUS_SKIPPED_VERTICAL = "skipped_vertical"
 STATUS_SKIPPED_CONTENT = "skipped_content"
 STATUS_SKIPPED_WORK_HOURS = "skipped_work_hours"
+# 稿件已在 B站 消失（用户删除 / 下架）——永久跳过，不再重传
+STATUS_DELETED = "deleted"
+
+# 已定论的状态：历史回填（runs 报告 / upload_log）不得覆盖
+SETTLED_STATUSES = (STATUS_UPLOADED, STATUS_DELETED)
+
 
 def _try_deferred_subtitles() -> None:
     """Attempt to upload pending subtitles (non-blocking, short timeout)."""
@@ -357,7 +363,7 @@ def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
             if not video_id:
                 continue
             existing = videos.get(video_id, {})
-            if existing.get("status") == STATUS_UPLOADED:
+            if existing.get("status") in SETTLED_STATUSES:
                 continue
             videos[video_id] = {
                 "video_id": video_id,
@@ -487,7 +493,7 @@ def seed_state_from_upload_log(state: dict[str, Any]) -> int:
         if not _upload_log_entry_matches(entry, active, channels):
             continue
         existing = videos.get(video_id, {})
-        if existing.get("status") == STATUS_UPLOADED:
+        if existing.get("status") in SETTLED_STATUSES:
             continue
         videos[video_id] = {
             "video_id": video_id,
@@ -700,6 +706,9 @@ def should_skip_video(state: dict[str, Any], video: VideoItem) -> tuple[bool, st
     status = entry.get("status", "")
     if status == STATUS_UPLOADED:
         return True, f"已上传 {entry.get('bvid', '')}".strip()
+    if status == STATUS_DELETED:
+        # 稿件在 B站 已消失（用户删除 / 下架）——不重传
+        return True, "B站稿件已删除"
     if status == STATUS_SKIPPED_LIVE:
         return True, "直播内容已永久跳过"
     if status == STATUS_SKIPPED_LONG:
