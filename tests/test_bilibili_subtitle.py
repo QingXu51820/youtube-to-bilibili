@@ -3,6 +3,7 @@
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -239,7 +240,9 @@ class UploadPendingSubtitlesTests(unittest.TestCase):
 
     def test_cid_timeout_kept_in_queue(self):
         self._write_pending([{"bvid": "BV1", "aid": 1, "translated_path": str(self.srt)}])
-        self._patch_pipeline(wait_side_effect=TimeoutError("超时"))
+        mocks = self._patch_pipeline(wait_side_effect=TimeoutError("超时"))
+        # 探测阶段拿不到 cid（还在转码）→ 回退到 wait_for_cid
+        mocks["get_video_pages"].return_value = [{"cid": 0}]
         self.assertEqual(bsub.upload_pending_subtitles(), 0)
         self.assertTrue(self.pending.exists())
         remaining = json.loads(self.pending.read_text(encoding="utf-8"))
@@ -252,6 +255,65 @@ class UploadPendingSubtitlesTests(unittest.TestCase):
         ])
         self._patch_pipeline(wait_side_effect=AssertionError("不应调用"))
         self.assertEqual(bsub.upload_pending_subtitles(), 1)
+
+    def test_probed_cid_skips_wait(self):
+        """探测直接拿到 cid 时不进入 wait_for_cid 轮询。"""
+        self._write_pending([{"bvid": "BV1", "aid": 1, "translated_path": str(self.srt)}])
+        self._patch_pipeline(wait_side_effect=AssertionError("不应调用"))
+        self.assertEqual(bsub.upload_pending_subtitles(), 1)
+
+    def test_gone_video_never_polls_and_gives_up(self):
+        """已删除视频：不轮询、不空转，连续 3 轮确认后移出队列。"""
+        old = {"bvid": "BV1", "aid": 1, "translated_path": str(self.srt),
+               "added_at": "2026-07-16T12:36:13Z"}
+        self._write_pending([old])
+        mocks = self._patch_pipeline(wait_side_effect=AssertionError("不应轮询"))
+        mocks["get_video_pages"].side_effect = RuntimeError(
+            "get_video_pages 返回错误 (code=62002): 稿件不可见")
+
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                self.assertEqual(bsub.upload_pending_subtitles(), 0)
+                remaining = json.loads(self.pending.read_text(encoding="utf-8"))
+                self.assertEqual(len(remaining), 1)
+                self.assertEqual(remaining[0]["gone_failures"], attempt)
+
+        self.assertEqual(bsub.upload_pending_subtitles(), 0)
+        self.assertFalse(self.pending.exists())  # 第 3 次确认后放弃
+
+    def test_gone_video_fresh_entry_keeps_polling(self):
+        """刚入队的条目（可能还在审核）不参与"已消失"判定。"""
+        fresh = {"bvid": "BV1", "aid": 1, "translated_path": str(self.srt),
+                 "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        self._write_pending([fresh])
+        mocks = self._patch_pipeline(wait_side_effect=TimeoutError("超时"))
+        mocks["get_video_pages"].side_effect = RuntimeError(
+            "get_video_pages 返回错误 (code=62002): 稿件不可见")
+        self.assertEqual(bsub.upload_pending_subtitles(), 0)
+        remaining = json.loads(self.pending.read_text(encoding="utf-8"))
+        self.assertEqual(len(remaining), 1)
+        self.assertNotIn("gone_failures", remaining[0])
+        self.assertTrue(mocks["wait_for_cid"].called)
+
+
+class GoneErrorTests(unittest.TestCase):
+    """is_gone_error / extract_code：识别 B站 稿件消失错误码。"""
+
+    def test_extract_code(self):
+        self.assertEqual(bsub.extract_code("x 返回错误 (code=-404): 啥都木有"), -404)
+        self.assertEqual(bsub.extract_code("x 返回错误 (code=62002): 稿件不可见"), 62002)
+        self.assertIsNone(bsub.extract_code("网络错误"))
+
+    def test_is_gone_error(self):
+        for code in ("-404", "62002"):
+            with self.subTest(code=code):
+                self.assertTrue(bsub.is_gone_error(
+                    RuntimeError(f"get_video_pages 返回错误 (code={code}): x")))
+        self.assertFalse(bsub.is_gone_error(RuntimeError("B站视频信息查询网络错误: x")))
+        self.assertFalse(bsub.is_gone_error(RuntimeError("返回错误 (code=-412): 请求被拦截")))
+        # 62012 = 仅自己可见（UP主 查得到），不能当删除
+        self.assertFalse(bsub.is_gone_error(
+            RuntimeError("get_video_pages 返回错误 (code=62012): x")))
 
 
 class PendingSubtitlePathTests(unittest.TestCase):

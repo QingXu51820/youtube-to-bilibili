@@ -6,7 +6,9 @@ that are not covered by ``bilibili-api-python``.
 """
 
 import json
+import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 import httpx
 from yt2bili import config
@@ -20,6 +22,17 @@ _BILIBILI_SUBTITLE_DEL_URL = "https://api.bilibili.com/x/v2/dm/subtitle/del"
 _AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
 _UPLOAD_TIMEOUT = 30.0
+
+# B站错误码：稿件已消失。网页端统一渲染"视频去哪了呢？"
+# 实测：62012（"稿件不可见"的另一种返回）在用**UP主本人**的凭据查询时会返回 code=0
+# ——那是"仅自己可见"，稿件还在，不能当删除处理；所以只认下面两个码。
+GONE_CODES = (-404, 62002)
+
+# 稿件消失后连续确认多少次才从字幕队列移除。刚上传的视频在审核期间同样会
+# 返回 62002，所以需要跨轮次确认，而不是一次判定就放弃。
+_GONE_GIVE_UP_ATTEMPTS = 3
+# 队列条目至少存活这么久（小时）才允许走"消失"判定，保护刚上传还在审核的视频
+_GONE_MIN_AGE_HOURS = 2.0
 
 
 # ── Profile helpers ──────────────────────────────────────────────────
@@ -140,6 +153,22 @@ def _check_response(resp: httpx.Response, label: str = "Bilibili API") -> dict:
     return data
 
 
+def extract_code(message: str) -> int | None:
+    """B站错误码 from a ``_check_response`` message, or None when absent."""
+    match = re.search(r"code=(-?\d+)", message)
+    return int(match.group(1)) if match else None
+
+
+def is_gone_code(code: int | None) -> bool:
+    """True when *code* means the 稿件 no longer exists."""
+    return code in GONE_CODES
+
+
+def is_gone_error(exc: BaseException) -> bool:
+    """True when *exc* (raised by this module) reports a vanished 稿件."""
+    return is_gone_code(extract_code(str(exc)))
+
+
 # ── Public API ────────────────────────────────────────────────────────
 
 def get_video_pages(bvid: str = "", aid: int = 0) -> list[dict]:
@@ -228,6 +257,23 @@ def wait_for_cid(
 
         print(".", end="", flush=True)
         time.sleep(interval)
+
+
+def _probe_video(bvid: str, aid: int) -> tuple[int, bool]:
+    """
+    One-shot CID lookup.
+
+    Returns ``(cid, gone)``: ``cid > 0`` when the first page is already
+    queryable, ``gone=True`` when B站 reports the 稿件 as vanished. Any other
+    failure returns ``(0, False)`` so the caller falls back to polling.
+    """
+    try:
+        pages = get_video_pages(bvid=bvid, aid=aid)
+    except Exception as e:
+        return 0, is_gone_error(e)
+    if pages and int(pages[0].get("cid", 0) or 0) > 0:
+        return int(pages[0]["cid"]), False
+    return 0, False
 
 
 def _dedup_subtitles(aid: int, cid: int, lan: str) -> int:
@@ -422,6 +468,25 @@ def _pending_subtitles_path() -> Path:
     if not _profile_state_active():
         return root / "state" / "pending_subtitles.json"
     return root / "state" / _active_profile_name() / "pending_subtitles.json"
+
+
+def pending_subtitles_path() -> Path:
+    """Public alias of :func:`_pending_subtitles_path` (matches collection.py)."""
+    return _pending_subtitles_path()
+
+
+def _entry_age_hours(entry: dict) -> float:
+    """Hours since the queue entry was added; ``inf`` when the stamp is unusable."""
+    raw = str(entry.get("added_at", "") or "")
+    if not raw:
+        return float("inf")
+    try:
+        added = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return float("inf")
+    if added.tzinfo is None:
+        added = added.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - added).total_seconds() / 3600.0
 
 
 def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
@@ -827,14 +892,39 @@ def upload_pending_subtitles() -> int:
         if cid and cid > 0:
             print(f"[字幕] 使用缓存 CID={cid} (BV={bvid})")
         else:
-            try:
-                cid = wait_for_cid(bvid=bvid, aid=aid, timeout=30, interval=5)
-            except TimeoutError:
+            # 先做一次廉价探测：稿件已消失时立刻放弃，不再走 wait_for_cid
+            # 轮询 30 秒（每个已删视频每轮白等 30s 是旧的空转来源）。
+            probed_cid, gone = _probe_video(bvid, aid)
+            if gone and _entry_age_hours(entry) >= _GONE_MIN_AGE_HOURS:
+                fails = int(entry.get("gone_failures", 0) or 0) + 1
+                entry["gone_failures"] = fails
+                if fails >= _GONE_GIVE_UP_ATTEMPTS:
+                    print(
+                        f"[字幕] [WARN] 稿件已不存在，从队列移除 ({bvid})，"
+                        "不再重试",
+                        flush=True,
+                    )
+                    continue  # 放弃：不写回 remaining
+                print(
+                    f"[字幕] [WARN] 稿件不可见 ({bvid})"
+                    f"（第 {fails}/{_GONE_GIVE_UP_ATTEMPTS} 次确认），"
+                    "保留在队列中下轮复查",
+                    flush=True,
+                )
                 remaining.append(entry)
                 continue
-            except Exception:
-                remaining.append(entry)
-                continue
+            if probed_cid:
+                cid = probed_cid
+                print(f"[字幕] 使用探测 CID={cid} (BV={bvid})")
+            else:
+                try:
+                    cid = wait_for_cid(bvid=bvid, aid=aid, timeout=30, interval=5)
+                except TimeoutError:
+                    remaining.append(entry)
+                    continue
+                except Exception:
+                    remaining.append(entry)
+                    continue
 
         try:
             # Check file still exists before attempting parse.
