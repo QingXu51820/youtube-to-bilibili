@@ -20,6 +20,64 @@ from yt2bili.youtube.downloader import (
 )
 
 
+#: 值得交给延迟队列重试的 kind —— 名单之外一律当永久失败
+RETRYABLE_KINDS = ("no_tracks", "list_failed", "download_failed")
+
+
+def is_retryable_kind(kind: str) -> bool:
+    """该源失败原因是否值得挂进延迟队列稍后重试。"""
+    return kind in RETRYABLE_KINDS
+
+
+class SubtitleUnavailable(RuntimeError):
+    """
+    源字幕拿不到，并带上「为什么」——调用方据此决定值不值得重试。
+
+    ``kind`` 取值：
+
+    * ``no_tracks``       —— 这次没有任何字幕轨（刚发布的视频常常还没生成）
+    * ``no_match``        —— 有字幕轨，但没有一条匹配 ``SUBTITLE_SOURCE_LANGS``（永久）
+    * ``list_failed``     —— 列字幕轨的请求失败（网络/代理/风控）
+    * ``download_failed`` —— 选中了语言却没下到文件（网络/解析）
+    * ``bad_timing``      —— 下到了但时间轴崩坏（传上去比没有更糟，永久）
+
+    只有 ``no_match`` / ``bad_timing`` 是永久失败；其余交给延迟队列重试。
+    继承 ``RuntimeError``，所以既有的 ``except Exception`` / ``except RuntimeError``
+    调用点行为不变。
+    """
+
+    def __init__(
+        self, kind: str, message: str, available: list[str] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.available = list(available or [])
+
+    @property
+    def permanent(self) -> bool:
+        """True 表示重试没有意义（未知 kind 一律按永久处理，别拿去重试）。"""
+        return not is_retryable_kind(self.kind)
+
+
+def _unavailable(
+    kind: str, available: list[str] | None = None, detail: str = ""
+) -> SubtitleUnavailable:
+    """按 kind 生成带中文说明的 :class:`SubtitleUnavailable`。"""
+    labels = {
+        "no_tracks": "YouTube 上还没有该视频的字幕轨（可能仍在生成中）",
+        "no_match": "YouTube 有字幕轨，但没有匹配 SUBTITLE_SOURCE_LANGS 的语言",
+        "list_failed": "查询 YouTube 字幕轨失败（网络/代理）",
+        "download_failed": "字幕轨存在，但下载未产生文件",
+        "bad_timing": "字幕时间轴不可用，放弃该字幕",
+    }
+    message = labels.get(kind, kind)
+    if available:
+        message += f"；可用语言: {', '.join(available)}"
+    if detail:
+        message += f"；{detail}"
+    return SubtitleUnavailable(kind, message, available)
+
+
 def _compile_lang_patterns() -> list[re.Pattern]:
     """Compile the SUBTITLE_SOURCE_LANGS comma-separated regexes."""
     patterns: list[re.Pattern] = []
@@ -75,7 +133,7 @@ def _pick_language(
     return None
 
 
-def _list_languages(video_url: str) -> tuple[dict, dict]:
+def _list_languages(video_url: str) -> tuple[dict, dict, bool]:
     """
     Extract video info to inspect available subtitle languages.
 
@@ -85,7 +143,10 @@ def _list_languages(video_url: str) -> tuple[dict, dict]:
     no subtitle tracks at all.
 
     Returns:
-        Tuple of ``(subtitles, automatic_captions)`` dicts keyed by language code.
+        ``(subtitles, automatic_captions, ok)`` — dicts keyed by language code,
+        plus whether *any* extraction actually succeeded.  ``ok=False`` with
+        empty dicts means "we could not ask YouTube" (network/proxy), which the
+        caller must not confuse with "the video has no caption tracks".
     """
     from yt_dlp import YoutubeDL
 
@@ -123,11 +184,12 @@ def _list_languages(video_url: str) -> tuple[dict, dict]:
             pass  # keep whatever we had from bare extraction
 
     if not info:
-        return {}, {}
+        # 两次都没问到 —— 网络/代理问题，不是"这个视频没字幕"
+        return {}, {}, False
 
     subtitles = info.get("subtitles") or {}
     auto_captions = info.get("automatic_captions") or {}
-    return subtitles, auto_captions
+    return subtitles, auto_captions, True
 
 
 def _find_subtitle_file(
@@ -282,6 +344,26 @@ def _download_subtitles_for_lang(
     return path
 
 
+def _list_or_fail(video_url: str) -> tuple[dict, dict]:
+    """列字幕轨；网络失败时**立即重列一次**再放弃。
+
+    重列不 sleep：这只是一次元数据提取，而这一阶段恰好是代理抖动最容易打中的地方，
+    重试一次的收益（省掉一整轮延迟队列的等待）远大于成本。下载阶段不重试 ——
+    那条链内部已经有 bare→cookies→bare + 回退，再套一层会在 `before_download`
+    里同步阻塞下一个视频的下载。
+    """
+    subtitles, auto_captions, ok = _list_languages(video_url)
+    if ok:
+        return subtitles, auto_captions
+
+    print("[字幕] [WARN] 字幕轨查询失败，立即重试一次...")
+    subtitles, auto_captions, ok = _list_languages(video_url)
+    if ok:
+        return subtitles, auto_captions
+
+    raise _unavailable("list_failed")
+
+
 def download_subtitles(video_url: str, video_id: str) -> str | None:
     """
     Download the best-matching subtitle for a YouTube video.
@@ -298,23 +380,26 @@ def download_subtitles(video_url: str, video_id: str) -> str | None:
         video_id: YouTube video ID (for file naming).
 
     Returns:
-        Absolute path to the downloaded ``.srt`` file, or ``None`` if no
-        matching subtitle was found.
+        Absolute path to the downloaded ``.srt`` file.
+
+    Raises:
+        SubtitleUnavailable: 源字幕拿不到，``kind`` 说明原因（见该异常类）。
+            不再返回 ``None`` —— 调用方需要区分"还没生成""不匹配""网络失败"。
     """
     output_template = str(Path(config.SUBTITLE_DIR) / f"{video_id}.%(ext)s")
 
     print(f"[字幕] 查询可用字幕语言...")
     patterns = _compile_lang_patterns()
 
-    try:
-        subtitles, auto_captions = _list_languages(video_url)
-    except Exception as e:
-        print(f"[字幕] [WARN]获取字幕列表失败: {e}")
-        return None
+    subtitles, auto_captions = _list_or_fail(video_url)
 
     lang = _pick_language(subtitles, auto_captions, patterns)
     if not lang:
-        return None
+        available = sorted(set(subtitles) | set(auto_captions))
+        if available:
+            # 有轨但语言不匹配（例如该频道只有 zh-HK 手动轨）—— 重试不会有别的结果
+            raise _unavailable("no_match", available)
+        raise _unavailable("no_tracks")
 
     print(f"[字幕] 下载 {lang} 字幕...")
     path = _download_subtitles_for_lang(video_url, lang, output_template, video_id)
@@ -322,12 +407,12 @@ def download_subtitles(video_url: str, video_id: str) -> str | None:
         print(f"[字幕] 下载完成: {Path(path).name}")
     else:
         print(f"[字幕] [WARN]字幕下载未产生文件")
+        raise _unavailable("download_failed", detail=f"语言 {lang}")
 
     # 最后一道关卡：普通 srt 回退不走重分段，所以这里再验一次最终产物。
     # 时长崩坏的字幕比没有字幕更糟——它会直接传上 B 站，没人发现。
-    if path:
-        defect = resegment.timing_defect(parse_subtitle(path))
-        if defect:
-            raise RuntimeError(f"字幕时长不可用，放弃该字幕: {defect}")
+    defect = resegment.timing_defect(parse_subtitle(path))
+    if defect:
+        raise _unavailable("bad_timing", detail=defect)
 
     return path
