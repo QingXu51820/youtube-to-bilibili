@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from yt2bili import config
+from yt2bili import atomic_io, config
 
 # ── State file helpers ────────────────────────────────────────────────
 
@@ -34,11 +34,7 @@ def _load_state(path: Path) -> dict[str, Any]:
 
 def _save_state(path: Path, state: dict[str, Any]) -> None:
     """Persist state to disk."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
-    tmp.replace(path)
+    atomic_io.write_json(path, state)
 
 
 def _is_processed(state: dict[str, Any], message_id: str) -> bool:

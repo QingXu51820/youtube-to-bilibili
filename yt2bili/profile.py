@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yt2bili import config
+from yt2bili import atomic_io, config
 
 
 # ── Data model ──────────────────────────────────────────────────────────────
@@ -118,12 +118,7 @@ def save_profiles(profiles: dict[str, Profile]) -> None:
     for name, profile in profiles.items():
         data["profiles"][name] = _profile_to_dict(profile)  # type: ignore[index]
 
-    tmp_path = PROFILES_FILE.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    tmp_path.replace(PROFILES_FILE)
+    atomic_io.write_json(PROFILES_FILE, data)
 
 
 def save_profile(profile: Profile) -> None:
