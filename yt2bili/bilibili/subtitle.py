@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import httpx
 from yt2bili import atomic_io, config
+from yt2bili import profile as profile_mod
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -50,28 +51,6 @@ _PENDING_LOCK = threading.Lock()
 
 # ── Profile helpers ──────────────────────────────────────────────────
 
-def _active_profile_name() -> str:
-    """Name of the currently active profile ('default' in legacy .env mode)."""
-    from yt2bili import profile as profile_mod
-    return profile_mod.get_active_profile_name()
-
-
-def _profile_state_active() -> bool:
-    """
-    True when the active profile is a real profile account (not .env legacy).
-
-    ``"default"`` means two different modes: without a profiles.json (or without
-    a ``"default"`` profile in it) it is legacy .env mode with the shared queue;
-    with a ``"default"`` profile in profiles.json it is a real profile account
-    with its own queue.
-    """
-    from yt2bili import profile as profile_mod
-    name = _active_profile_name()
-    if name != "default":
-        return True
-    return profile_mod.is_multi_profile() and profile_mod.profile_exists("default")
-
-
 def _active_credentials() -> tuple[str, str, str]:
     """
     ``(sessdata, bili_jct, buvid3)`` for the active profile.
@@ -80,9 +59,8 @@ def _active_credentials() -> tuple[str, str, str]:
     mode returns the profile's own credentials — never silently falls back to
     .env, otherwise subtitles would be checked/uploaded on the wrong account.
     """
-    name = _active_profile_name()
-    if _profile_state_active():
-        from yt2bili import profile as profile_mod
+    name = profile_mod.get_active_profile_name()
+    if profile_mod.is_profile_state_active():
         prof = profile_mod.resolve_profile(name)
         if prof is not None and prof.bilibili.sessdata and prof.bilibili.bili_jct:
             return (
@@ -103,10 +81,9 @@ def _active_profile_channel_titles() -> set[str] | None:
     与 monitor 用同一个 ``profile.channel_titles()``（小写去空白）：两处各自折叠
     大小写时曾经不一致，导致 monitor 认得的频道被字幕补偿扫描静默跳过。
     """
-    if not _profile_state_active():
+    if not profile_mod.is_profile_state_active():
         return None
-    from yt2bili import profile as profile_mod
-    prof = profile_mod.resolve_profile(_active_profile_name())
+    prof = profile_mod.resolve_profile(profile_mod.get_active_profile_name())
     if prof is None:
         return None
     return profile_mod.channel_titles(prof)
@@ -487,7 +464,7 @@ def _cleanup_subtitle_files(translated_path: str) -> None:
 
 # ── Deferred subtitle upload ────────────────────────────────────────────
 
-def _pending_subtitles_path() -> Path:
+def pending_subtitles_path() -> Path:
     """
     Path of the pending-subtitle queue for the active profile.
 
@@ -495,15 +472,7 @@ def _pending_subtitles_path() -> Path:
     monitor cycles for one account never check/upload another account's
     subtitles. Legacy .env mode keeps the shared ``state/pending_subtitles.json``.
     """
-    root = Path(config.PROJECT_ROOT)
-    if not _profile_state_active():
-        return root / "state" / "pending_subtitles.json"
-    return root / "state" / _active_profile_name() / "pending_subtitles.json"
-
-
-def pending_subtitles_path() -> Path:
-    """Public alias of :func:`_pending_subtitles_path` (matches collection.py)."""
-    return _pending_subtitles_path()
+    return profile_mod.state_file_path("pending_subtitles.json")
 
 
 def _parse_stamp(raw: str) -> datetime | None:
@@ -547,18 +516,15 @@ def _now_stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def _upload_log_path() -> Path:
-    """Path of the global upload log (not per-profile — see monitor.py)."""
-    return Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
-
-
 def _load_upload_log() -> list[dict]:
     """读取全局上传日志（video_id → bvid/aid/channel_title 映射的来源）。
 
     这个文件在本模块有四个读取点，以前各自内联了一遍「读 + isinstance 检查 +
     静默吞错」；缺失/损坏一律按空列表处理，调用方各自决定要不要提前返回。
     """
-    return atomic_io.read_json(_upload_log_path(), [], expect=list)
+    return atomic_io.read_json(
+        profile_mod.shared_state_path("upload_log.json"), [], expect=list
+    )
 
 
 def _read_pending_entries(path: Path) -> list[dict]:
@@ -579,7 +545,7 @@ def _write_pending_entries(path: Path, entries: list[dict]) -> None:
 
 def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
     """Record a subtitle that needs deferred upload (Bilibili CID not ready yet)."""
-    path = _pending_subtitles_path()
+    path = pending_subtitles_path()
     with _PENDING_LOCK:
         entries = _read_pending_entries(path)
         existing = {e.get("bvid", ""): i for i, e in enumerate(entries)}
@@ -608,7 +574,7 @@ def save_deferred_subtitle(
     """
     if not bvid or not translated_path:
         return
-    path = _pending_subtitles_path()
+    path = pending_subtitles_path()
     with _PENDING_LOCK:
         entries = _read_pending_entries(path)
         existing = {e.get("bvid", ""): i for i, e in enumerate(entries)}
@@ -786,7 +752,6 @@ def _migrate_legacy_pending_queue() -> None:
             pass
         return
 
-    from yt2bili import profile as profile_mod
 
     # channel_title -> profile name (first profile wins on title collision)
     channel_to_profile: dict[str, str] = {}
@@ -946,7 +911,7 @@ def _try_regenerate(entry: dict) -> tuple[str | None, "SubtitleUnavailable | Non
 def upload_pending_subtitles() -> int:
     """Try to upload pending subtitles. Returns count of successfully uploaded."""
     _migrate_legacy_pending_queue()
-    path = _pending_subtitles_path()
+    path = pending_subtitles_path()
 
     entries: list[dict] = _read_pending_entries(path)
 
@@ -1160,7 +1125,7 @@ def requeue_missing_subtitles() -> int:
 
     Returns the number of re-queued videos.
     """
-    path = _pending_subtitles_path()
+    path = pending_subtitles_path()
 
     existing_bvids = {
         e.get("bvid", "") for e in _read_pending_entries(path) if isinstance(e, dict)

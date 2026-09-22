@@ -358,6 +358,35 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(issues, [])
 
 
+class StateFilePathTests(unittest.TestCase):
+    """队列/状态文件位置统一由 profile 解析（三个模块曾各自拼一遍）。"""
+
+    def test_legacy_mode_uses_shared_state_dir(self):
+        with patch.object(profile_mod, "is_profile_state_active", return_value=False), \
+             patch.object(config, "PROJECT_ROOT", Path("/proj")):
+            self.assertEqual(
+                profile_mod.state_file_path("pending_subtitles.json"),
+                Path("/proj/state/pending_subtitles.json"),
+            )
+
+    def test_profile_mode_uses_profile_state_dir(self):
+        with patch.object(profile_mod, "is_profile_state_active", return_value=True), \
+             patch.object(profile_mod, "get_active_profile_name", return_value="snap"), \
+             patch.object(config, "PROJECT_ROOT", Path("/proj")):
+            self.assertEqual(
+                profile_mod.state_file_path("pending_collections.json"),
+                Path("/proj/state/snap/pending_collections.json"),
+            )
+
+    def test_shared_state_path_ignores_the_profile(self):
+        with patch.object(profile_mod, "get_active_profile_name", return_value="snap"), \
+             patch.object(config, "PROJECT_ROOT", Path("/proj")):
+            self.assertEqual(
+                profile_mod.shared_state_path("upload_log.json"),
+                Path("/proj/state/upload_log.json"),
+            )
+
+
 class ChannelTitlesTests(unittest.TestCase):
     """按频道过滤上传日志/状态文件的地方共用这一个集合，避免两处各自折叠大小写。"""
 

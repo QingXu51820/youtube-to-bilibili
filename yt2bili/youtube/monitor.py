@@ -374,7 +374,8 @@ def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
 
 def _upload_log_path() -> Path:
     """Return path to the persistent upload log (global, not per-profile)."""
-    return project_path("state") / "upload_log.json"
+    from yt2bili import profile as profile_mod
+    return profile_mod.shared_state_path("upload_log.json")
 
 
 def _profile_channels(profile_name: str) -> set[str]:

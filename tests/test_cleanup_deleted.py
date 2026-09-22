@@ -10,6 +10,7 @@ from unittest.mock import patch
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from yt2bili import profile as profile_mod
 from yt2bili.bilibili import cleanup
 from yt2bili.bilibili.cleanup import (
     VERDICT_ALIVE,
@@ -276,6 +277,9 @@ class ScanProfileTests(unittest.TestCase):
                      return_value=self.collections).start()
         patch.object(cleanup.subtitle_mod, "pending_subtitles_path",
                      return_value=self.subtitles).start()
+        # 状态文件位置现由 profile.state_file_path 统一解析（与队列同一个目录）
+        patch.object(profile_mod, "state_file_path",
+                     return_value=self.processed).start()
         patch.object(cleanup.time, "sleep").start()
 
     def _seed(self, entries):

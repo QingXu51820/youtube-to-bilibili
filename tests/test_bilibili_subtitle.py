@@ -131,7 +131,7 @@ class UploadPendingSubtitlesTests(unittest.TestCase):
     def _patch_pipeline(self, *, submit_side_effect=None, wait_side_effect=None):
         """mock 上传管线：pending 路径、恢复扫描、解析、提交、清理。"""
         patchers = [
-            patch.object(bsub, "_pending_subtitles_path", return_value=self.pending),
+            patch.object(bsub, "pending_subtitles_path", return_value=self.pending),
             patch.object(bsub, "_migrate_legacy_pending_queue"),
             patch.object(bsub, "_regenerate_missing_subtitle", return_value=None),
             patch.object(bsub, "_recover_orphaned_subtitles", return_value=[]),
@@ -329,41 +329,41 @@ class GoneErrorTests(unittest.TestCase):
 
 
 class PendingSubtitlePathTests(unittest.TestCase):
-    """_pending_subtitles_path：待上传队列按账号隔离。"""
+    """pending_subtitles_path：待上传队列按账号隔离。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
     def test_legacy_path_default_no_profiles_file(self):
-        with patch.object(bsub, "_active_profile_name", return_value="default"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="default"), \
              patch.object(profile_mod, "is_multi_profile", return_value=False), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
-            path = bsub._pending_subtitles_path()
+            path = bsub.pending_subtitles_path()
         self.assertEqual(path, Path(self.tmp.name) / "state" / "pending_subtitles.json")
 
     def test_legacy_path_default_multi_without_default_profile(self):
         """profiles.json 存在但没有 'default' 账号 → 仍是传统 .env 模式。"""
-        with patch.object(bsub, "_active_profile_name", return_value="default"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="default"), \
              patch.object(profile_mod, "is_multi_profile", return_value=True), \
              patch.object(profile_mod, "profile_exists", return_value=False), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
-            path = bsub._pending_subtitles_path()
+            path = bsub.pending_subtitles_path()
         self.assertEqual(path, Path(self.tmp.name) / "state" / "pending_subtitles.json")
 
     def test_named_profile_path(self):
-        with patch.object(bsub, "_active_profile_name", return_value="snap"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="snap"), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
-            path = bsub._pending_subtitles_path()
+            path = bsub.pending_subtitles_path()
         self.assertEqual(path, Path(self.tmp.name) / "state" / "snap" / "pending_subtitles.json")
 
     def test_default_profile_in_file_uses_profile_dir(self):
         """profiles.json 里存在名为 'default' 的账号 → 用账号自己的队列。"""
-        with patch.object(bsub, "_active_profile_name", return_value="default"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="default"), \
              patch.object(profile_mod, "is_multi_profile", return_value=True), \
              patch.object(profile_mod, "profile_exists", return_value=True), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
-            path = bsub._pending_subtitles_path()
+            path = bsub.pending_subtitles_path()
         self.assertEqual(path, Path(self.tmp.name) / "state" / "default" / "pending_subtitles.json")
 
 
@@ -375,7 +375,7 @@ class SavePendingSubtitleProfileIsolationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
 
     def test_saves_to_active_profile_queue(self):
-        with patch.object(bsub, "_active_profile_name", return_value="deadlock"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="deadlock"), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
             bsub.save_pending_subtitle("BV1", 1, "/tmp/a.zh-CN.srt")
         queue = Path(self.tmp.name) / "state" / "deadlock" / "pending_subtitles.json"
@@ -391,7 +391,7 @@ class ActiveCredentialsTests(unittest.TestCase):
     """_active_credentials：账号凭据解析（profile 优先，.env 仅作传统模式兜底）。"""
 
     def test_env_fallback_legacy(self):
-        with patch.object(bsub, "_active_profile_name", return_value="default"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="default"), \
              patch.object(profile_mod, "is_multi_profile", return_value=False), \
              patch.object(config, "BILI_SESSDATA", "s"), \
              patch.object(config, "BILI_BILI_JCT", "j"), \
@@ -400,14 +400,14 @@ class ActiveCredentialsTests(unittest.TestCase):
 
     def test_profile_creds_used(self):
         prof = Profile(name="snap", bilibili=BiliCredentials(sessdata="S", bili_jct="J", buvid3="B"))
-        with patch.object(bsub, "_active_profile_name", return_value="snap"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="snap"), \
              patch.object(profile_mod, "resolve_profile", return_value=prof):
             self.assertEqual(bsub._active_credentials(), ("S", "J", "B"))
 
     def test_missing_profile_creds_raise(self):
         """账号缺凭据时报错，而不是回退 .env（避免上传到错误的账号）。"""
         prof = Profile(name="snap", bilibili=BiliCredentials(sessdata="", bili_jct=""))
-        with patch.object(bsub, "_active_profile_name", return_value="snap"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="snap"), \
              patch.object(profile_mod, "resolve_profile", return_value=prof):
             with self.assertRaises(RuntimeError) as ctx:
                 bsub._active_credentials()
@@ -513,7 +513,7 @@ class LegacyMigrationTests(unittest.TestCase):
             {"video_id": "vidA", "channel_title": "Snap Judgments", "bvid": "BV-A"},
             {"video_id": "vidB", "channel_title": "Piggy", "bvid": "BV-B"},
         ])
-        with patch.object(bsub, "_active_profile_name", return_value="snap"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="snap"), \
              patch.object(profile_mod, "load_profiles", return_value=self._profiles()), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
             bsub._migrate_legacy_pending_queue()
@@ -534,7 +534,7 @@ class LegacyMigrationTests(unittest.TestCase):
         self._write_upload_log([
             {"video_id": "vidA", "channel_title": "Snap Judgments", "bvid": "BV-A"},
         ])
-        with patch.object(bsub, "_active_profile_name", return_value="snap"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="snap"), \
              patch.object(profile_mod, "load_profiles", return_value=self._profiles()), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
             bsub._migrate_legacy_pending_queue()
@@ -552,7 +552,7 @@ class LegacyMigrationTests(unittest.TestCase):
         self._write_upload_log([
             {"video_id": "vidA", "channel_title": "Snap Judgments", "bvid": "BV-A"},
         ])
-        with patch.object(bsub, "_active_profile_name", return_value="snap"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="snap"), \
              patch.object(profile_mod, "load_profiles", return_value=self._profiles()), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
             bsub._migrate_legacy_pending_queue()
@@ -577,7 +577,7 @@ class LegacyMigrationTests(unittest.TestCase):
         self._write_upload_log([
             {"video_id": "vidB", "channel_title": "Piggy", "bvid": "BV-B"},
         ])
-        with patch.object(bsub, "_active_profile_name", return_value="snap"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="snap"), \
              patch.object(profile_mod, "load_profiles", return_value=self._profiles()), \
              patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
             bsub._migrate_legacy_pending_queue()
@@ -592,7 +592,7 @@ class LegacyMigrationTests(unittest.TestCase):
             {"bvid": "BV-A", "aid": 1, "translated_path": "x\\a.zh-CN.srt"},
         ]), encoding="utf-8")
         before = legacy.read_bytes()
-        with patch.object(bsub, "_active_profile_name", return_value="default"), \
+        with patch.object(bsub.profile_mod, "get_active_profile_name", return_value="default"), \
              patch.object(profile_mod, "is_multi_profile", return_value=False):
             bsub._migrate_legacy_pending_queue()
         self.assertEqual(legacy.read_bytes(), before)
@@ -628,7 +628,7 @@ class RequeueMissingSubtitlesTests(unittest.TestCase):
         return client
 
     def _run(self, client, channel_titles):
-        with patch.object(bsub, "_pending_subtitles_path", return_value=self.queue), \
+        with patch.object(bsub, "pending_subtitles_path", return_value=self.queue), \
              patch.object(bsub, "_build_client", return_value=client), \
              patch.object(bsub, "_active_profile_channel_titles", return_value=channel_titles), \
              patch.object(bsub.time, "sleep"), \
@@ -786,7 +786,7 @@ class DeferredSubtitleTests(unittest.TestCase):
 
     def _patch_pipeline(self, regen_side_effect=None):
         patchers = [
-            patch.object(bsub, "_pending_subtitles_path", return_value=self.pending),
+            patch.object(bsub, "pending_subtitles_path", return_value=self.pending),
             patch.object(bsub, "_migrate_legacy_pending_queue"),
             patch.object(bsub, "_regenerate_missing_subtitle",
                          side_effect=regen_side_effect),
@@ -894,7 +894,7 @@ class SaveDeferredSubtitleTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.pending = Path(self.tmp.name) / "pending_subtitles.json"
-        patcher = patch.object(bsub, "_pending_subtitles_path", return_value=self.pending)
+        patcher = patch.object(bsub, "pending_subtitles_path", return_value=self.pending)
         patcher.start()
         self.addCleanup(patcher.stop)
 

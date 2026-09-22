@@ -313,7 +313,7 @@ class BilibiliSubtitleApiTests(unittest.TestCase):
     def test_save_pending_subtitle_merges_and_dedups(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pending.json"
-            with patch.object(bsub, "_pending_subtitles_path", return_value=path):
+            with patch.object(bsub, "pending_subtitles_path", return_value=path):
                 bsub.save_pending_subtitle("BV1", 1, "/tmp/a.srt")
                 bsub.save_pending_subtitle("BV1", 2, "/tmp/b.srt")  # 同 bvid 覆盖
                 bsub.save_pending_subtitle("BV2", 3, "/tmp/c.srt")

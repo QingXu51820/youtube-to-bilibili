@@ -466,10 +466,7 @@ def pending_collections_path() -> Path:
     .env mode keeps the shared ``state/pending_collections.json``.
     """
     from yt2bili import profile as profile_mod
-    root = Path(config.PROJECT_ROOT)
-    if not profile_mod.is_profile_state_active():
-        return root / "state" / "pending_collections.json"
-    return root / "state" / profile_mod.get_active_profile_name() / "pending_collections.json"
+    return profile_mod.state_file_path("pending_collections.json")
 
 
 def load_pending_collections(path: Path) -> list[dict]:

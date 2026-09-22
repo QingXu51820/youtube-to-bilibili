@@ -118,7 +118,7 @@ def _processed_path(profile=None) -> Path:
     from yt2bili import profile as profile_mod
     if profile is not None and profile_mod.is_profile_state_active():
         return profile_mod.get_state_file_path(profile)
-    return pending_collections_path().parent / "processed_videos.json"
+    return profile_mod.state_file_path("processed_videos.json")
 
 
 def collect_candidates(

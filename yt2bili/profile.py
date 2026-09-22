@@ -214,6 +214,26 @@ def channel_titles(profile: Profile) -> set[str]:
     }
 
 
+def state_file_path(filename: str) -> Path:
+    """Path of *filename* in the active profile's state dir.
+
+    Named profiles keep their own state under ``state/<profile>/`` so that one
+    account's cycles never read or write another account's files; legacy .env
+    mode keeps the shared ``state/<filename>``.  Every per-profile queue
+    resolver goes through here — they used to be written out by hand in three
+    modules and drifted.
+    """
+    root = Path(config.PROJECT_ROOT)
+    if not is_profile_state_active():
+        return root / "state" / filename
+    return root / "state" / get_active_profile_name() / filename
+
+
+def shared_state_path(filename: str) -> Path:
+    """Path of a state file that every profile shares (e.g. ``upload_log.json``)."""
+    return Path(config.PROJECT_ROOT) / "state" / filename
+
+
 def get_state_file_path(profile: Profile) -> Path:
     """Return the state file path for a profile."""
     if profile.youtube.monitor_state:
