@@ -13,9 +13,6 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
-
-from yt2bili import config
 from yt2bili.subtitles.bilibili_format import DURATION_MARGIN_S, clamp_cues_to_duration
 from yt2bili.subtitles.downloader import download_subtitles
 from yt2bili.subtitles.parser import parse_subtitle

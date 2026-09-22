@@ -10,7 +10,7 @@ from unittest.mock import patch
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from yt2bili import profile as profile_mod
+from yt2bili import config, profile as profile_mod
 from yt2bili.bilibili import cleanup
 from yt2bili.bilibili.cleanup import (
     VERDICT_ALIVE,
@@ -184,7 +184,7 @@ class ApplyPurgeTests(unittest.TestCase):
         self.subtitle_dir = self.root / "subtitles"
         self.subtitle_dir.mkdir()
         self.addCleanup(patch.stopall)
-        patcher = patch.object(cleanup.config, "SUBTITLE_DIR",
+        patcher = patch.object(config, "SUBTITLE_DIR",
                                str(self.subtitle_dir))
         patcher.start()
 

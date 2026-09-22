@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from yt2bili import config
 from yt2bili.subtitles import fetch
 from yt2bili.subtitles.downloader import SubtitleUnavailable
 from yt2bili.subtitles.parser import Cue, parse_srt
@@ -68,8 +69,8 @@ class FetchAndTranslateTests(unittest.TestCase):
         with patch.object(fetch, "_extract_metadata", return_value=meta), \
              patch.object(fetch, "download_subtitles", return_value=str(src)), \
              patch.object(fetch, "translate_cues", return_value=translated), \
-             patch.object(fetch.config, "SUBTITLE_DIR", tmp), \
-             patch.object(fetch.config, "SUBTITLE_TARGET_LANG", "zh-CN"):
+             patch.object(config, "SUBTITLE_DIR", tmp), \
+             patch.object(config, "SUBTITLE_TARGET_LANG", "zh-CN"):
             return fetch.fetch_and_translate("https://youtu.be/abc")
 
     def test_writes_translated_srt(self):

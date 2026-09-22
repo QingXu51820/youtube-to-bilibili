@@ -6,13 +6,12 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from yt2bili import atomic_io, config
-from yt2bili.timestamps import BEIJING_TZ, beijing_now, parse_iso, utc_now
+from yt2bili.timestamps import beijing_now, utc_now
 from yt2bili.youtube.subscriptions import (
     Subscription,
     VideoItem,

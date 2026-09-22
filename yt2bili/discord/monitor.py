@@ -7,10 +7,7 @@ Two entry modes:
     2. Fallback poll — REST API GET /channels/{id}/messages at startup
 """
 
-import asyncio
 import json
-import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any

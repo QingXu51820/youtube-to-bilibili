@@ -21,8 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from yt2bili import atomic_io, config
-from yt2bili.bilibili.api import VIDEO_INFO_URL
+from yt2bili import atomic_io
 from yt2bili.bilibili.api import check_response as api_check_response
 from yt2bili.timestamps import parse_iso, utc_now
 

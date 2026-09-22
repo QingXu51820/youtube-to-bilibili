@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from yt2bili import atomic_io, config
+from yt2bili import atomic_io
 from yt2bili.subtitles.paths import source_srt_path, translated_srt_path
 from yt2bili.timestamps import parse_iso, utc_now
 from yt2bili.bilibili import subtitle as subtitle_mod

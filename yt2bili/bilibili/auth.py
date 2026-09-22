@@ -5,7 +5,6 @@ with the B站 app, then saves credentials to .env automatically.
 """
 
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from yt2bili import atomic_io, config
