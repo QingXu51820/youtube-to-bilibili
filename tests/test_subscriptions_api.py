@@ -1,6 +1,8 @@
 """自测：订阅 API 抓取侧（service 调用、分页、RSS、缓存、重试）。"""
 
+import importlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from unittest.mock import Mock, patch
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from yt2bili import config
 from yt2bili.youtube import subscriptions as subs
 
 
@@ -181,6 +184,30 @@ class FetchRecentVideosApiTests(unittest.TestCase):
         self.assertEqual(
             youtube.playlistItems.return_value.list.call_args.kwargs["playlistId"],
             "UU1")
+
+
+class RetryConfigTests(unittest.TestCase):
+    """回归：YOUTUBE_API_* 曾用 os.getenv 重读，config 里的值（含 profile 覆盖）形同虚设。"""
+
+    def setUp(self):
+        self.addCleanup(importlib.reload, subs)
+
+    def _retry_config_with(self, env_max, env_delay, cfg_max, cfg_delay):
+        with patch.dict(
+            os.environ,
+            {"YOUTUBE_API_MAX_RETRIES": env_max, "YOUTUBE_API_RETRY_DELAY": env_delay},
+        ):
+            with patch.object(config, "YOUTUBE_API_MAX_RETRIES", cfg_max), patch.object(
+                config, "YOUTUBE_API_RETRY_DELAY", cfg_delay
+            ):
+                importlib.reload(subs)
+                return subs._API_MAX_RETRIES, subs._API_RETRY_BASE_DELAY
+
+    def test_config_wins_over_environment(self):
+        self.assertEqual(self._retry_config_with("99", "77.5", 5, 4), (5, 4.0))
+
+    def test_delay_is_never_below_one_second(self):
+        self.assertEqual(self._retry_config_with("1", "0.1", 1, 0), (1, 1.0))
 
 
 class SaveSubscriptionsCacheTests(unittest.TestCase):

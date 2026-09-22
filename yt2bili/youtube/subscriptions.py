@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 import time as _time
 
 
+from yt2bili import config
 from yt2bili.config import PROJECT_ROOT
 from yt2bili.atomic_io import (
     atomic_write_text,
@@ -36,9 +37,11 @@ YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v={video_id}"
 YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 
-# ── Retry configuration (env overridable) ──────────────────────────
-_API_MAX_RETRIES = max(0, int(os.getenv("YOUTUBE_API_MAX_RETRIES", "3")))
-_API_RETRY_BASE_DELAY = max(1.0, float(os.getenv("YOUTUBE_API_RETRY_DELAY", "2.0")))
+# ── Retry configuration ────────────────────────────────────────────
+# 走 config 而不是 os.getenv：profile 覆盖（apply_profile_overrides）只改 config.*，
+# 直接读环境会让这些键形同虚设。
+_API_MAX_RETRIES = max(0, int(config.YOUTUBE_API_MAX_RETRIES))
+_API_RETRY_BASE_DELAY = max(1.0, float(config.YOUTUBE_API_RETRY_DELAY))
 
 
 class YouTubeNetworkError(Exception):
