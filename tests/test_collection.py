@@ -204,6 +204,46 @@ class PendingCollectionQueueTests(unittest.TestCase):
         self.assertEqual(entries[0]["status"], "pending")
         self.assertEqual(entries[0]["video_id"], "vid1")
 
+    def test_enqueue_reads_and_writes_under_the_queue_lock(self):
+        """回归：入队的读-改-写整段持锁，否则并发写者会拿旧列表覆盖掉新条目。"""
+        from yt2bili import atomic_io
+
+        lock = atomic_io.path_lock(self.queue)
+        held_during_load = []
+        real_load = collection_mod.load_pending_collections
+
+        def spy(path):
+            held_during_load.append(lock.locked())
+            return real_load(path)
+
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "load_pending_collections", spy):
+            collection_mod.enqueue_collection(
+                collection="Bynx", bvid="BV1", aid=1, video_id="vid1"
+            )
+        self.assertEqual(held_during_load, [True])
+
+    def test_concurrent_enqueues_both_survive(self):
+        """两个线程同时入队不同的视频，队列里两条都要在（不能互相覆盖）。"""
+        import threading
+
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue):
+            threads = [
+                threading.Thread(
+                    target=collection_mod.enqueue_collection,
+                    kwargs=dict(collection="C", bvid=f"BV{i}", aid=i, video_id=f"v{i}"),
+                )
+                for i in (1, 2)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(5)
+        entries = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual({e["video_id"] for e in entries}, {"v1", "v2"})
+
     def test_enqueue_upserts_by_video_id(self):
         with patch.object(collection_mod, "pending_collections_path",
                           return_value=self.queue):

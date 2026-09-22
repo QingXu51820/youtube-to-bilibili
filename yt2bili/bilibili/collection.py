@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from yt2bili import config
+from yt2bili import atomic_io, config
 
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -491,11 +491,7 @@ def load_pending_collections(path: Path) -> list[dict]:
 
 def save_pending_collections(path: Path, entries: list[dict]) -> None:
     """Atomically write the queue."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    tmp.replace(path)
+    atomic_io.write_json(path, entries)
 
 
 def enqueue_collection(
@@ -507,35 +503,40 @@ def enqueue_collection(
     channel_title: str = "",
     published_at: str = "",
 ) -> None:
-    """Record a just-uploaded video that still needs to join a 合集."""
+    """Record a just-uploaded video that still needs to join a 合集.
+
+    读-改-写整段持锁（与字幕队列同一套做法）：上传路径随时可能入队，而 sweep
+    手里握着一份很久以前读出来的列表 —— 后者写回时会把这期间新增的条目一起抹掉。
+    """
     path = pending_collections_path()
-    entries = load_pending_collections(path)
-    entry = {
-        "video_id": video_id,
-        "bvid": bvid,
-        "aid": int(aid or 0),
-        "collection_name": collection,
-        "channel_title": channel_title,
-        "published_at": published_at or "",
-        "added_at": _now_iso(),
-        "last_attempt_at": "",
-        "attempts": 0,
-        "status": "pending",
-        "last_error": "",
-    }
-    if video_id:
-        for i, existing in enumerate(entries):
-            if existing.get("video_id") == video_id:
-                if existing.get("status") == "added":
-                    return  # already in a collection
-                entry["published_at"] = (
-                    existing.get("published_at") or published_at or ""
-                )
-                entries[i] = entry
-                save_pending_collections(path, entries)
-                return
-    entries.append(entry)
-    save_pending_collections(path, entries)
+    with atomic_io.path_lock(path):
+        entries = load_pending_collections(path)
+        entry = {
+            "video_id": video_id,
+            "bvid": bvid,
+            "aid": int(aid or 0),
+            "collection_name": collection,
+            "channel_title": channel_title,
+            "published_at": published_at or "",
+            "added_at": _now_iso(),
+            "last_attempt_at": "",
+            "attempts": 0,
+            "status": "pending",
+            "last_error": "",
+        }
+        if video_id:
+            for i, existing in enumerate(entries):
+                if existing.get("video_id") == video_id:
+                    if existing.get("status") == "added":
+                        return  # already in a collection
+                    entry["published_at"] = (
+                        existing.get("published_at") or published_at or ""
+                    )
+                    entries[i] = entry
+                    save_pending_collections(path, entries)
+                    return
+        entries.append(entry)
+        save_pending_collections(path, entries)
 
 
 def backfill_collections(
@@ -559,41 +560,42 @@ def backfill_collections(
         return 0
     videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
 
-    entries = load_pending_collections(queue_path)
-    queued_ids = {e.get("video_id", "") for e in entries}
     added = 0
     skipped_unattributed = 0
-    for video_id, v in videos.items():
-        if not video_id or video_id in queued_ids:
-            continue
-        if str(v.get("status", "")) != "uploaded":
-            continue
-        bvid = str(v.get("bvid", "") or "")
-        if not bvid:
-            continue
-        channel_title = str(v.get("channel_title", "") or "")
-        collection_name = (resolve_collection_name(channel_title) or "").strip()
-        if not collection_name:
-            skipped_unattributed += 1
-            continue
-        entries.append({
-            "video_id": video_id,
-            "bvid": bvid,
-            "aid": int(v.get("aid", 0) or 0),
-            "collection_name": collection_name,
-            "channel_title": channel_title,
-            "published_at": str(v.get("published_at", "") or ""),
-            "added_at": _now_iso(),
-            "last_attempt_at": "",
-            "attempts": 0,
-            "status": "pending",
-            "last_error": "",
-        })
-        queued_ids.add(video_id)
-        added += 1
-        print(f"[合集] 回填: {v.get('title', '')} → 合集「{collection_name}」 ({bvid})")
-    if added:
-        save_pending_collections(queue_path, entries)
+    with atomic_io.path_lock(queue_path):
+        entries = load_pending_collections(queue_path)
+        queued_ids = {e.get("video_id", "") for e in entries}
+        for video_id, v in videos.items():
+            if not video_id or video_id in queued_ids:
+                continue
+            if str(v.get("status", "")) != "uploaded":
+                continue
+            bvid = str(v.get("bvid", "") or "")
+            if not bvid:
+                continue
+            channel_title = str(v.get("channel_title", "") or "")
+            collection_name = (resolve_collection_name(channel_title) or "").strip()
+            if not collection_name:
+                skipped_unattributed += 1
+                continue
+            entries.append({
+                "video_id": video_id,
+                "bvid": bvid,
+                "aid": int(v.get("aid", 0) or 0),
+                "collection_name": collection_name,
+                "channel_title": channel_title,
+                "published_at": str(v.get("published_at", "") or ""),
+                "added_at": _now_iso(),
+                "last_attempt_at": "",
+                "attempts": 0,
+                "status": "pending",
+                "last_error": "",
+            })
+            queued_ids.add(video_id)
+            added += 1
+            print(f"[合集] 回填: {v.get('title', '')} → 合集「{collection_name}」 ({bvid})")
+        if added:
+            save_pending_collections(queue_path, entries)
     if skipped_unattributed:
         print(
             f"[合集] 跳过 {skipped_unattributed} 条无法确定归属频道的历史记录"
@@ -616,7 +618,6 @@ def enrich_queue_dates(queue_path: Path, state_path: Path) -> int:
         return 0
     videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
 
-    entries = load_pending_collections(queue_path)
     by_id = {
         vid: str(v.get("published_at", "") or "")
         for vid, v in videos.items()
@@ -629,18 +630,20 @@ def enrich_queue_dates(queue_path: Path, state_path: Path) -> int:
     }
 
     filled = 0
-    for entry in entries:
-        if entry.get("published_at"):
-            continue
-        date = (
-            by_id.get(str(entry.get("video_id", "") or ""), "")
-            or by_bvid.get(str(entry.get("bvid", "") or ""), "")
-        )
-        if date:
-            entry["published_at"] = date
-            filled += 1
-    if filled:
-        save_pending_collections(queue_path, entries)
+    with atomic_io.path_lock(queue_path):
+        entries = load_pending_collections(queue_path)
+        for entry in entries:
+            if entry.get("published_at"):
+                continue
+            date = (
+                by_id.get(str(entry.get("video_id", "") or ""), "")
+                or by_bvid.get(str(entry.get("bvid", "") or ""), "")
+            )
+            if date:
+                entry["published_at"] = date
+                filled += 1
+        if filled:
+            save_pending_collections(queue_path, entries)
     return filled
 
 
@@ -1533,7 +1536,8 @@ async def _sweep_pending_collections(
             "本轮已放弃归入合集"
         )
     if changed:
-        save_pending_collections(queue_path, entries)
+        with atomic_io.path_lock(queue_path):
+            save_pending_collections(queue_path, entries)
     if reorder_touched and touched:
         await _reorder_touched_collections(
             credential,
