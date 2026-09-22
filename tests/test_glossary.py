@@ -66,6 +66,47 @@ class SaveLoadRoundtripTests(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
 
+class FetchJsonTests(unittest.TestCase):
+    """两个数据源共用一个取数函数（以前是 list 版 + dict 版两份）。"""
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    def test_list_payload(self):
+        with patch.object(gl.requests, "get", return_value=self._Resp([{"a": 1}])):
+            self.assertEqual(gl._fetch_json("http://x"), [{"a": 1}])
+
+    def test_dict_payload_with_expect_dict(self):
+        with patch.object(gl.requests, "get", return_value=self._Resp({"a": 1})):
+            self.assertEqual(gl._fetch_json("http://x", expect=dict), {"a": 1})
+            self.assertEqual(gl._fetch_json_dict("http://x"), {"a": 1})
+
+    def test_type_mismatch_returns_empty_container(self):
+        with patch.object(gl.requests, "get", return_value=self._Resp({"a": 1})):
+            self.assertEqual(gl._fetch_json("http://x"), [])
+        with patch.object(gl.requests, "get", return_value=self._Resp([1, 2])):
+            self.assertEqual(gl._fetch_json_dict("http://x"), {})
+
+    def test_network_error_returns_empty_container(self):
+        with patch.object(gl.requests, "get", side_effect=OSError("down")):
+            self.assertEqual(gl._fetch_json("http://x"), [])
+            self.assertEqual(gl._fetch_json_dict("http://x"), {})
+
+    def test_timeout_comes_from_the_shared_config_key(self):
+        """回归：Deadlock 那份读的是根本不存在的 config.DISCORD_HTTP_TIMEOUT。"""
+        with patch.object(gl.requests, "get", return_value=self._Resp([])) as get, \
+             patch.object(gl.config, "YOUTUBE_HTTP_TIMEOUT", 45):
+            gl._fetch_json_dict("http://x")
+        self.assertEqual(get.call_args.kwargs["timeout"], 45)
+
+
 class BuildDeadlockGlossaryTests(unittest.TestCase):
     """回归：EN 词表拉取失败 → 空词表（防止 \b\b 空键污染标题）。"""
 
@@ -155,12 +196,9 @@ class BuildSnapGlossaryTests(unittest.TestCase):
 
 class GetGlossaryTests(unittest.TestCase):
     def tearDown(self):
-        gl._glossary = None
-        gl._last_fetch_time = 0.0
-        gl._fetch_in_progress = False
-        gl._deadlock_glossary = None
-        gl._deadlock_last_fetch_time = 0.0
-        gl._deadlock_fetch_in_progress = False
+        # 模块级缓存会跨用例残留；两个术语表各自持有自己的状态对象
+        gl._SNAP_GLOSSARY_CACHE_STATE.reset()
+        gl._DEADLOCK_GLOSSARY_CACHE_STATE.reset()
 
     def test_disabled_returns_empty(self):
         with patch.object(gl.config, "SNAP_GLOSSARY_ENABLED", False):

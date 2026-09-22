@@ -147,13 +147,6 @@ _SNAP_AUTO_APPLY_TERMS: frozenset[str] = frozenset({
     "Google Play Achievements", "Web Shop",
 })
 
-# ── Module-level cache ────────────────────────────────────────────────
-_glossary: dict[str, str] | None = None
-_glossary_lock = threading.Lock()
-_last_fetch_time: float = 0.0
-_fetch_in_progress: bool = False  # prevents concurrent background fetches
-
-
 def _load_cache(path: Path) -> dict[str, str] | None:
     """Load glossary from a local cache file. Returns None on any failure."""
     data = atomic_io.read_json(path, None, expect=dict)
@@ -198,17 +191,32 @@ def _load_game_terms(path: Path) -> dict[str, str]:
     return dict(_SNAP_GAME_TERMS)
 
 
-def _fetch_json(url: str) -> list[dict[str, Any]]:
-    """Fetch a JSON array from a URL. Returns empty list on failure."""
+#: deadlock.wiki 会对没有浏览器 UA 的请求返回 403；untapped.gg 不在乎。
+_UA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+}
+
+
+def _fetch_json(url: str, expect: type = list):
+    """GET 一个 JSON 接口；任何失败（网络 / 状态码 / 解析 / 类型不符）都返回空容器。
+
+    两个数据源共用这一个取数函数（以前是两份：一份返回 list、一份返回 dict）。
+    超时统一走 ``config.YOUTUBE_HTTP_TIMEOUT`` —— Deadlock 那份原本读的是
+    ``config.DISCORD_HTTP_TIMEOUT``，而根本没有这个配置项，等于硬编码 30 秒。
+    """
+    empty = expect()
     try:
-        # Generic network timeout — must not piggyback on the Discord setting.
         timeout = max(5, int(getattr(config, "YOUTUBE_HTTP_TIMEOUT", None) or 30))
-        resp = requests.get(url, timeout=timeout)
+        resp = requests.get(url, timeout=timeout, headers=_UA_HEADERS)
         resp.raise_for_status()
         data = resp.json()
-        return data if isinstance(data, list) else []
+        return data if isinstance(data, expect) else empty
     except Exception:
-        return []
+        return empty
 
 
 _DESCRIPTION_TAG_RE = re.compile(r"<[^>]+>")
@@ -289,20 +297,98 @@ def _build_glossary() -> dict[str, str]:
     return glossary
 
 
-def _background_refresh(cache_path: Path) -> None:
-    """Fetch fresh glossary data and update the module-level cache."""
-    global _glossary, _last_fetch_time, _fetch_in_progress
+class _GlossaryCache:
+    """一个「内存缓存 + 磁盘缓存 + 过期后台刷新」的术语表（SNAP / Deadlock 共用）。
+
+    两个术语表原本各写了一份一模一样的 get/refresh 组合（0.86 相似），差异只有
+    构建函数、配置键、以及 SNAP 要多存一份 game_terms —— 分头维护时这边改了
+    TTL 逻辑那边不会跟着改。``enabled`` / ``ttl`` / ``cache_path`` 都是 callable，
+    读取时才取 ``config.*``，这样 profile 覆盖与测试的 patch 都能生效。
+    """
+
+    def __init__(self, *, label: str, build, enabled, ttl, cache_path,
+                 keep_game_terms: bool = False) -> None:
+        self.label = label
+        self._build = build
+        self._enabled = enabled
+        self._ttl = ttl
+        self._cache_path = cache_path
+        self._keep_game_terms = keep_game_terms
+        self._lock = threading.Lock()
+        self._glossary: dict[str, str] | None = None
+        self._last_fetch = 0.0
+        self._fetching = False
+
+    def reset(self) -> None:
+        """丢掉内存状态（测试用：模块级缓存会跨用例残留）。"""
+        with self._lock:
+            self._glossary = None
+            self._last_fetch = 0.0
+            self._fetching = False
+
+    def get(self) -> dict[str, str]:
+        """当前术语表；首次调用读缓存或同步拉取，过期则后台刷新并先返回旧值。"""
+        if not self._enabled():
+            return {}
+
+        cache_path = self._cache_path()
+        with self._lock:
+            if self._glossary is None:
+                self._glossary = _load_cache(cache_path)
+                if self._glossary is not None:
+                    # 用缓存文件的 mtime 作为 TTL 起点 —— 不是"现在"：缓存可能已经
+                    # months stale，用 now 会让它被当成刚更新过而永远不再刷新。
+                    self._last_fetch = _cache_mtime(cache_path)
+                else:
+                    # 没有缓存：只能同步拉一次
+                    glossary = self._build()
+                    if glossary:
+                        self._glossary = glossary
+                        self._last_fetch = time.time()
+                        self._save(cache_path)
+                    return self._glossary or {}
+
+            if time.time() - self._last_fetch >= self._ttl() and not self._fetching:
+                self._fetching = True
+                threading.Thread(target=self._refresh, args=(cache_path,), daemon=True).start()
+
+            return self._glossary or {}
+
+    def _refresh(self, cache_path: Path) -> None:
+        """后台拉取新数据；失败时保留旧缓存。"""
+        try:
+            glossary = self._build()
+            if glossary:
+                with self._lock:
+                    self._glossary = glossary
+                    self._last_fetch = time.time()
+                self._save(cache_path)
+        except Exception:
+            pass  # keep using old cache
+        finally:
+            self._fetching = False
+
+    def _save(self, cache_path: Path) -> None:
+        game_terms = _load_game_terms(cache_path) if self._keep_game_terms else None
+        _save_cache(cache_path, self._glossary or {}, game_terms=game_terms)
+
+
+def _cache_mtime(path: Path) -> float:
+    """缓存文件的修改时间；取不到时退回"现在"。"""
     try:
-        glossary = _build_glossary()
-        if glossary:
-            with _glossary_lock:
-                _glossary = glossary
-                _last_fetch_time = time.time()
-            _save_cache(cache_path, glossary, game_terms=_load_game_terms(cache_path))
-    except Exception:
-        pass  # keep using old cache
-    finally:
-        _fetch_in_progress = False
+        return path.stat().st_mtime
+    except OSError:
+        return time.time()
+
+
+_SNAP_GLOSSARY_CACHE_STATE = _GlossaryCache(
+    label="SNAP",
+    build=lambda: _build_glossary(),
+    enabled=lambda: config.SNAP_GLOSSARY_ENABLED,
+    ttl=lambda: max(3600, config.SNAP_GLOSSARY_TTL),
+    cache_path=lambda: Path(config.SNAP_GLOSSARY_CACHE),
+    keep_game_terms=True,
+)
 
 
 def get_glossary() -> dict[str, str]:
@@ -312,43 +398,7 @@ def get_glossary() -> dict[str, str]:
     On subsequent calls: returns cached data; if TTL expired, triggers
     a background refresh while continuing to serve the stale cache.
     """
-    global _glossary, _last_fetch_time, _fetch_in_progress
-
-    if not config.SNAP_GLOSSARY_ENABLED:
-        return {}
-
-    ttl = max(3600, config.SNAP_GLOSSARY_TTL)
-    cache_path = Path(config.SNAP_GLOSSARY_CACHE)
-
-    with _glossary_lock:
-        # First load: try cache, then fetch
-        if _glossary is None:
-            _glossary = _load_cache(cache_path)
-            if _glossary is not None:
-                # Track the cache file's mtime for TTL — not now. The cache
-                # may be months stale; max(now, mtime) would always yield
-                # now and defeat TTL tracking (stale cache served forever).
-                try:
-                    _last_fetch_time = cache_path.stat().st_mtime
-                except OSError:
-                    _last_fetch_time = time.time()
-            else:
-                # No cache — must fetch synchronously
-                glossary = _build_glossary()
-                if glossary:
-                    _glossary = glossary
-                    _last_fetch_time = time.time()
-                    _save_cache(cache_path, glossary, game_terms=_load_game_terms(cache_path))
-                return _glossary or {}
-
-        # Check if refresh is needed
-        age = time.time() - _last_fetch_time
-        if age >= ttl and not _fetch_in_progress:
-            _fetch_in_progress = True
-            t = threading.Thread(target=_background_refresh, args=(cache_path,), daemon=True)
-            t.start()
-
-        return _glossary or {}
+    return _SNAP_GLOSSARY_CACHE_STATE.get()
 
 
 def get_snap_game_terms() -> dict[str, str]:
@@ -396,12 +446,6 @@ _HERO_ALIASES = {
     "The Magnificent Sinclair": "Sinclair",
     "Doorman": "The Doorman",
 }
-
-_deadlock_glossary: dict[str, str] | None = None
-_deadlock_glossary_lock = threading.Lock()
-_deadlock_last_fetch_time: float = 0.0
-_deadlock_fetch_in_progress: bool = False
-
 
 def _build_deadlock_glossary() -> dict[str, str]:
     """Fetch hero and item names from deadlock.wiki Lang JSON files.
@@ -461,37 +505,18 @@ def _build_deadlock_glossary() -> dict[str, str]:
 
 def _fetch_json_dict(url: str) -> dict[str, Any]:
     """Fetch a JSON object from a URL. Returns empty dict on failure."""
-    try:
-        timeout = max(5, int(getattr(config, "DISCORD_HTTP_TIMEOUT", None) or 30))
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        }
-        resp = requests.get(url, timeout=timeout, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    return _fetch_json(url, expect=dict)
 
 
-def _deadlock_background_refresh(cache_path: Path) -> None:
-    """Fetch fresh Deadlock glossary and update the module-level cache."""
-    global _deadlock_glossary, _deadlock_last_fetch_time, _deadlock_fetch_in_progress
-    try:
-        glossary = _build_deadlock_glossary()
-        if glossary:
-            with _deadlock_glossary_lock:
-                _deadlock_glossary = glossary
-                _deadlock_last_fetch_time = time.time()
-            _save_cache(cache_path, glossary)
-    except Exception:
-        pass
-    finally:
-        _deadlock_fetch_in_progress = False
+_DEADLOCK_GLOSSARY_CACHE_STATE = _GlossaryCache(
+    label="Deadlock",
+    build=lambda: _build_deadlock_glossary(),
+    enabled=lambda: config.DEADLOCK_GLOSSARY_ENABLED,
+    ttl=lambda: max(
+        3600, getattr(config, "DEADLOCK_GLOSSARY_TTL", config.SNAP_GLOSSARY_TTL)
+    ),
+    cache_path=lambda: Path(config.DEADLOCK_GLOSSARY_CACHE),
+)
 
 
 def get_deadlock_glossary() -> dict[str, str]:
@@ -501,43 +526,7 @@ def get_deadlock_glossary() -> dict[str, str]:
     On subsequent calls: returns cached data; if TTL expired, triggers
     a background refresh while continuing to serve the stale cache.
     """
-    global _deadlock_glossary, _deadlock_last_fetch_time, _deadlock_fetch_in_progress
-
-    if not config.DEADLOCK_GLOSSARY_ENABLED:
-        return {}
-
-    ttl = max(3600, getattr(config, "DEADLOCK_GLOSSARY_TTL", config.SNAP_GLOSSARY_TTL))
-    cache_path = Path(config.DEADLOCK_GLOSSARY_CACHE)
-
-    with _deadlock_glossary_lock:
-        # First load: try cache, then fetch
-        if _deadlock_glossary is None:
-            _deadlock_glossary = _load_cache(cache_path)
-            if _deadlock_glossary is not None:
-                # Same mtime-based TTL as get_glossary — see note there.
-                try:
-                    _deadlock_last_fetch_time = cache_path.stat().st_mtime
-                except OSError:
-                    _deadlock_last_fetch_time = time.time()
-            else:
-                # No cache — must fetch synchronously
-                glossary = _build_deadlock_glossary()
-                if glossary:
-                    _deadlock_glossary = glossary
-                    _deadlock_last_fetch_time = time.time()
-                    _save_cache(cache_path, glossary)
-                return _deadlock_glossary or {}
-
-        # Check if refresh is needed
-        age = time.time() - _deadlock_last_fetch_time
-        if age >= ttl and not _deadlock_fetch_in_progress:
-            _deadlock_fetch_in_progress = True
-            t = threading.Thread(
-                target=_deadlock_background_refresh, args=(cache_path,), daemon=True
-            )
-            t.start()
-
-        return _deadlock_glossary or {}
+    return _DEADLOCK_GLOSSARY_CACHE_STATE.get()
 
 
 # ── Brawl Stars Glossary (static data/brawl_stars_glossary.json) ─────
