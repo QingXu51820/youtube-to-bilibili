@@ -286,7 +286,7 @@ class BilibiliSubtitleApiTests(unittest.TestCase):
     def test_check_response_auth_error(self):
         resp = SimpleNamespace(status_code=401, json=lambda: {})
         with self.assertRaises(RuntimeError) as ctx:
-            bsub._check_response(resp)
+            bsub.check_response(resp)
         self.assertIn("重新扫码登录", str(ctx.exception))
 
     def test_check_response_nonzero_code_with_detail(self):
@@ -296,12 +296,12 @@ class BilibiliSubtitleApiTests(unittest.TestCase):
                           "data": [{"line": 3, "error_msg": "时间超长"}]},
         )
         with self.assertRaises(RuntimeError) as ctx:
-            bsub._check_response(resp, "submit_subtitle")
+            bsub.check_response(resp, "submit_subtitle")
         self.assertIn("L3: 时间超长", str(ctx.exception))
 
     def test_check_response_ok(self):
         resp = SimpleNamespace(status_code=200, json=lambda: {"code": 0, "data": {}})
-        self.assertEqual(bsub._check_response(resp), {"code": 0, "data": {}})
+        self.assertEqual(bsub.check_response(resp), {"code": 0, "data": {}})
 
     def test_submit_subtitle_without_sessdata_raises(self):
         with patch.object(config, "BILI_SESSDATA", ""), \

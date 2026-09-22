@@ -18,13 +18,11 @@ from bilibili_api import video_uploader
 
 from yt2bili import config
 from yt2bili.bilibili import auth
+from yt2bili.bilibili.api import AUTH_ERROR_CODES
 from yt2bili.media.cover import image_size, is_valid_image
 
 if TYPE_CHECKING:
     from bilibili_api import Credential
-
-# HTTP status codes that indicate credential / authentication issues
-_AUTH_ERROR_CODES = (401, 403)
 
 
 def _make_minimal_jpeg() -> bytes:
@@ -324,7 +322,7 @@ async def _upload_async(
         err = (event_data or {}).get("err")
         if err is not None:
             code = getattr(err, 'code', 0) or getattr(err, 'status', 0)
-            if code in _AUTH_ERROR_CODES:
+            if code in AUTH_ERROR_CODES:
                 print(f"[上传] 🔐 B站登录凭据已过期（HTTP {code}），需要重新登录")
             else:
                 print(f"[上传] ❌ 上传失败: {event_data}")
@@ -391,7 +389,7 @@ async def _upload_async(
         )
     except NetworkException as e:
         code = getattr(e, 'code', 0) or getattr(e, 'status', 0)
-        if code in _AUTH_ERROR_CODES:
+        if code in AUTH_ERROR_CODES:
             msg = (
                 f"B站登录凭据已过期（HTTP {code}），请重新扫码登录。\n"
                 f"运行: python main.py --login"

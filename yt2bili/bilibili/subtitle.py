@@ -13,23 +13,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 import httpx
 from yt2bili import atomic_io, config
+from yt2bili.bilibili.api import (
+    GONE_CODES,
+    VIDEO_INFO_URL,
+    check_response,
+    extract_code,
+    is_gone_code,
+    is_gone_error,
+)
 from yt2bili import profile as profile_mod
 from yt2bili.timestamps import parse_iso, utc_now
 
 # ── Constants ────────────────────────────────────────────────────────
 
-_BILIBILI_VIDEO_INFO_URL = "https://api.bilibili.com/x/web-interface/view"
 _BILIBILI_SUBTITLE_DRAFT_URL = "https://api.bilibili.com/x/v2/dm/subtitle/draft/save"
 _BILIBILI_SUBTITLE_DEL_URL = "https://api.bilibili.com/x/v2/dm/subtitle/del"
 
-_AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
 _UPLOAD_TIMEOUT = 30.0
-
-# B站错误码：稿件已消失。网页端统一渲染"视频去哪了呢？"
-# 实测：62012（"稿件不可见"的另一种返回）在用**UP主本人**的凭据查询时会返回 code=0
-# ——那是"仅自己可见"，稿件还在，不能当删除处理；所以只认下面两个码。
-GONE_CODES = (-404, 62002)
 
 # 稿件消失后连续确认多少次才从字幕队列移除。刚上传的视频在审核期间同样会
 # 返回 62002，所以需要跨轮次确认，而不是一次判定就放弃。
@@ -132,52 +133,6 @@ def _build_client(timeout: float = _DEFAULT_TIMEOUT) -> httpx.Client:
     )
 
 
-def _check_response(resp: httpx.Response, label: str = "Bilibili API") -> dict:
-    """Check an httpx response for auth errors and JSON validity."""
-    if resp.status_code in _AUTH_ERROR_CODES:
-        raise RuntimeError(
-            f"B站登录凭据已过期（HTTP {resp.status_code}），请重新扫码登录。\n"
-            f"运行: python main.py --login"
-        )
-    try:
-        data = resp.json()
-    except Exception as e:
-        raise RuntimeError(f"{label} 返回非 JSON 响应: {e}")
-
-    code = data.get("code", -1)
-    if code != 0:
-        msg = data.get("message", str(data))
-        # Include detailed error data when available (e.g. subtitle line errors)
-        err_data = data.get("data")
-        if isinstance(err_data, list) and err_data:
-            details = "; ".join(
-                f"L{d.get('line', '?')}: {d.get('error_msg', str(d))}"
-                for d in err_data[:10]
-            )
-            if len(err_data) > 10:
-                details += f" ...(+{len(err_data) - 10} more)"
-            msg = f"{msg} [{details}]"
-        raise RuntimeError(f"{label} 返回错误 (code={code}): {msg}")
-
-    return data
-
-
-def extract_code(message: str) -> int | None:
-    """B站错误码 from a ``_check_response`` message, or None when absent."""
-    match = re.search(r"code=(-?\d+)", message)
-    return int(match.group(1)) if match else None
-
-
-def is_gone_code(code: int | None) -> bool:
-    """True when *code* means the 稿件 no longer exists."""
-    return code in GONE_CODES
-
-
-def is_gone_error(exc: BaseException) -> bool:
-    """True when *exc* (raised by this module) reports a vanished 稿件."""
-    return is_gone_code(extract_code(str(exc)))
-
-
 # ── Public API ────────────────────────────────────────────────────────
 
 def get_video_pages(bvid: str = "", aid: int = 0) -> list[dict]:
@@ -206,8 +161,8 @@ def get_video_pages(bvid: str = "", aid: int = 0) -> list[dict]:
 
     with _build_client() as client:
         try:
-            resp = client.get(_BILIBILI_VIDEO_INFO_URL, params=params)
-            data = _check_response(resp, "get_video_pages")
+            resp = client.get(VIDEO_INFO_URL, params=params)
+            data = check_response(resp, "get_video_pages")
         except httpx.RequestError as e:
             raise RuntimeError(f"B站视频信息查询网络错误: {e}")
 
@@ -315,7 +270,7 @@ def _dedup_subtitles(aid: int, cid: int, lan: str) -> int:
         import httpx
         with _build_client(timeout=_DEFAULT_TIMEOUT) as client:
             resp = client.get(
-                _BILIBILI_VIDEO_INFO_URL,
+                VIDEO_INFO_URL,
                 params={"aid": aid},
             )
             if resp.status_code != 200:
@@ -418,7 +373,7 @@ def submit_subtitle(
             ct = resp.headers.get("content-type", "")
             if "json" not in ct:
                 print(f"[字幕] [DEBUG] HTTP {resp.status_code}: {resp.text[:300]}")
-            data = _check_response(resp, "submit_subtitle")
+            data = check_response(resp, "submit_subtitle")
         except httpx.RequestError as e:
             raise RuntimeError(f"B站字幕上传网络错误: {e}")
 
@@ -662,7 +617,7 @@ def _recover_orphaned_subtitles(
     for i, entry in enumerate(orphaned, 1):
         bvid = entry["bvid"]
         try:
-            resp = client.get(_BILIBILI_VIDEO_INFO_URL, params={"bvid": bvid})
+            resp = client.get(VIDEO_INFO_URL, params={"bvid": bvid})
             time.sleep(0.3)  # avoid rate limiting
             if resp.status_code != 200:
                 recoverable.append(entry)
@@ -1139,7 +1094,7 @@ def requeue_missing_subtitles() -> int:
             bvid = item.get("bvid", "")
             video_id = item.get("video_id", "")
             try:
-                resp = client.get(_BILIBILI_VIDEO_INFO_URL, params={"bvid": bvid})
+                resp = client.get(VIDEO_INFO_URL, params={"bvid": bvid})
                 time.sleep(0.3)  # avoid rate limiting
                 if resp.status_code != 200:
                     skipped += 1

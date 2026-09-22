@@ -21,7 +21,7 @@ from yt2bili.bilibili.collection import (
     BilibiliApiError,
     ChannelCollectionMatch,
     CollectionInfo,
-    _check_response,
+    check_response,
     add_uploaded_video_to_collection,
     add_video_to_collection,
     build_episodes,
@@ -170,17 +170,17 @@ class CheckResponseTests(unittest.TestCase):
     def test_auth_error_raises_relogin_hint(self):
         for status in (401, 403):
             with self.assertRaises(RuntimeError) as ctx:
-                _check_response(FakeResponse({}, status_code=status), "合集")
+                check_response(FakeResponse({}, status_code=status), "合集")
             self.assertIn("重新扫码登录", str(ctx.exception))
 
     def test_nonzero_code_raises(self):
         with self.assertRaises(RuntimeError) as ctx:
-            _check_response(FakeResponse({"code": -400, "message": "bad"}), "创建合集")
+            check_response(FakeResponse({"code": -400, "message": "bad"}), "创建合集")
         self.assertIn("创建合集", str(ctx.exception))
         self.assertIn("bad", str(ctx.exception))
 
     def test_ok_returns_data(self):
-        data = _check_response(FakeResponse({"code": 0, "data": {"url": "x"}}), "上传封面")
+        data = check_response(FakeResponse({"code": 0, "data": {"url": "x"}}), "上传封面")
         self.assertEqual(data["data"]["url"], "x")
 
 

@@ -22,6 +22,8 @@ from pathlib import Path
 
 import httpx
 from yt2bili import atomic_io, config
+from yt2bili.bilibili.api import VIDEO_INFO_URL
+from yt2bili.bilibili.api import check_response as api_check_response
 from yt2bili.timestamps import parse_iso, utc_now
 
 
@@ -39,11 +41,9 @@ _ADD_EPISODES_URL = (
 )
 _COVER_UP_URL = "https://member.bilibili.com/x/vu/web/cover/up"
 _PAGELIST_URL = "https://api.bilibili.com/x/player/pagelist"
-_VIDEO_VIEW_URL = "https://api.bilibili.com/x/web-interface/view"
 _NAV_URL = "https://api.bilibili.com/x/web-interface/nav"          # 登录态 → 自己的 mid
 _RELATION_STAT_URL = "https://api.bilibili.com/x/relation/stat"    # 公开接口 → 粉丝数
 
-_AUTH_ERROR_CODES = (401, 403)
 _DEFAULT_TIMEOUT = 15.0
 _COLLECTION_RETRY_INTERVAL = 3600  # 补归同一视频的最短重试间隔（秒）
 _COLLECTION_ADD_DELAY = 3.0        # 每次补归提交之间的间隔（秒），避免触发 B站 限流
@@ -239,24 +239,15 @@ def _cookies(credential) -> dict:
     return cookies
 
 
-def _check_response(resp: httpx.Response, label: str) -> dict:
-    """Check a creator-center response; raise on auth/API errors."""
-    if resp.status_code in _AUTH_ERROR_CODES:
-        raise RuntimeError(
-            f"B站登录凭据已过期（HTTP {resp.status_code}），请重新扫码登录。\n"
-            f"运行: python main.py --login"
-        )
-    try:
-        data = resp.json()
-    except Exception as e:
-        raise RuntimeError(f"{label} 返回非 JSON 响应: {e}")
-    code = data.get("code", -1)
-    if code != 0:
-        raise BilibiliApiError(
-            f"{label}失败: {data.get('message', str(data))} (code={code})",
-            code=code,
-        )
-    return data
+def check_response(resp: httpx.Response, label: str) -> dict:
+    """合集侧响应检查：``code != 0`` 抛带 ``code`` 的 :class:`BilibiliApiError`。
+
+    限流判定（``_RATE_LIMIT_CODES``）与 -404 判定都读这个属性，所以异常类型必须
+    保留；其余（凭据过期、非 JSON、错误消息拼装）交给共享实现。
+    """
+    return api_check_response(
+        resp, label, error_factory=lambda code, message: BilibiliApiError(message, code=code)
+    )
 
 
 def _client(credential) -> httpx.AsyncClient:
@@ -277,7 +268,7 @@ async def list_collections(credential) -> list[CollectionInfo]:
                 _COLLECTIONS_URL,
                 params={"pn": pn, "ps": 50, "order": "mtime", "sort": "desc"},
             )
-            data = _check_response(resp, "获取合集列表")
+            data = check_response(resp, "获取合集列表")
             body = data.get("data") or {}
             seasons = body.get("seasons") or []
             for s in seasons:
@@ -328,7 +319,7 @@ async def upload_cover(credential, cover_path: str) -> str:
             params={"ts": int(time.time() * 1000)},
             data=body,
         )
-        data = _check_response(resp, "上传合集封面")
+        data = check_response(resp, "上传合集封面")
     return str((data.get("data") or {}).get("url") or "")
 
 
@@ -343,7 +334,7 @@ async def create_collection(credential, title: str, cover_url: str) -> int:
     }
     async with _client(credential) as client:
         resp = await client.post(_CREATE_COLLECTION_URL, data=body)
-        data = _check_response(resp, "创建合集")
+        data = check_response(resp, "创建合集")
     return int(data.get("data") or 0)
 
 
@@ -358,12 +349,12 @@ async def fetch_follower_count(credential) -> int:
     """
     async with _client(credential) as client:
         nav = await client.get(_NAV_URL)
-        data = _check_response(nav, "获取账号信息")
+        data = check_response(nav, "获取账号信息")
         mid = int((data.get("data") or {}).get("mid") or 0)
         if not mid:
             raise RuntimeError("获取账号信息失败: nav 响应缺少 mid")
         stat = await client.get(_RELATION_STAT_URL, params={"vmid": mid})
-        data = _check_response(stat, "获取粉丝数")
+        data = check_response(stat, "获取粉丝数")
     body = data.get("data") or {}
     if "follower" not in body:
         raise RuntimeError("获取粉丝数失败: relation/stat 响应缺少 follower")
@@ -374,7 +365,7 @@ async def fetch_video_pages(credential, bvid: str) -> list[dict]:
     """Return ``[{"cid": int, "part": str}]`` for an uploaded video."""
     async with _client(credential) as client:
         resp = await client.get(_PAGELIST_URL, params={"bvid": bvid})
-        data = _check_response(resp, "获取分P信息")
+        data = check_response(resp, "获取分P信息")
     pages = data.get("data") or []
     return [
         {"cid": int(p.get("cid") or 0), "part": str(p.get("part") or "")}
@@ -796,7 +787,7 @@ async def fetch_collection_section(
         resp = await active_client.get(
             _SECTION_URL, params={"id": section_id}
         )
-        data = _check_response(resp, "获取合集小节")
+        data = check_response(resp, "获取合集小节")
         body = data.get("data") or {}
         return (body.get("section") or {}), (body.get("episodes") or [])
 
@@ -989,7 +980,7 @@ async def reorder_collection_section(
             params={"csrf": csrf},
             json=payload,
         )
-        return _check_response(resp, "重排合集")
+        return check_response(resp, "重排合集")
 
     if client is not None:
         await _submit(client)
@@ -1218,7 +1209,7 @@ async def add_video_to_collection(
             params={"csrf": getattr(credential, "bili_jct", "") or ""},
             json=payload,
         )
-        return _check_response(resp, "加入合集")
+        return check_response(resp, "加入合集")
 
 
 async def ensure_collection(
@@ -1355,7 +1346,7 @@ async def _sweep_pending_collections(
             changed = True
             continue
         except RuntimeError as e:
-            # HTTP 401/403 → _check_response raises with re-login hint
+            # HTTP 401/403 → check_response raises with re-login hint
             entry["status"] = "failed"
             entry["last_error"] = str(e)
             changed = True
