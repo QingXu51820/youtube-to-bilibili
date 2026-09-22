@@ -15,9 +15,12 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
+import threading
 import time
 from pathlib import Path
+from typing import Any
 
 #: rename/unlink 的重试次数与间隔 —— 对方通常只是读一下（毫秒级）。
 DEFAULT_ATTEMPTS = 10
@@ -27,6 +30,10 @@ DEFAULT_RETRY_DELAY = 0.2
 _RETRYABLE_WINERRORS = frozenset({5, 32, 33})
 
 _counter = itertools.count()
+
+#: 进程内按路径注册的互斥锁（见 :func:`path_lock`）。
+_path_locks: dict[str, threading.Lock] = {}
+_path_locks_guard = threading.Lock()
 
 
 def _is_sharing_violation(exc: OSError) -> bool:
@@ -145,3 +152,96 @@ def read_text_with_retry(
                 time.sleep(retry_delay)
     assert last_error is not None
     raise last_error
+
+
+def path_lock(path: Path | str) -> threading.Lock:
+    """该路径对应的进程内互斥锁（同一路径始终拿到同一把）。
+
+    同一进程里有多个写者会读-改-写同一份状态文件（例如翻译 worker、pipeline 线程和
+    延迟上传 sweep 都写 ``pending_subtitles.json``）：进程内的竞争靠这把锁串行化，
+    跨进程的竞争仍靠 :func:`atomic_write_text` 的原子替换 —— 两者缺一不可。
+
+    路径按绝对路径 + 大小写归一化后作键，所以相对写法与绝对写法拿到的是同一把锁。
+    """
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _path_locks_guard:
+        lock = _path_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _path_locks[key] = lock
+        return lock
+
+
+def write_json(path: Path | str, data: Any, *, indent: int = 2) -> None:
+    """原子写入 JSON，格式与仓内既有状态文件一致（不转义中文 + 缩进 + 结尾换行）。"""
+    atomic_write_text(path, json.dumps(data, ensure_ascii=False, indent=indent) + "\n")
+
+
+def read_json(
+    path: Path | str,
+    default: Any = None,
+    *,
+    expect: type | tuple[type, ...] | None = None,
+    backup_corrupt: bool = False,
+    label: str = "[state]",
+) -> Any:
+    """读取 JSON 状态文件，容忍文件缺失、BOM、空文件与内容损坏。
+
+    Args:
+        path: 文件路径。
+        default: 文件缺失/为空/损坏时返回的值。
+        expect: 顶层类型（如 ``dict``、``list``）；类型不符按损坏处理。``None`` 不校验。
+        backup_corrupt: 损坏时先把文件改名成 ``<name>.bak-<时间戳>`` 再返回 ``default``
+            —— 队列/状态文件用它保住现场；纯缓存文件不需要，静默取默认值即可。
+        label: 备份提示的日志前缀。
+
+    Returns:
+        解析出的对象，或 ``default``。
+
+    空文件（内容只有空白）按"没有数据"处理：写了一半就退出的临时状态不该制造备份。
+    """
+    target = Path(path)
+    try:
+        text = read_text_with_retry(target, encoding="utf-8-sig")
+    except (FileNotFoundError, OSError):
+        return default
+
+    if not text.strip():
+        return default
+
+    reason = ""
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        reason = f"不是有效 JSON: {exc}"
+    else:
+        if expect is not None and not isinstance(data, expect):
+            names = getattr(expect, "__name__", None) or "/".join(
+                getattr(t, "__name__", str(t)) for t in expect
+            )
+            reason = f"顶层类型不是 {names}"
+
+    if not reason:
+        return data
+
+    if backup_corrupt:
+        _backup_corrupt(target, reason, label)
+    return default
+
+
+def _backup_corrupt(path: Path, reason: str, label: str) -> None:
+    """把损坏的状态文件改名留档，并打印一行提示（改名失败则原地保留）。
+
+    损坏不能悄悄把数据丢掉：文件先备份再让调用方重建空状态，操作者事后还能看出
+    哪里出了问题。
+    """
+    backup = path.with_name(f"{path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    try:
+        path.replace(backup)
+    except OSError:
+        print(f"{label} [WARN] 状态文件损坏（{reason}），未能备份，按空状态继续", flush=True)
+        return
+    print(
+        f"{label} [WARN] 状态文件损坏（{reason}），已备份到 {backup.name} 并重建",
+        flush=True,
+    )

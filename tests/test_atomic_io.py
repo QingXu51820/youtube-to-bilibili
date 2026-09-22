@@ -18,8 +18,11 @@ from unittest.mock import patch
 
 from yt2bili.atomic_io import (
     atomic_write_text,
+    path_lock,
+    read_json,
     read_text_with_retry,
     remove_best_effort,
+    write_json,
 )
 
 WINDOWS = sys.platform == "win32"
@@ -201,6 +204,140 @@ class ReadTextWithRetryTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 read_text_with_retry(self.path, attempts=5, retry_delay=0)
         self.assertEqual(rep.call_count, 1)
+
+
+class WriteJsonTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.path = self.dir / "pending_collections.json"
+
+    def _leftovers(self):
+        return sorted(p.name for p in self.dir.iterdir() if p.name != self.path.name)
+
+    def test_writes_repo_style_json(self):
+        """仓内状态文件的统一格式：不转义中文 + 2 空格缩进 + 结尾换行。"""
+        write_json(self.path, [{"bvid": "BV1", "标题": "中文"}])
+        self.assertEqual(
+            self.path.read_text(encoding="utf-8"),
+            '[\n  {\n    "bvid": "BV1",\n    "标题": "中文"\n  }\n]\n',
+        )
+
+    def test_creates_missing_parent_dir_and_leaves_no_temp(self):
+        nested = self.dir / "state" / "snap" / "pending_subtitles.json"
+        write_json(nested, {"a": 1})
+        self.assertEqual(nested.read_text(encoding="utf-8"), '{\n  "a": 1\n}\n')
+        self.assertEqual(sorted(self.dir.rglob("*.tmp")), [])
+
+    def test_overwrites_previous_content(self):
+        write_json(self.path, {"new": True})
+        write_json(self.path, {"new": False})
+        self.assertEqual(read_json(self.path), {"new": False})
+
+
+class ReadJsonTests(unittest.TestCase):
+    """队列/状态文件的读取：缺失、BOM、空文件、损坏都不该让长跑进程崩掉。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.path = self.dir / "processed_videos.json"
+
+    def _backups(self):
+        return sorted(p.name for p in self.dir.iterdir() if ".bak-" in p.name)
+
+    def test_missing_file_returns_default(self):
+        self.assertEqual(read_json(self.path, []), [])
+        self.assertIsNone(read_json(self.path))
+
+    def test_tolerates_bom(self):
+        self.path.write_text('﻿{"a": 1}', encoding="utf-8")
+        self.assertEqual(read_json(self.path), {"a": 1})
+
+    def test_empty_file_is_not_corruption(self):
+        """写了一半就退出的空文件 = 没有数据，不该留下备份。"""
+        self.path.write_text("   \n", encoding="utf-8")
+        self.assertEqual(read_json(self.path, [], backup_corrupt=True), [])
+        self.assertEqual(self._backups(), [])
+
+    def test_corrupt_file_returns_default_without_backup(self):
+        self.path.write_text("{not json", encoding="utf-8")
+        self.assertEqual(read_json(self.path, []), [])
+        self.assertEqual(self._backups(), [])
+        self.assertTrue(self.path.exists())
+
+    def test_corrupt_file_is_backed_up_before_rebuild(self):
+        self.path.write_text("{not json", encoding="utf-8")
+        self.assertEqual(read_json(self.path, [], backup_corrupt=True), [])
+        backups = self._backups()
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(
+            (self.dir / backups[0]).read_text(encoding="utf-8"), "{not json"
+        )
+        self.assertFalse(self.path.exists())
+
+    def test_wrong_top_level_type_counts_as_corrupt(self):
+        self.path.write_text('{"videos": {}}', encoding="utf-8")
+        self.assertEqual(read_json(self.path, [], expect=list, backup_corrupt=True), [])
+        self.assertEqual(len(self._backups()), 1)
+
+    def test_matching_type_is_returned_unchanged(self):
+        self.path.write_text('[{"bvid": "BV1"}]', encoding="utf-8")
+        self.assertEqual(read_json(self.path, [], expect=list), [{"bvid": "BV1"}])
+        self.assertEqual(self._backups(), [])
+
+    def test_roundtrip_through_write_json(self):
+        payload = {"videos": {"abc": {"status": "uploaded"}}, "版本": 2}
+        write_json(self.path, payload)
+        self.assertEqual(read_json(self.path, {}, expect=dict), payload)
+
+
+class PathLockTests(unittest.TestCase):
+    """回归：同一进程内多个写者读-改-写同一份队列文件时必须串行化。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def test_same_path_returns_same_lock(self):
+        a = self.dir / "pending_subtitles.json"
+        self.assertIs(path_lock(a), path_lock(a))
+
+    def test_relative_and_absolute_spelling_share_one_lock(self):
+        relative = self.dir / "pending_collections.json"
+        self.assertIs(path_lock(relative), path_lock(Path(str(relative))))
+
+    def test_different_paths_get_different_locks(self):
+        self.assertIsNot(
+            path_lock(self.dir / "a.json"), path_lock(self.dir / "b.json")
+        )
+
+    def test_lock_actually_serializes(self):
+        lock = path_lock(self.dir / "pending_subtitles.json")
+        with lock:
+            self.assertFalse(path_lock(self.dir / "pending_subtitles.json").acquire(
+                blocking=False
+            ))
+        self.assertTrue(lock.acquire(blocking=False))
+        lock.release()
+
+    def test_held_lock_blocks_another_thread(self):
+        lock = path_lock(self.dir / "upload_log.json")
+        entered = threading.Event()
+
+        def worker():
+            with lock:
+                entered.set()
+
+        with lock:
+            thread = threading.Thread(target=worker)
+            thread.start()
+            self.assertFalse(entered.wait(0.1))   # 拿着锁时另一个线程进不来
+        thread.join(2)
+        self.assertTrue(entered.is_set())          # 释放后立刻进入
 
 
 if __name__ == "__main__":
