@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from yt2bili import config
+from yt2bili.timestamps import parse_iso
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -153,8 +154,10 @@ async def check_bilibili_auth(
     # Parse login time
     login_time = None
     if login_time_str:
+        login_time = parse_iso(login_time_str)
         try:
-            login_time = datetime.fromisoformat(login_time_str)
+            if login_time is None:
+                raise ValueError(login_time_str)
             result["login_time"] = login_time.isoformat()
             result["days_since_login"] = (
                 datetime.now(timezone.utc) - login_time
@@ -234,9 +237,8 @@ def check_youtube_oauth() -> dict[str, Any]:
         result["detail"] = "Token 文件中没有 expiry 字段，文件可能已损坏"
         return result
 
-    try:
-        expiry = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
+    expiry = parse_iso(expiry_str)
+    if expiry is None:
         result["status"] = "error"
         result["detail"] = f"无法解析 expiry 时间: {expiry_str}"
         return result

@@ -6,12 +6,13 @@ from __future__ import annotations
 import json
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from yt2bili import atomic_io, config
+from yt2bili.timestamps import BEIJING_TZ, beijing_now, parse_iso, utc_now
 from yt2bili.youtube.subscriptions import (
     Subscription,
     VideoItem,
@@ -132,17 +133,6 @@ ISO_DURATION_RE = re.compile(
 
 ProcessVideoFunc = Callable[[str], Any]
 WriteRunReportFunc = Callable[[list[Any]], Path]
-
-
-BEIJING_TZ = timezone(timedelta(hours=8))
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def beijing_now() -> str:
-    return datetime.now(BEIJING_TZ).isoformat(timespec="seconds")
 
 
 def project_path(path: str | Path) -> Path:

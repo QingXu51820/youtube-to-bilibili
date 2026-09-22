@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 from yt2bili import atomic_io, config
 from yt2bili import profile as profile_mod
+from yt2bili.timestamps import parse_iso, utc_now
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -475,23 +476,9 @@ def pending_subtitles_path() -> Path:
     return profile_mod.state_file_path("pending_subtitles.json")
 
 
-def _parse_stamp(raw: str) -> datetime | None:
-    """Parse a queue timestamp (``...Z`` or naive) into an aware datetime."""
-    raw = str(raw or "")
-    if not raw:
-        return None
-    try:
-        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return stamp
-
-
 def _entry_age_hours(entry: dict) -> float:
     """Hours since the queue entry was added; ``inf`` when the stamp is unusable."""
-    added = _parse_stamp(entry.get("added_at", ""))
+    added = parse_iso(entry.get("added_at", ""))
     if added is None:
         return float("inf")
     return (datetime.now(timezone.utc) - added).total_seconds() / 3600.0
@@ -505,15 +492,11 @@ def _defer_throttled(entry: dict) -> bool:
     """
     if int(entry.get("defer_attempts", 0) or 0) <= 0:
         return False
-    last = _parse_stamp(entry.get("last_defer_at", ""))
+    last = parse_iso(entry.get("last_defer_at", ""))
     if last is None:
         return False
     minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
     return minutes < config.SUBTITLE_DEFER_RETRY_MINUTES
-
-
-def _now_stamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _load_upload_log() -> list[dict]:
@@ -553,7 +536,7 @@ def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
             "bvid": bvid,
             "aid": aid,
             "translated_path": translated_path,
-            "added_at": _now_stamp(),
+            "added_at": utc_now(),
         }
         if bvid in existing:
             entries[existing[bvid]] = entry
@@ -582,7 +565,7 @@ def save_deferred_subtitle(
             "bvid": bvid,
             "aid": aid,
             "translated_path": translated_path,
-            "added_at": _now_stamp(),
+            "added_at": utc_now(),
             "defer_kind": kind,
             "defer_attempts": 0,
         }
@@ -1012,7 +995,7 @@ def upload_pending_subtitles() -> int:
                 if defer_kind:
                     defer_regen_used += 1
                     entry["defer_attempts"] = int(entry.get("defer_attempts", 0) or 0) + 1
-                    entry["last_defer_at"] = _now_stamp()
+                    entry["last_defer_at"] = utc_now()
                 regenerated, source_error = _try_regenerate(entry)
                 if regenerated:
                     print(

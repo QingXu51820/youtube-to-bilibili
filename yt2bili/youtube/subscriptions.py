@@ -26,6 +26,7 @@ import time as _time
 
 
 from yt2bili import config
+from yt2bili.timestamps import utc_now
 from yt2bili.config import PROJECT_ROOT
 from yt2bili.atomic_io import (
     atomic_write_text,
@@ -697,10 +698,7 @@ def fetch_recent_videos_api(
 
 def save_subscriptions_cache(path: Path, subscriptions: list[Subscription]) -> None:
     payload = {
-        # 秒精度，与其它状态文件一致（微秒精度会让同一份缓存里的时间戳格式不统一）
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
-            "+00:00", "Z"
-        ),
+        "generated_at": utc_now(),
         "subscriptions": [asdict(sub) for sub in subscriptions],
     }
     write_json(path, payload)

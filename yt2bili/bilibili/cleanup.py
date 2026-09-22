@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from yt2bili import atomic_io, config
+from yt2bili.timestamps import parse_iso, utc_now
 from yt2bili.bilibili import subtitle as subtitle_mod
 from yt2bili.bilibili.collection import (
     load_pending_collections,
@@ -62,7 +63,7 @@ class Candidate:
         """Hours since the newest known timestamp; ``inf`` when none is usable."""
         newest: datetime | None = None
         for raw in self.stamps:
-            parsed = _parse_iso(raw)
+            parsed = parse_iso(raw)
             if parsed is not None and (newest is None or parsed > newest):
                 newest = parsed
         if newest is None:
@@ -85,23 +86,6 @@ class CleanupReport:
     @property
     def cleaned(self) -> int:
         return len(self.gone)
-
-
-def _parse_iso(value: str) -> datetime | None:
-    """Parse an ISO-8601 timestamp, or None when missing/invalid."""
-    if not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 # ── Candidate collection ──────────────────────────────────────────────
@@ -305,7 +289,7 @@ def apply_purge(
                 continue
             entry["status"] = "deleted"
             entry["error"] = "稿件已在B站消失（B站清理时标记）"
-            entry["last_attempt_at"] = _now_iso()
+            entry["last_attempt_at"] = utc_now()
             touched += 1
         if touched:
             _backup(processed_path, stamp)

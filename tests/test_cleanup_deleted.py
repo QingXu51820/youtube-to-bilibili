@@ -323,7 +323,7 @@ class ScanProfileTests(unittest.TestCase):
     def test_fresh_entries_are_not_probed(self):
         self._seed({
             "new1": {"bvid": "BV1", "status": "uploaded", "aid": 1,
-                     "last_success_at": cleanup._now_iso()},
+                     "last_success_at": cleanup.utc_now()},
         })
         calls = []
 

@@ -835,7 +835,7 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
         """回归：队列里的无时区时间戳以前会让冷却相减抛 TypeError，打断整轮 sweep。"""
         naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         entry = self._entry(last_attempt_at=naive)
-        self.assertEqual(collection_mod._parse_iso(naive).tzinfo, timezone.utc)
+        self.assertEqual(collection_mod.parse_iso(naive).tzinfo, timezone.utc)
 
         self.queue.write_text(json.dumps([entry]), encoding="utf-8")
         fetch = AsyncMock(return_value=[{"cid": 1, "part": "P1"}])
@@ -852,7 +852,7 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
 
     def test_rate_limited_entries_use_short_cooldown(self):
         """回归：限流条目用短冷却重试，不必等满 1 小时。"""
-        recent = collection_mod._now_iso()
+        recent = collection_mod.utc_now()
         rate_limited = self._entry(last_attempt_at=recent)
         rate_limited["last_error"] = "加入合集失败: 手速太快啦～ (code=20113)"
         normal = self._entry(last_attempt_at=recent)

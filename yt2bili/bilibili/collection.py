@@ -22,6 +22,7 @@ from pathlib import Path
 
 import httpx
 from yt2bili import atomic_io, config
+from yt2bili.timestamps import parse_iso, utc_now
 
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -383,30 +384,6 @@ async def fetch_video_pages(credential, bvid: str) -> list[dict]:
 
 # ── Deferred collection queue ─────────────────────────────────────────
 
-def _now_iso() -> str:
-    """UTC ISO-8601 second-precision string (same format as monitor.utc_now)."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def _parse_iso(value: str) -> datetime | None:
-    """Parse an ISO-8601 timestamp, or None when missing/invalid.
-
-    无时区的时间戳按 UTC 处理：队列里混着手写时间戳与早期版本写下的 naive 值，
-    而调用方要拿它和 ``datetime.now(timezone.utc)`` 相减 —— naive 值直接相减会抛
-    ``TypeError``，把整轮 sweep 打断。
-    """
-    raw = str(value or "")
-    if not raw:
-        return None
-    try:
-        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if stamp.tzinfo is None:
-        stamp = stamp.replace(tzinfo=timezone.utc)
-    return stamp
-
-
 def _is_rate_limited(entry: dict) -> bool:
     """True when the entry's last error was a B站 collection rate limit."""
     error = entry.get("last_error") or ""
@@ -445,7 +422,7 @@ def _acquire_sweep_lock(queue_path: Path, stale_seconds: int = 1800) -> bool:
         except OSError:
             return False
     try:
-        os.write(fd, f"{os.getpid()} {_now_iso()}\n".encode("utf-8"))
+        os.write(fd, f"{os.getpid()} {utc_now()}\n".encode("utf-8"))
     finally:
         os.close(fd)
     return True
@@ -519,7 +496,7 @@ def enqueue_collection(
             "collection_name": collection,
             "channel_title": channel_title,
             "published_at": published_at or "",
-            "added_at": _now_iso(),
+            "added_at": utc_now(),
             "last_attempt_at": "",
             "attempts": 0,
             "status": "pending",
@@ -579,7 +556,7 @@ def backfill_collections(
                 "collection_name": collection_name,
                 "channel_title": channel_title,
                 "published_at": str(v.get("published_at", "") or ""),
-                "added_at": _now_iso(),
+                "added_at": utc_now(),
                 "last_attempt_at": "",
                 "attempts": 0,
                 "status": "pending",
@@ -688,7 +665,7 @@ def _normalize_publish_date(value) -> str:
     match = re.fullmatch(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})", text)
     if match:
         return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
-    dt = _parse_iso(text)
+    dt = parse_iso(text)
     if dt is not None:
         return dt.date().isoformat()
     if text.isdigit():
@@ -1371,7 +1348,7 @@ async def _sweep_pending_collections(
             # -404 已放弃（稿件删除/下架）：标记后永不再试，避免每小时
             # 重复 -404 查询与重复打印
             continue
-        last = _parse_iso(entry.get("last_attempt_at") or "")
+        last = parse_iso(entry.get("last_attempt_at") or "")
         if last is not None and \
                 (now - last).total_seconds() < _entry_cooldown(
                     entry, retry_interval_seconds, rate_limit_cooldown_seconds
@@ -1382,12 +1359,12 @@ async def _sweep_pending_collections(
         if not bvid:
             entry["status"] = "failed"
             entry["last_error"] = "缺少 bvid"
-            entry["last_attempt_at"] = _now_iso()
+            entry["last_attempt_at"] = utc_now()
             changed = True
             continue
 
         entry["attempts"] = int(entry.get("attempts", 0) or 0) + 1
-        entry["last_attempt_at"] = _now_iso()
+        entry["last_attempt_at"] = utc_now()
         try:
             pages = await fetch_video_pages(credential, bvid)
         except BilibiliApiError as e:
