@@ -474,19 +474,23 @@ def pending_collections_path() -> Path:
 
 def load_pending_collections(path: Path) -> list[dict]:
     """Read the queue; back up and rebuild when corrupted."""
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError) as e:
-        try:
-            backup = path.with_suffix(path.suffix + ".bak")
-            backup.write_bytes(path.read_bytes())
-            print(f"[合集] ⚠️ 待补归队列损坏（{e}），已备份到 {backup.name} 并重建空队列")
-        except OSError:
-            print(f"[合集] ⚠️ 待补归队列损坏（{e}），重建空队列")
-        return []
-    return data if isinstance(data, list) else []
+    return atomic_io.read_json(path, [], expect=list, backup_corrupt=True, label="[合集]")
+
+
+def _load_processed_state(state_path: Path, label: str = "") -> dict:
+    """读取 processed_videos.json；缺失或损坏都返回空 dict。
+
+    *label* 非空时，在校验失败（文件在但读不出）的情况下打印一行提示 ——
+    这个文件有多个读取点，以前各自内联了一遍「读取 + isinstance 检查 + 报错」。
+    """
+    state = atomic_io.read_json(state_path, None, expect=dict)
+    if state is not None and not isinstance(state.get("videos"), dict):
+        state = None
+    if state is None:
+        if label and state_path.exists():
+            print(f"[合集] ⚠️ 读取历史记录失败，{label}: {state_path}")
+        return {}
+    return state
 
 
 def save_pending_collections(path: Path, entries: list[dict]) -> None:
@@ -551,14 +555,7 @@ def backfill_collections(
     from yt2bili import profile as profile_mod
     if resolve_collection_name is None:
         resolve_collection_name = profile_mod.resolve_collection_name
-    if not state_path.exists():
-        return 0
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[合集] ⚠️ 读取历史记录失败（{e}），跳过回填: {state_path}")
-        return 0
-    videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
+    videos = _load_processed_state(state_path, "跳过回填").get("videos", {})
 
     added = 0
     skipped_unattributed = 0
@@ -609,14 +606,7 @@ def enrich_queue_dates(queue_path: Path, state_path: Path) -> int:
     Copy ``published_at`` from the processed-videos state into queue entries
     that are missing it (keyed by video_id / bvid).  Returns the count filled.
     """
-    if not state_path.exists():
-        return 0
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[合集] ⚠️ 读取历史记录失败（{e}），跳过发布时间回填: {state_path}")
-        return 0
-    videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
+    videos = _load_processed_state(state_path, "跳过发布时间回填").get("videos", {})
 
     by_id = {
         vid: str(v.get("published_at", "") or "")
@@ -655,14 +645,8 @@ def enrich_missing_channels(state_path: Path, resolve_channel) -> int:
     ``(channel_title, channel_id)``.  Results are persisted back into the
     state file so later sweeps never re-fetch the same video.
     """
-    if not state_path.exists():
-        return 0
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"[合集] ⚠️ 读取历史记录失败（{e}），跳过频道反查: {state_path}")
-        return 0
-    videos = (state or {}).get("videos", {}) if isinstance(state, dict) else {}
+    state = _load_processed_state(state_path, "跳过频道反查")
+    videos = state.get("videos", {})
 
     enriched = 0
     for video_id, v in videos.items():
@@ -796,22 +780,16 @@ def _collect_published_dates(
         if key and date:
             dates.setdefault(str(key), date)
 
-    if state_path.exists():
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, OSError):
-            state = {}
-        if isinstance(state, dict):
-            for v in (state.get("videos") or {}).values():
-                if not isinstance(v, dict):
-                    continue
-                add(v.get("bvid"), v.get("published_at"))
-                if v.get("published_at") and v.get("bvid"):
-                    yt_bvids.add(str(v.get("bvid")))
-                if v.get("bvid") and v.get("video_id"):
-                    bvid_to_video_id.setdefault(
-                        str(v.get("bvid")), str(v.get("video_id"))
-                    )
+    for v in _load_processed_state(state_path).get("videos", {}).values():
+        if not isinstance(v, dict):
+            continue
+        add(v.get("bvid"), v.get("published_at"))
+        if v.get("published_at") and v.get("bvid"):
+            yt_bvids.add(str(v.get("bvid")))
+        if v.get("bvid") and v.get("video_id"):
+            bvid_to_video_id.setdefault(
+                str(v.get("bvid")), str(v.get("video_id"))
+            )
     for entry in load_pending_collections(queue_path):
         add(entry.get("bvid"), entry.get("published_at"))
         if entry.get("published_at") and entry.get("bvid"):

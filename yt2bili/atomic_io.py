@@ -20,7 +20,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 #: rename/unlink 的重试次数与间隔 —— 对方通常只是读一下（毫秒级）。
 DEFAULT_ATTEMPTS = 10
@@ -182,6 +182,7 @@ def read_json(
     default: Any = None,
     *,
     expect: type | tuple[type, ...] | None = None,
+    validate: Callable[[Any], str | None] | None = None,
     backup_corrupt: bool = False,
     label: str = "[state]",
 ) -> Any:
@@ -191,6 +192,8 @@ def read_json(
         path: 文件路径。
         default: 文件缺失/为空/损坏时返回的值。
         expect: 顶层类型（如 ``dict``、``list``）；类型不符按损坏处理。``None`` 不校验。
+        validate: 更细的结构校验 —— 返回 ``None`` 表示通过，返回字符串则作为损坏原因
+            （例如 ``lambda d: None if isinstance(d.get("videos"), dict) else "videos 字段格式错误"``）。
         backup_corrupt: 损坏时先把文件改名成 ``<name>.bak-<时间戳>`` 再返回 ``default``
             —— 队列/状态文件用它保住现场；纯缓存文件不需要，静默取默认值即可。
         label: 备份提示的日志前缀。
@@ -220,6 +223,8 @@ def read_json(
                 getattr(t, "__name__", str(t)) for t in expect
             )
             reason = f"顶层类型不是 {names}"
+        elif validate is not None:
+            reason = validate(data) or ""
 
     if not reason:
         return data

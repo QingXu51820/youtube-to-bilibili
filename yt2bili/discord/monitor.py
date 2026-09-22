@@ -21,14 +21,15 @@ from yt2bili import atomic_io, config
 
 def _load_state(path: Path) -> dict[str, Any]:
     """Load the Discord message state file, returning a bare dict."""
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and "messages" in data:
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
+    data = atomic_io.read_json(
+        path,
+        None,
+        expect=dict,
+        validate=lambda d: None if isinstance(d.get("messages"), dict) else "messages 字段格式错误",
+        label="[Discord]",
+    )
+    if isinstance(data, dict) and isinstance(data.get("messages"), dict):
+        return data
     return {"version": 1, "messages": {}}
 
 

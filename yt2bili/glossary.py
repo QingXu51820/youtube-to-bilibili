@@ -156,16 +156,11 @@ _fetch_in_progress: bool = False  # prevents concurrent background fetches
 
 def _load_cache(path: Path) -> dict[str, str] | None:
     """Load glossary from a local cache file. Returns None on any failure."""
-    try:
-        if path.exists():
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            glossary = data.get("glossary", {})
-            if glossary:
-                return {str(k): str(v) for k, v in glossary.items()}
-    except (json.JSONDecodeError, OSError, KeyError, TypeError, AttributeError):
-        pass  # corrupted/edited cache — treat as missing, will refetch
-    return None
+    data = atomic_io.read_json(path, None, expect=dict)
+    glossary = data.get("glossary") if isinstance(data, dict) else None
+    if isinstance(glossary, dict) and glossary:
+        return {str(k): str(v) for k, v in glossary.items()}
+    return None  # missing/corrupted/edited cache — treat as missing, will refetch
 
 
 def _save_cache(

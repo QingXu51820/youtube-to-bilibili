@@ -106,15 +106,6 @@ def _now_iso() -> str:
 
 # ── Candidate collection ──────────────────────────────────────────────
 
-def _read_json(path: Path, default):
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
-        return default
-
-
 def _processed_path(profile=None) -> Path:
     """
     Path of the profile's processed-videos state.
@@ -157,7 +148,7 @@ def collect_candidates(
             elif value and not getattr(cand, key, ""):
                 setattr(cand, key, value)
 
-    state = _read_json(processed_path, {})
+    state = atomic_io.read_json(processed_path, {})
     videos = state.get("videos", {}) if isinstance(state, dict) else {}
     if isinstance(videos, dict):
         for video_id, entry in videos.items():
@@ -186,7 +177,7 @@ def collect_candidates(
             stamp=entry.get("added_at", ""),
         )
 
-    queue = _read_json(subtitles_path, [])
+    queue = atomic_io.read_json(subtitles_path, [])
     if isinstance(queue, list):
         for entry in queue:
             if not isinstance(entry, dict):
@@ -248,7 +239,7 @@ def _write_json(path: Path, payload) -> None:
 
 def _drop_cache_keys(path: Path, bvids: set[str]) -> int:
     """Remove *bvids* from a ``{bvid: date}`` cache file. Returns keys dropped."""
-    data = _read_json(path, None)
+    data = atomic_io.read_json(path, None)
     if not isinstance(data, dict):
         return 0
     dropped = [k for k in data if k in bvids]
@@ -304,7 +295,7 @@ def apply_purge(
         return summary
 
     # 1. processed_videos.json → tombstone
-    state = _read_json(processed_path, None)
+    state = atomic_io.read_json(processed_path, None)
     if isinstance(state, dict) and isinstance(state.get("videos"), dict):
         touched = 0
         for video_id, entry in state["videos"].items():
@@ -330,7 +321,7 @@ def apply_purge(
         summary["collections_removed"] = len(entries) - len(kept)
 
     # 3. 字幕队列
-    queue = _read_json(subtitles_path, [])
+    queue = atomic_io.read_json(subtitles_path, [])
     if isinstance(queue, list):
         kept_q = [e for e in queue if str(e.get("bvid", "")) not in bvids]
         if len(kept_q) != len(queue):

@@ -284,44 +284,28 @@ def empty_state() -> dict[str, Any]:
     }
 
 
-def _recover_corrupt_state(path: Path, reason: str) -> dict[str, Any]:
-    """Back up a corrupt state file and rebuild an empty state.
+def load_state(path: Path) -> dict[str, Any]:
+    """Read the monitor state, rebuilding an empty one when it is unusable.
 
     A corrupt state must not kill the long-running monitor process with
-    SystemExit. We back the file up (nothing is silently lost) and return
-    an empty state — videos processed before the corruption may get
+    SystemExit. atomic_io.read_json backs the file up (nothing is silently
+    lost) and rebuilds — videos processed before the corruption may get
     re-processed, which is preferable to the whole monitor dying.
     """
-    backup = path.with_suffix(path.suffix + f".corrupt-{int(time.time())}")
-    try:
-        path.replace(backup)
-    except OSError:
-        pass
-    print(
-        f"[监控] [WARN] 状态文件损坏（{reason}），"
-        f"已备份到 {backup.name} 并重建空状态",
-        flush=True,
+    state = atomic_io.read_json(
+        path,
+        None,
+        expect=dict,
+        validate=lambda d: None if isinstance(d.get("videos"), dict) else "videos 字段格式错误",
+        backup_corrupt=True,
+        label="[监控]",
     )
-    return empty_state()
-
-
-def load_state(path: Path) -> dict[str, Any]:
-    if not path.exists():
+    if state is None:
         return empty_state()
-
-    try:
-        state = json.loads(path.read_text(encoding="utf-8-sig"))
-    except json.JSONDecodeError as exc:
-        return _recover_corrupt_state(path, f"不是有效 JSON: {exc}")
-
-    if not isinstance(state, dict):
-        return _recover_corrupt_state(path, "格式错误")
 
     state.setdefault("version", STATE_VERSION)
     state.setdefault("generated_at", utc_now())
     state.setdefault("videos", {})
-    if not isinstance(state["videos"], dict):
-        return _recover_corrupt_state(path, "videos 字段格式错误")
     return state
 
 
@@ -416,16 +400,7 @@ def _upload_log_entry_matches(entry: dict, active: str, channels: set[str]) -> b
 
 def _load_upload_log() -> list[dict[str, Any]]:
     """Read the persistent upload log. Returns a list of entries."""
-    path = _upload_log_path()
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-        if isinstance(data, list):
-            return data
-    except (json.JSONDecodeError, OSError):
-        pass
-    return []
+    return atomic_io.read_json(_upload_log_path(), [], expect=list)
 
 
 def _save_upload_log(log_entries: list[dict[str, Any]]) -> None:
@@ -514,15 +489,7 @@ def _rss_fallback_cache_path(cache_file: Path) -> Path:
 def _load_rss_fallback_cache(cache_file: Path) -> set[str]:
     """Load set of channel IDs that need API fallback."""
     path = _rss_fallback_cache_path(cache_file)
-    if not path.exists():
-        return set()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
-        if isinstance(data, list):
-            return set(data)
-    except (json.JSONDecodeError, OSError):
-        pass
-    return set()
+    return set(atomic_io.read_json(path, [], expect=list))
 
 
 def _save_rss_fallback_cache(cache_file: Path, channel_ids: set[str]) -> None:

@@ -547,6 +547,20 @@ def _now_stamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _upload_log_path() -> Path:
+    """Path of the global upload log (not per-profile — see monitor.py)."""
+    return Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
+
+
+def _load_upload_log() -> list[dict]:
+    """读取全局上传日志（video_id → bvid/aid/channel_title 映射的来源）。
+
+    这个文件在本模块有四个读取点，以前各自内联了一遍「读 + isinstance 检查 +
+    静默吞错」；缺失/损坏一律按空列表处理，调用方各自决定要不要提前返回。
+    """
+    return atomic_io.read_json(_upload_log_path(), [], expect=list)
+
+
 def _read_pending_entries(path: Path) -> list[dict]:
     """Read the pending queue, tolerating missing/corrupt/BOM files.
 
@@ -647,14 +661,8 @@ def _recover_orphaned_subtitles(
         return []
 
     # Read upload_log mapping
-    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
-    try:
-        if not upload_log_path.exists():
-            return []
-        upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
-        if not isinstance(upload_log, list):
-            return []
-    except (json.JSONDecodeError, OSError):
+    upload_log = _load_upload_log()
+    if not upload_log:
         return []
 
     vid_to_entry: dict[str, dict] = {}
@@ -767,12 +775,9 @@ def _migrate_legacy_pending_queue() -> None:
     if not legacy.exists():
         return
 
-    try:
-        entries = json.loads(legacy.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
+    entries = atomic_io.read_json(legacy, None, expect=list)
+    if entries is None:
         return  # leave an unreadable legacy file alone
-    if not isinstance(entries, list):
-        return
 
     if not entries:
         try:
@@ -791,19 +796,12 @@ def _migrate_legacy_pending_queue() -> None:
                 channel_to_profile.setdefault(c.channel_title, pname)
 
     # video_id -> channel_title from the global upload log
-    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
     vid_to_channel: dict[str, str] = {}
-    try:
-        if upload_log_path.exists():
-            upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
-            if isinstance(upload_log, list):
-                for item in upload_log:
-                    vid = item.get("video_id")
-                    chan = item.get("channel_title", "")
-                    if vid and chan:
-                        vid_to_channel[vid] = chan
-    except (json.JSONDecodeError, OSError):
-        pass
+    for item in _load_upload_log():
+        vid = item.get("video_id")
+        chan = item.get("channel_title", "")
+        if vid and chan:
+            vid_to_channel[vid] = chan
 
     per_profile: dict[str, dict[str, dict]] = {}
     unattributed: list[dict] = []
@@ -821,16 +819,11 @@ def _migrate_legacy_pending_queue() -> None:
     # Merge into each per-profile queue (one entry per bvid; newer added_at wins)
     for pname, by_bvid in per_profile.items():
         queue = Path(config.PROJECT_ROOT) / "state" / pname / "pending_subtitles.json"
-        merged: dict[str, dict] = {}
-        if queue.exists():
-            try:
-                existing = json.loads(queue.read_text(encoding="utf-8-sig"))
-                if isinstance(existing, list):
-                    for e in existing:
-                        if isinstance(e, dict):
-                            merged[e.get("bvid", "")] = e
-            except (json.JSONDecodeError, OSError):
-                pass
+        merged: dict[str, dict] = {
+            e.get("bvid", ""): e
+            for e in atomic_io.read_json(queue, [], expect=list)
+            if isinstance(e, dict)
+        }
         for bvid, e in by_bvid.items():
             old = merged.get(bvid)
             if old and old.get("added_at", "") >= e.get("added_at", ""):
@@ -855,16 +848,9 @@ def _migrate_legacy_pending_queue() -> None:
 
 def _lookup_upload_log_url(video_id: str) -> str:
     """Look up the YouTube URL for a video in the global upload log."""
-    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
-    try:
-        if upload_log_path.exists():
-            upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
-            if isinstance(upload_log, list):
-                for item in upload_log:
-                    if item.get("video_id") == video_id and item.get("url"):
-                        return str(item["url"])
-    except (json.JSONDecodeError, OSError):
-        pass
+    for item in _load_upload_log():
+        if item.get("video_id") == video_id and item.get("url"):
+            return str(item["url"])
     return ""
 
 
@@ -962,14 +948,7 @@ def upload_pending_subtitles() -> int:
     _migrate_legacy_pending_queue()
     path = _pending_subtitles_path()
 
-    entries: list[dict] = []
-    if path.exists():
-        try:
-            entries = json.loads(path.read_text(encoding="utf-8-sig"))
-            if not isinstance(entries, list):
-                entries = []
-        except (json.JSONDecodeError, OSError):
-            pass
+    entries: list[dict] = _read_pending_entries(path)
 
     from yt2bili.subtitles.parser import parse_subtitle
     from yt2bili.subtitles.bilibili_format import (
@@ -1183,34 +1162,20 @@ def requeue_missing_subtitles() -> int:
     """
     path = _pending_subtitles_path()
 
-    existing_bvids: set[str] = set()
-    if path.exists():
-        try:
-            entries = json.loads(path.read_text(encoding="utf-8-sig"))
-            if isinstance(entries, list):
-                existing_bvids = {
-                    e.get("bvid", "") for e in entries if isinstance(e, dict)
-                }
-        except (json.JSONDecodeError, OSError):
-            pass
+    existing_bvids = {
+        e.get("bvid", "") for e in _read_pending_entries(path) if isinstance(e, dict)
+    }
 
     channel_titles = _active_profile_channel_titles()
 
-    upload_log_path = Path(config.PROJECT_ROOT) / "state" / "upload_log.json"
     candidates: list[dict] = []
-    try:
-        if upload_log_path.exists():
-            upload_log = json.loads(upload_log_path.read_text(encoding="utf-8-sig"))
-            if isinstance(upload_log, list):
-                for item in upload_log:
-                    bvid = item.get("bvid", "")
-                    if not bvid or bvid in existing_bvids:
-                        continue
-                    if not _channel_in_scope(item, channel_titles):
-                        continue
-                    candidates.append(item)
-    except (json.JSONDecodeError, OSError):
-        pass
+    for item in _load_upload_log():
+        bvid = item.get("bvid", "")
+        if not bvid or bvid in existing_bvids:
+            continue
+        if not _channel_in_scope(item, channel_titles):
+            continue
+        candidates.append(item)
 
     if not candidates:
         print("[字幕] 没有需要检查的字幕状态视频")

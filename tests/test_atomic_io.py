@@ -283,6 +283,31 @@ class ReadJsonTests(unittest.TestCase):
         self.assertEqual(read_json(self.path, [], expect=list, backup_corrupt=True), [])
         self.assertEqual(len(self._backups()), 1)
 
+    def test_validate_hook_can_reject_a_well_formed_document(self):
+        """结构不符（顶层类型对、内层字段错）也要按损坏处理。"""
+        self.path.write_text('{"videos": "nope"}', encoding="utf-8")
+        result = read_json(
+            self.path,
+            [],
+            expect=dict,
+            validate=lambda d: None if isinstance(d.get("videos"), dict) else "videos 字段格式错误",
+            backup_corrupt=True,
+        )
+        self.assertEqual(result, [])
+        self.assertEqual(len(self._backups()), 1)
+
+    def test_validate_passing_document_is_returned(self):
+        self.path.write_text('{"videos": {}}', encoding="utf-8")
+        self.assertEqual(
+            read_json(
+                self.path,
+                [],
+                expect=dict,
+                validate=lambda d: None if isinstance(d.get("videos"), dict) else "bad",
+            ),
+            {"videos": {}},
+        )
+
     def test_matching_type_is_returned_unchanged(self):
         self.path.write_text('[{"bvid": "BV1"}]', encoding="utf-8")
         self.assertEqual(read_json(self.path, [], expect=list), [{"bvid": "BV1"}])

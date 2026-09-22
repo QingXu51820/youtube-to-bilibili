@@ -272,10 +272,13 @@ class PendingCollectionQueueTests(unittest.TestCase):
         self.assertEqual(entries[0]["status"], "added")
 
     def test_load_corrupt_backs_up_and_returns_empty(self):
+        """损坏队列备份留档后当空队列处理（备份名统一为 .bak-<时间戳>）。"""
         self.queue.write_text("{broken", encoding="utf-8")
         entries = collection_mod.load_pending_collections(self.queue)
+        backups = list(self.queue.parent.glob("pending_collections.json.bak-*"))
         self.assertEqual(entries, [])
-        self.assertTrue(self.queue.with_suffix(".json.bak").exists())
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(encoding="utf-8"), "{broken")
 
     def test_pending_collections_path_legacy_and_profile(self):
         with patch.object(profile_mod, "is_profile_state_active",

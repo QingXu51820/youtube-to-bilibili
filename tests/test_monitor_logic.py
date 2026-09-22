@@ -123,14 +123,18 @@ class LoadStateTests(unittest.TestCase):
         self.assertEqual(state["videos"], {})
 
     def test_corrupt_json_recovered_with_backup(self):
-        """回归：损坏状态文件必须备份+重建空状态，而不是 SystemExit 杀死 monitor。"""
+        """回归：损坏状态文件必须备份+重建空状态，而不是 SystemExit 杀死 monitor。
+
+        备份名与其它状态文件统一为 ``.bak-<时间戳>``（由 atomic_io 决定）。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "s.json"
             path.write_text("{broken json", encoding="utf-8")
             state = load_state(path)
-            backups = list(Path(tmp).glob("s.json.corrupt-*"))
+            backups = list(Path(tmp).glob("s.json.bak-*"))
+            backed_up = backups[0].read_text(encoding="utf-8") if backups else ""
         self.assertEqual(state["videos"], {})
-        self.assertEqual(len(backups), 1)
+        self.assertEqual(backed_up, "{broken json")
 
     def test_videos_not_dict_recovered(self):
         with tempfile.TemporaryDirectory() as tmp:
