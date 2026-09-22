@@ -389,13 +389,22 @@ def _now_iso() -> str:
 
 
 def _parse_iso(value: str) -> datetime | None:
-    """Parse an ISO-8601 timestamp, or None when missing/invalid."""
-    if not value:
+    """Parse an ISO-8601 timestamp, or None when missing/invalid.
+
+    无时区的时间戳按 UTC 处理：队列里混着手写时间戳与早期版本写下的 naive 值，
+    而调用方要拿它和 ``datetime.now(timezone.utc)`` 相减 —— naive 值直接相减会抛
+    ``TypeError``，把整轮 sweep 打断。
+    """
+    raw = str(value or "")
+    if not raw:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
 
 
 def _is_rate_limited(entry: dict) -> bool:

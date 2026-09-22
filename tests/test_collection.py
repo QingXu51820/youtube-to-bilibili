@@ -788,6 +788,25 @@ class ProcessPendingCollectionsTests(unittest.TestCase):
         self.assertEqual((added, pending, failed), (0, 1, 0))
         fetch.assert_not_awaited()
 
+    def test_naive_timestamp_is_treated_as_utc(self):
+        """回归：队列里的无时区时间戳以前会让冷却相减抛 TypeError，打断整轮 sweep。"""
+        naive = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        entry = self._entry(last_attempt_at=naive)
+        self.assertEqual(collection_mod._parse_iso(naive).tzinfo, timezone.utc)
+
+        self.queue.write_text(json.dumps([entry]), encoding="utf-8")
+        fetch = AsyncMock(return_value=[{"cid": 1, "part": "P1"}])
+        with patch.object(collection_mod, "pending_collections_path",
+                          return_value=self.queue), \
+             patch.object(collection_mod, "backfill_collections",
+                          return_value=0), \
+             patch.object(collection_mod, "fetch_video_pages", new=fetch):
+            added, pending, failed = collection_mod.process_pending_collections(
+                self.cred, retry_interval_seconds=3600
+            )
+        self.assertEqual((added, pending, failed), (0, 1, 0))
+        fetch.assert_not_awaited()   # 刚尝试过：按冷却跳过，而不是崩掉
+
     def test_rate_limited_entries_use_short_cooldown(self):
         """回归：限流条目用短冷却重试，不必等满 1 小时。"""
         recent = collection_mod._now_iso()
