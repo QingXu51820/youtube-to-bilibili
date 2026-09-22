@@ -558,6 +558,23 @@ def _cleanup_old_runs(runs_dir: Path, *, keep_days: int | None = None) -> int:
     return deleted
 
 
+_LAST_REPORT_STAMP: datetime | None = None
+
+
+def _next_report_stamp(now: datetime) -> datetime:
+    """报告文件名用的时间戳，同一进程内严格递增。
+
+    Windows 上 ``datetime.now()`` 的粒度约 15.6ms（实测连续 5 次调用拿到同一个
+    微秒值），所以"微秒精度就不会重名"并不成立：同一刻度内的第二份批处理报告会
+    覆盖第一份。这里在时钟没有前进时手动 +1 微秒，文件名格式保持不变。
+    """
+    global _LAST_REPORT_STAMP
+    if _LAST_REPORT_STAMP is not None and now <= _LAST_REPORT_STAMP:
+        now = _LAST_REPORT_STAMP + timedelta(microseconds=1)
+    _LAST_REPORT_STAMP = now
+    return now
+
+
 def _write_run_report(results: list[ProcessResult]) -> Path:
     """Write a batch report to runs/latest.json and a timestamped JSON file."""
     runs_dir = Path(config.RUNS_DIR)
@@ -573,9 +590,9 @@ def _write_run_report(results: list[ProcessResult]) -> Path:
         "results": [asdict(r) for r in results],
     }
 
-    # Millisecond precision: two batches finishing in the same second
-    # must not overwrite each other's report.
-    report_path = runs_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.json"
+    # 微秒精度 + 进程内递增：两次批处理不能互相覆盖报告
+    stamp = _next_report_stamp(datetime.now())
+    report_path = runs_dir / f"{stamp.strftime('%Y%m%d-%H%M%S-%f')}.json"
     latest_path = runs_dir / "latest.json"
     content = json.dumps(payload, ensure_ascii=False, indent=2)
     report_path.write_text(content + "\n", encoding="utf-8")

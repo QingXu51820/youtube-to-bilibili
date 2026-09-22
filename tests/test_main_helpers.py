@@ -64,15 +64,26 @@ class WriteRunReportTests(unittest.TestCase):
         data = json.loads((self.runs / "latest.json").read_text(encoding="utf-8"))
         self.assertEqual(data["profile"], "snap")
 
-    def test_filename_has_millisecond_precision(self):
-        """回归：同一秒两次批处理不得互相覆盖。"""
+    def test_filename_has_microsecond_precision(self):
+        """回归：同一刻度内两次批处理不得互相覆盖。
+
+        Windows 的 ``datetime.now()`` 粒度约 15.6ms，光靠时钟不足以保证不重名
+        （这也是本用例以前偶发失败的原因）—— ``_next_report_stamp`` 保证进程内递增。
+        """
         r1 = _write_run_report([make_result()])
         r2 = _write_run_report([make_result()])
         self.assertNotEqual(r1.name, r2.name)
         self.assertRegex(r1.name, r"^\d{8}-\d{6}-\d{6}\.json$")
         self.assertRegex(r2.name, r"^\d{8}-\d{6}-\d{6}\.json$")
-        # 文件名必须按秒毫秒可排序（与 strptime 无关）
+        # 文件名必须按秒微秒可排序（与 strptime 无关）
         self.assertLess(r1.name, r2.name)
+        self.assertTrue(r1.exists() and r2.exists())  # 第二份没有覆盖第一份
+
+    def test_many_reports_in_the_same_tick_all_survive(self):
+        """连续写多份（远快于时钟粒度）也必须一份不丢。"""
+        paths = [_write_run_report([make_result()]) for _ in range(5)]
+        self.assertEqual(len({p.name for p in paths}), 5)
+        self.assertTrue(all(p.exists() for p in paths))
 
     def test_cleanup_removes_only_old_reports(self):
         (self.runs).mkdir(parents=True, exist_ok=True)
