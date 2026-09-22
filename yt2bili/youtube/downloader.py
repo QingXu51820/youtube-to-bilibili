@@ -16,6 +16,7 @@ from typing import Callable
 
 from yt2bili import config
 from yt2bili.media.cover import is_valid_image
+from yt2bili.media.probe import probe_duration
 
 
 BLOCKED_LIVE_STATUSES = {
@@ -485,41 +486,6 @@ def _probe_video_resolution(file_path: Path) -> tuple[int, int] | None:
     return width, height
 
 
-def _probe_video_duration(file_path: Path) -> float:
-    """Probe video file duration in seconds using ffprobe."""
-    from yt2bili.config import find_tool
-
-    ffprobe = find_tool("ffprobe")
-    if ffprobe is None:
-        return 0.0
-
-    command = [
-        ffprobe,
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "csv=p=0",
-        str(file_path),
-    ]
-    try:
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return 0.0
-    if proc.returncode != 0:
-        return 0.0
-    try:
-        return float(proc.stdout.strip())
-    except (ValueError, TypeError):
-        return 0.0
-
-
 def _download_thumbnail(video_id: str, download_dir: Path) -> str:
     """
     Download YouTube thumbnail for a video.
@@ -951,7 +917,7 @@ def download_video(url: str, before_download: Callable[[dict], None] | None = No
     else:
         print("[下载] 实际分辨率: 未知（ffprobe 不可用或探测失败）")
 
-    duration = _probe_video_duration(file_path)
+    duration = probe_duration(file_path)
     if duration > 0:
         print(f"[下载] 视频时长: {duration:.1f}s ({duration/3600:.2f}h)")
     else:

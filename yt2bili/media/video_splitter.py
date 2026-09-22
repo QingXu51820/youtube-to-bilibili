@@ -12,41 +12,7 @@ import time
 from pathlib import Path
 
 from yt2bili import config
-
-
-def _probe_duration(file_path: Path) -> float:
-    """Probe video file duration in seconds using ffprobe."""
-    from yt2bili.config import find_tool
-
-    ffprobe = find_tool("ffprobe")
-    if ffprobe is None:
-        return 0.0
-
-    command = [
-        ffprobe,
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "csv=p=0",
-        str(file_path),
-    ]
-    try:
-        proc = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return 0.0
-    if proc.returncode != 0:
-        return 0.0
-    try:
-        return float(proc.stdout.strip())
-    except (ValueError, TypeError):
-        return 0.0
+from yt2bili.media.probe import probe_duration
 
 
 def split_video(
@@ -161,7 +127,7 @@ def split_video(
     print(f"[分割] ✅ 分割完成: {len(segments)} 个分段 ({total_mb:.1f} MB, {elapsed:.1f}s)")
     for i, seg in enumerate(segments):
         size_mb = seg.stat().st_size / 1024 / 1024
-        dur = _probe_duration(seg)
+        dur = probe_duration(seg)
         dur_str = f"{dur:.1f}s ({dur/3600:.2f}h)" if dur > 0 else "?"
         print(f"       P{i+1}: {seg.name}  {size_mb:.1f} MB  {dur_str}")
 

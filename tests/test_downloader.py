@@ -162,7 +162,7 @@ class DownloadVideoTests(unittest.TestCase):
              patch.object(downloader, "_download_thumbnail", return_value="") as m4, \
              patch.object(downloader, "_probe_video_resolution",
                           return_value=(1920, 1080)) as m5, \
-             patch.object(downloader, "_probe_video_duration", return_value=100.0) as m6:
+             patch.object(downloader, "probe_duration", return_value=100.0) as m6:
             mocks.update(m1=m1, m2=m2, m3=m3, m4=m4, m5=m5, m6=m6)
             return downloader.download_video("https://youtube.com/watch?v=abc123"), mocks
 

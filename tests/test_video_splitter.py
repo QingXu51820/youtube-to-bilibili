@@ -28,30 +28,30 @@ class ProbeDurationTests(unittest.TestCase):
     def test_valid_output(self):
         proc = SimpleNamespace(returncode=0, stdout="12.345\n")
         with patch.object(vs.subprocess, "run", return_value=proc):
-            self.assertAlmostEqual(vs._probe_duration(Path("x.mp4")), 12.345)
+            self.assertAlmostEqual(vs.probe_duration(Path("x.mp4")), 12.345)
 
     def test_nonzero_returncode(self):
         proc = SimpleNamespace(returncode=1, stdout="")
         with patch.object(vs.subprocess, "run", return_value=proc):
-            self.assertEqual(vs._probe_duration(Path("x.mp4")), 0.0)
+            self.assertEqual(vs.probe_duration(Path("x.mp4")), 0.0)
 
     def test_file_not_found(self):
         with patch.object(vs.subprocess, "run", side_effect=FileNotFoundError):
-            self.assertEqual(vs._probe_duration(Path("x.mp4")), 0.0)
+            self.assertEqual(vs.probe_duration(Path("x.mp4")), 0.0)
 
     def test_timeout(self):
         with patch.object(vs.subprocess, "run", side_effect=vs.subprocess.TimeoutExpired("ffprobe", 30)):
-            self.assertEqual(vs._probe_duration(Path("x.mp4")), 0.0)
+            self.assertEqual(vs.probe_duration(Path("x.mp4")), 0.0)
 
     def test_garbage_stdout(self):
         proc = SimpleNamespace(returncode=0, stdout="not a number\n")
         with patch.object(vs.subprocess, "run", return_value=proc):
-            self.assertEqual(vs._probe_duration(Path("x.mp4")), 0.0)
+            self.assertEqual(vs.probe_duration(Path("x.mp4")), 0.0)
 
     def test_ffprobe_not_found_returns_zero(self):
         """find_tool 找不到 ffprobe 时提前返回 0.0，不触发 subprocess。"""
         with patch.object(config, "find_tool", return_value=None):
-            self.assertEqual(vs._probe_duration(Path("x.mp4")), 0.0)
+            self.assertEqual(vs.probe_duration(Path("x.mp4")), 0.0)
 
 
 class SplitVideoTests(unittest.TestCase):
@@ -85,7 +85,7 @@ class SplitVideoTests(unittest.TestCase):
             (out_dir / "video_P001.mp4").write_bytes(b"seg1")
             proc = SimpleNamespace(returncode=0, stderr="")
             with patch.object(vs.subprocess, "run", return_value=proc), \
-                 patch.object(vs, "_probe_duration", return_value=5.0):
+                 patch.object(vs, "probe_duration", return_value=5.0):
                 result = vs.split_video(str(src), segment_duration_seconds=3600)
         self.assertEqual(len(result), 2)
         self.assertTrue(all(Path(r).exists() for r in result))
