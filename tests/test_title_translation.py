@@ -1,5 +1,6 @@
 """自测：标题翻译（占位符保护/恢复、截断时机、翻译器全链路）。"""
 
+import contextlib
 import sys
 import types
 import unittest
@@ -192,6 +193,44 @@ class DeepSeekTranslatorPipelineTests(unittest.TestCase):
             t = self._make_translator(self._fake_client("不会调用"))
             self.assertEqual(t.translate(""), "")
             self.assertEqual(t.translate("   "), "   ")
+
+    def test_provider_request_parameters(self):
+        """回归：两家只差几个参数，合并后必须一一保持原值。"""
+        captured = {}
+
+        def _create(**kwargs):
+            captured.update(kwargs)
+            message = types.SimpleNamespace(content="译文")
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+
+        client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
+        )
+        think = patch.object(translator.config, "DEEPSEEK_THINKING", "enabled")
+        quiet = (
+            patch.object(translator, "_preserve_terms", return_value=[]),
+            patch.object(translator.config, "SNAP_GLOSSARY_ENABLED", False),
+            patch.object(translator.config, "DEADLOCK_GLOSSARY_ENABLED", False),
+        )
+        for patcher in quiet:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        for cls, temperature, max_tokens, extra in (
+            (translator.OpenAITranslator, 0.3, 200, None),
+            (translator.DeepSeekTranslator, 0.2, 512, {"thinking": {"type": "enabled"}}),
+        ):
+            with self.subTest(provider=cls.__name__):
+                captured.clear()
+                with think if cls is translator.DeepSeekTranslator else contextlib.nullcontext():
+                    t = object.__new__(cls)
+                    t._client = client
+                    t._model = "test-model"
+                    t.translate("some title")
+                self.assertEqual(captured["temperature"], temperature)
+                self.assertEqual(captured["max_tokens"], max_tokens)
+                self.assertEqual(captured.get("extra_body"), extra)
+                self.assertEqual(captured["messages"][1]["content"], "some title")
 
     def test_google_translator_source_lang_passed(self):
         """source_lang 只对 Google 生效 —— 验证参数确实被传给 GoogleTranslator。"""

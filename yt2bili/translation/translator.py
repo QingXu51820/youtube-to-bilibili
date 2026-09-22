@@ -335,12 +335,64 @@ def _extract_chat_content(response, provider: str) -> str:
 
 
 class BaseTranslator(ABC):
-    """Abstract translator interface."""
+    """翻译器接口 + 三个实现共用的前后处理。
+
+    每家的差异只有中间那次调用，前后的「清洗标题 → 词表替换 → 保护占位」与
+    「还原占位 → 去 CJK 空格 → 截断」原本在每个实现里各抄了一遍；错误包装与
+    日志前缀也因此少了三份。
+    """
+
+    #: 日志与异常里的服务名（如 "Google" / "OpenAI" / "DeepSeek"）
+    name = "翻译"
+
+    def translate(self, text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
+        """Translate text to target language (前置/后置处理由本基类统一完成)."""
+        if not text.strip():
+            return text
+        try:
+            source_text = _apply_glossary(_prepare_source_title(text))
+            protected_text, replacements = _protect_terms(source_text)
+            result = self._call(protected_text, source_lang, target_lang)
+            result = _restore_terms(result, replacements)
+            result = _cleanup_cjk_spaces(result)
+            return clean_title(result)
+        except Exception as e:
+            print(f"[翻译] {self.name} 翻译失败: {e}")
+            raise RuntimeError(f"{self.name} 翻译失败: {e}") from e
 
     @abstractmethod
-    def translate(self, text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
-        """Translate text to target language."""
+    def _call(self, text: str, source_lang: str, target_lang: str) -> str:
+        """调用具体服务；*text* 已完成词表替换与占位保护。"""
         ...
+
+
+class _ChatTranslator(BaseTranslator):
+    """OpenAI 兼容接口（OpenAI 官方 / DeepSeek）的公共实现。
+
+    两者的请求体只差几个参数，所以差异放在类属性与 :meth:`_extra_body` 里，
+    构造与调用共用一份 —— 以前是两个几乎相同的 ``translate()``。
+    """
+
+    temperature: float = 0.3
+    max_tokens: int = 200
+
+    def _extra_body(self) -> dict | None:
+        """请求体附加字段；不需要时返回 None。"""
+        return None
+
+    def _call(self, text: str, source_lang: str, target_lang: str) -> str:
+        extra_body = self._extra_body()
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": _translation_prompt(target_lang)},
+                {"role": "user", "content": text},
+            ],
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            **(dict(extra_body=extra_body) if extra_body else {}),
+        )
+        return _extract_chat_content(response, self.name)
 
 
 # ── Google Translator (free, no API key) ──────────────────────────
@@ -348,35 +400,29 @@ class BaseTranslator(ABC):
 class GoogleTranslator(BaseTranslator):
     """Free translation using deep-translator (Google Translate backend)."""
 
+    name = "Google"
+
     def __init__(self):
         from deep_translator import GoogleTranslator as _GoogleTranslator
         self._translator = _GoogleTranslator
 
-    def translate(self, text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
-        if not text.strip():
-            return text
-        try:
-            source_text = _prepare_source_title(text)
-            source_text = _apply_glossary(source_text)
-            protected_text, replacements = _protect_terms(source_text)
-            translator = self._translator(
-                source=source_lang,
-                target=target_lang,
-                proxies=_requests_proxies(),
-            )
-            result = translator.translate(protected_text)
-            result = _restore_terms(result, replacements)
-            result = _cleanup_cjk_spaces(result)
-            return clean_title(result)
-        except Exception as e:
-            print(f"[翻译] Google 翻译失败: {e}")
-            raise RuntimeError(f"Google 翻译失败: {e}") from e
+    def _call(self, text: str, source_lang: str, target_lang: str) -> str:
+        translator = self._translator(
+            source=source_lang,
+            target=target_lang,
+            proxies=_requests_proxies(),
+        )
+        return translator.translate(text)
 
 
 # ── OpenAI Translator (OpenAI API or compatible endpoints) ────────
 
-class OpenAITranslator(BaseTranslator):
+class OpenAITranslator(_ChatTranslator):
     """Translation using OpenAI API or another OpenAI-compatible endpoint."""
+
+    name = "OpenAI"
+    temperature = 0.3
+    max_tokens = 200
 
     def __init__(self):
         from openai import OpenAI
@@ -388,35 +434,15 @@ class OpenAITranslator(BaseTranslator):
         )
         self._model = config.OPENAI_MODEL
 
-    def translate(self, text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
-        if not text.strip():
-            return text
-
-        try:
-            source_text = _prepare_source_title(text)
-            source_text = _apply_glossary(source_text)
-            protected_text, replacements = _protect_terms(source_text)
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _translation_prompt(target_lang)},
-                    {"role": "user", "content": protected_text},
-                ],
-                temperature=0.3,
-                max_tokens=200,
-            )
-            result = _restore_terms(_extract_chat_content(response, "OpenAI"), replacements)
-            result = _cleanup_cjk_spaces(result)
-            return clean_title(result)
-        except Exception as e:
-            print(f"[翻译] OpenAI 翻译失败: {e}")
-            raise RuntimeError(f"OpenAI 翻译失败: {e}") from e
-
 
 # ── DeepSeek Translator (OpenAI-compatible API) ───────────────────
 
-class DeepSeekTranslator(BaseTranslator):
+class DeepSeekTranslator(_ChatTranslator):
     """Translation using DeepSeek's OpenAI-compatible API."""
+
+    name = "DeepSeek"
+    temperature = 0.2
+    max_tokens = 512
 
     def __init__(self):
         from openai import OpenAI
@@ -428,30 +454,8 @@ class DeepSeekTranslator(BaseTranslator):
         )
         self._model = config.DEEPSEEK_MODEL
 
-    def translate(self, text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
-        if not text.strip():
-            return text
-
-        try:
-            source_text = _prepare_source_title(text)
-            source_text = _apply_glossary(source_text)
-            protected_text, replacements = _protect_terms(source_text)
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": _translation_prompt(target_lang)},
-                    {"role": "user", "content": protected_text},
-                ],
-                temperature=0.2,
-                max_tokens=512,
-                extra_body={"thinking": {"type": config.DEEPSEEK_THINKING}},
-            )
-            result = _restore_terms(_extract_chat_content(response, "DeepSeek"), replacements)
-            result = _cleanup_cjk_spaces(result)
-            return clean_title(result)
-        except Exception as e:
-            print(f"[翻译] DeepSeek 翻译失败: {e}")
-            raise RuntimeError(f"DeepSeek 翻译失败: {e}") from e
+    def _extra_body(self) -> dict | None:
+        return {"thinking": {"type": config.DEEPSEEK_THINKING}}
 
 
 # ── Factory ───────────────────────────────────────────────────────
