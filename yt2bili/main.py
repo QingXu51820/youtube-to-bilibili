@@ -158,11 +158,12 @@ class ProcessResult:
     # Subtitle fields
     subtitle_source_path: str = ""
     subtitle_translated_path: str = ""
-    subtitle_status: str = ""       # success | queued | deferred | skipped_multi_part | skipped_disabled | cid_timeout | upload_failed | failed | no_source
+    # skipped_* 与 failed 由本模块写入，其余来自字幕任务自身的状态机
+    # （subtitles/queue.py 的 SubtitleTranslationJob.status）
+    subtitle_status: str = ""
     subtitle_error: str = ""
     # 源失败原因（SubtitleUnavailable.kind），deferred/failed 时用来定位
     subtitle_defer_kind: str = ""
-    subtitle_cid: int = 0
 
 
 def _remove_file(path: str, label: str) -> None:

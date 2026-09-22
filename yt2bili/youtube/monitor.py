@@ -117,8 +117,8 @@ WORK_HOURS_SKIP_MARKERS = (
     "搬运时段",
 )
 # ── Per-video retry ────────────────────────────────────────────────
-_VIDEO_RETRY_MAX = max(0, int(getattr(config, "YOUTUBE_VIDEO_RETRY_MAX", None) or 2))
-_VIDEO_RETRY_DELAY = max(10.0, float(getattr(config, "YOUTUBE_VIDEO_RETRY_DELAY", None) or 30))
+_VIDEO_RETRY_MAX = max(0, int(config.YOUTUBE_VIDEO_RETRY_MAX))
+_VIDEO_RETRY_DELAY = max(10.0, float(config.YOUTUBE_VIDEO_RETRY_DELAY))
 # Stages whose failures are considered transient (retryable)
 _RETRYABLE_STAGES = frozenset({"download", "split", "upload"})
 ISO_DURATION_RE = re.compile(
