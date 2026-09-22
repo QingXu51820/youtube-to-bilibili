@@ -19,6 +19,7 @@ from yt2bili import config
 from yt2bili.subtitles.bilibili_format import DURATION_MARGIN_S, clamp_cues_to_duration
 from yt2bili.subtitles.downloader import download_subtitles
 from yt2bili.subtitles.parser import parse_subtitle
+from yt2bili.subtitles.paths import translated_srt_path
 from yt2bili.subtitles.translator import translate_cues
 from yt2bili.subtitles.writer import write_srt
 from yt2bili.youtube.downloader import _extract_metadata
@@ -83,9 +84,7 @@ def fetch_and_translate(video_url: str) -> dict:
     if not translated:
         raise RuntimeError("对齐视频时长后字幕为空")
 
-    out_path = (
-        Path(config.SUBTITLE_DIR) / f"{video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
-    )
+    out_path = translated_srt_path(video_id)
     write_srt(translated, str(out_path))
 
     durations = sorted(c.end - c.start for c in translated)

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from yt2bili import atomic_io, config
+from yt2bili.subtitles.paths import source_srt_path, translated_srt_path
 from yt2bili.timestamps import parse_iso, utc_now
 from yt2bili.bilibili import subtitle as subtitle_mod
 from yt2bili.bilibili.collection import (
@@ -240,8 +241,7 @@ def _drop_subtitle_files(video_id: str) -> list[str]:
     if not video_id:
         return []
     removed = []
-    for suffix in (f".{config.SUBTITLE_TARGET_LANG}.srt", ".en-orig.srt"):
-        path = Path(config.SUBTITLE_DIR) / f"{video_id}{suffix}"
+    for path in (translated_srt_path(video_id), source_srt_path(video_id)):
         try:
             if path.exists():
                 path.unlink()

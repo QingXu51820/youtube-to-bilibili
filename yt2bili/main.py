@@ -456,7 +456,7 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
             # 视频已经是 uploaded，监控永远不会再碰它，这条队列是唯一的补救路径。
             try:
                 from yt2bili.bilibili.subtitle import save_deferred_subtitle
-                from yt2bili.subtitles.queue import translated_srt_path
+                from yt2bili.subtitles.paths import translated_srt_path
 
                 save_deferred_subtitle(
                     bvid=record.bvid,

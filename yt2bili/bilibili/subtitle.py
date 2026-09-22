@@ -22,6 +22,11 @@ from yt2bili.bilibili.api import (
     is_gone_error,
 )
 from yt2bili import profile as profile_mod
+from yt2bili.subtitles.paths import (
+    is_translated_name,
+    translated_srt_path,
+    video_id_from_filename,
+)
 from yt2bili.timestamps import parse_iso, utc_now
 
 # ── Constants ────────────────────────────────────────────────────────
@@ -630,7 +635,7 @@ def _recover_orphaned_subtitles(
     orphaned: list[dict] = []
     scoped_skipped = 0
     for srt in sorted(subtitle_dir.glob("*.zh-CN.srt")):
-        video_id = srt.name.split(".", 1)[0]
+        video_id = video_id_from_filename(srt.name)
         info = vid_to_entry.get(video_id)
         if not info:
             continue
@@ -733,7 +738,7 @@ def _migrate_legacy_pending_queue() -> None:
         if not isinstance(e, dict):
             unattributed.append(e)
             continue
-        video_id = Path(str(e.get("translated_path", ""))).name.split(".", 1)[0]
+        video_id = video_id_from_filename(e.get("translated_path", ""))
         pname = channel_to_profile.get(vid_to_channel.get(video_id, ""), "")
         if pname:
             per_profile.setdefault(pname, {})[e.get("bvid", "")] = e
@@ -786,10 +791,9 @@ def _find_source_subtitle(translated_path: str) -> str | None:
     language (e.g. ``.en.srt``). Returns ``None`` when nothing is kept.
     """
     translated = Path(translated_path)
-    video_id = translated.name.split(".", 1)[0]
-    target_suffix = f".{config.SUBTITLE_TARGET_LANG}.srt"
+    video_id = video_id_from_filename(translated.name)
     for f in sorted(translated.parent.glob(f"{video_id}.*.srt")):
-        if f.name != translated.name and not f.name.endswith(target_suffix):
+        if f.name != translated.name and not is_translated_name(f.name):
             return str(f)
     return None
 
@@ -810,7 +814,7 @@ def _regenerate_missing_subtitle(entry: dict) -> str | None:
     translated_path = entry.get("translated_path", "")
     if not translated_path:
         return None
-    video_id = Path(translated_path).name.split(".", 1)[0]
+    video_id = video_id_from_filename(translated_path)
 
     from yt2bili.subtitles.parser import parse_subtitle
     from yt2bili.subtitles.translator import translate_cues
@@ -1129,10 +1133,7 @@ def requeue_missing_subtitles() -> int:
         # (re-download + re-translate) on the next run.
         save_pending_subtitle(
             bvid=bvid, aid=item.get("aid", 0),
-            translated_path=str(
-                Path(config.SUBTITLE_DIR)
-                / f"{video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
-            ),
+            translated_path=str(translated_srt_path(video_id)),
         )
         requeued += 1
 

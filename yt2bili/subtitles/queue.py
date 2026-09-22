@@ -15,6 +15,7 @@ from yt2bili import config
 from yt2bili.subtitles.translator import translate_cues
 from yt2bili.subtitles.writer import write_srt
 from yt2bili.subtitles.bilibili_format import DURATION_MARGIN_S, clamp_cues_to_duration
+from yt2bili.subtitles.paths import translated_srt_path
 
 
 class SubtitleTranslationJob:
@@ -78,11 +79,6 @@ class SubtitleTranslationJob:
 _translation_queue: queue.Queue = queue.Queue()
 _worker_thread: threading.Thread | None = None
 _worker_lock = threading.Lock()
-
-
-def translated_srt_path(video_id: str) -> Path:
-    """Where the translated SRT for a video lives: ``{id}.{target_lang}.srt``."""
-    return Path(config.SUBTITLE_DIR) / f"{video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
 
 
 def find_existing_translation(video_id: str) -> str | None:
