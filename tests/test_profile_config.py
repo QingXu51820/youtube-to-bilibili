@@ -358,6 +358,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(issues, [])
 
 
+class ChannelTitlesTests(unittest.TestCase):
+    """按频道过滤上传日志/状态文件的地方共用这一个集合，避免两处各自折叠大小写。"""
+
+    def test_lowercases_and_strips(self):
+        prof = Profile(name="snap", youtube=YouTubeSettings(channels=[
+            YouTubeChannel("UC1", "  Bynx_Plays "),
+            YouTubeChannel("UC2", "SNAP JUDGMENTS"),
+        ]))
+        self.assertEqual(profile_mod.channel_titles(prof), {"bynx_plays", "snap judgments"})
+
+    def test_drops_empty_titles_and_keeps_id_only_channels(self):
+        prof = Profile(name="snap", youtube=YouTubeSettings(channels=[
+            YouTubeChannel("UC1", ""),
+            YouTubeChannel("UC2", "   "),
+            YouTubeChannel("UC3"),
+            YouTubeChannel("UC4", "Kept"),
+        ]))
+        self.assertEqual(profile_mod.channel_titles(prof), {"kept"})
+
+    def test_no_channels_is_empty_set(self):
+        self.assertEqual(profile_mod.channel_titles(Profile(name="snap")), set())
+
+
 class ResolveCollectionNameTests(unittest.TestCase):
     def test_configured_collection_by_id(self):
         prof = Profile(

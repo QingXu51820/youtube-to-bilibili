@@ -402,11 +402,7 @@ def _profile_channels(profile_name: str) -> set[str]:
     prof = profile_mod.resolve_profile(profile_name)
     if prof is None:
         return set()
-    return {
-        (c.channel_title or "").strip().lower()
-        for c in prof.youtube.channels
-        if (c.channel_title or "").strip()
-    }
+    return profile_mod.channel_titles(prof)
 
 
 def _upload_log_entry_matches(entry: dict, active: str, channels: set[str]) -> bool:

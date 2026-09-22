@@ -200,6 +200,20 @@ def is_profile_state_active() -> bool:
     return is_multi_profile() and profile_exists("default")
 
 
+def channel_titles(profile: Profile) -> set[str]:
+    """该 profile 配置的频道名，统一小写去空白后返回。
+
+    比较的两端来源不同（``profiles.json`` 里手写的标题 vs YouTube API / 上传日志里
+    的原始标题），大小写未必一致；所有按频道过滤上传日志、状态文件和字幕文件的地方
+    都要用这个函数取集合，否则同一个频道会因为大小写被静默漏掉。
+    """
+    return {
+        (c.channel_title or "").strip().lower()
+        for c in profile.youtube.channels
+        if (c.channel_title or "").strip()
+    }
+
+
 def get_state_file_path(profile: Profile) -> Path:
     """Return the state file path for a profile."""
     if profile.youtube.monitor_state:

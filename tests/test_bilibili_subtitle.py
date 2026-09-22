@@ -451,6 +451,20 @@ class RecoverOrphanedScopedTests(unittest.TestCase):
         self.assertEqual([e["bvid"] for e in recovered], ["BV-A"])
         self.assertEqual(client.get.call_count, 1)  # 只查询作用域内的 bvid
 
+    def test_channel_match_ignores_case(self):
+        """回归：这里曾精确比对大小写，而 monitor 侧是折叠大小写的。
+
+        profiles.json 里手写的 "inscopechannel" 与上传日志里的 "InScopeChannel"
+        是同一个频道；精确比对会把本账号的条目静默跳过（monitor 却认得它）。
+        """
+        client = MagicMock()
+        client.get.return_value = _ok_response([{"cid": 1}])
+        with patch.object(bsub, "_build_client", return_value=client), \
+             patch.object(config, "SUBTITLE_DIR", str(self.sub_dir)), \
+             patch.object(config, "PROJECT_ROOT", Path(self.tmp.name)):
+            recovered = bsub._recover_orphaned_subtitles(set(), {"inscopechannel"})
+        self.assertEqual([e["bvid"] for e in recovered], ["BV-A"])
+
     def test_legacy_mode_scans_all_channels(self):
         client = MagicMock()
         client.get.return_value = _ok_response([{"cid": 1}])

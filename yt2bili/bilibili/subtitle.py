@@ -98,14 +98,32 @@ def _active_credentials() -> tuple[str, str, str]:
 
 
 def _active_profile_channel_titles() -> set[str] | None:
-    """Set of channel titles for the active profile; None in legacy mode."""
+    """Set of channel titles for the active profile; None in legacy mode.
+
+    与 monitor 用同一个 ``profile.channel_titles()``（小写去空白）：两处各自折叠
+    大小写时曾经不一致，导致 monitor 认得的频道被字幕补偿扫描静默跳过。
+    """
     if not _profile_state_active():
         return None
     from yt2bili import profile as profile_mod
     prof = profile_mod.resolve_profile(_active_profile_name())
     if prof is None:
         return None
-    return {c.channel_title for c in prof.youtube.channels if c.channel_title}
+    return profile_mod.channel_titles(prof)
+
+
+def _channel_in_scope(entry: dict, channel_titles: set[str] | None) -> bool:
+    """该条记录是否属于当前账号的频道（legacy 模式不做限制）。
+
+    两侧都折叠大小写：profiles.json 里手写的频道名与上传日志里的原标题不一定同
+    大小写，精确比对会把本账号的条目静默漏掉。
+    """
+    if channel_titles is None:
+        return True
+    title = str(entry.get("channel_title") or "").strip().lower()
+    if not title:
+        return False
+    return any(title == str(t or "").strip().lower() for t in channel_titles)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -666,7 +684,7 @@ def _recover_orphaned_subtitles(
         if bvid in existing_bvids:
             continue
         # Profile mode: never check/upload another account's subtitle files
-        if channel_titles is not None and info.get("channel_title") not in channel_titles:
+        if not _channel_in_scope(info, channel_titles):
             scoped_skipped += 1
             continue
 
@@ -1207,8 +1225,7 @@ def requeue_missing_subtitles() -> int:
                     bvid = item.get("bvid", "")
                     if not bvid or bvid in existing_bvids:
                         continue
-                    if (channel_titles is not None
-                            and item.get("channel_title", "") not in channel_titles):
+                    if not _channel_in_scope(item, channel_titles):
                         continue
                     candidates.append(item)
     except (json.JSONDecodeError, OSError):
