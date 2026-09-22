@@ -542,6 +542,51 @@ def save_deferred_subtitle(
         _write_pending_entries(path, entries)
 
 
+def _has_zh_subtitle(data: dict) -> bool:
+    """B站 返回的稿件信息里是否已有中文字幕轨。"""
+    subtitle_list = data.get("data", {}).get("subtitle", {}).get("list", [])
+    return any(s.get("lan", "").startswith("zh") for s in subtitle_list)
+
+
+def _iter_subtitle_status(candidates: list[dict]):
+    """逐个查询候选稿件在 B站 的中文字幕状态。
+
+    产出 ``(entry, kind, data)``，``kind`` 取值：
+
+    * ``missing``      —— 查得到且没有中文字幕轨（需要处理）
+    * ``has_zh``       —— B站 已有中文字幕
+    * ``not_visible``  —— code != 0（稿件已删除 / 不可见）
+    * ``http_error``   —— HTTP 状态不是 200
+    * ``request_error``—— 请求本身抛异常
+
+    两种调用方（扫描残留字幕文件 / 重新入队）对失败的处理不同：一个宁可重试，
+    另一个直接跳过，所以这里只负责分类，不做取舍。每次请求之间固定 sleep，
+    避免被 B站 限流。
+    """
+    client = _build_client(timeout=_DEFAULT_TIMEOUT)
+    try:
+        for i, entry in enumerate(candidates, 1):
+            try:
+                resp = client.get(VIDEO_INFO_URL, params={"bvid": entry["bvid"]})
+                time.sleep(0.3)  # avoid rate limiting
+                if resp.status_code != 200:
+                    yield entry, "http_error", None
+                else:
+                    data = resp.json()
+                    if data.get("code") != 0:
+                        yield entry, "not_visible", None
+                    elif _has_zh_subtitle(data):
+                        yield entry, "has_zh", data
+                    else:
+                        yield entry, "missing", data
+            except Exception:
+                yield entry, "request_error", None
+            if i % 10 == 0:
+                print(f"[字幕]   已检查 {i}/{len(candidates)}...")
+    finally:
+        client.close()
+
+
 def _recover_orphaned_subtitles(
     existing_bvids: set[str],
     channel_titles: set[str] | None = None,
@@ -612,45 +657,21 @@ def _recover_orphaned_subtitles(
     print(f"[字幕] 发现 {len(orphaned)} 个被丢弃的字幕文件，检查B站状态...")
     recoverable: list[dict] = []
     skipped_has_sub = 0
-    client = _build_client(timeout=_DEFAULT_TIMEOUT)
 
-    for i, entry in enumerate(orphaned, 1):
-        bvid = entry["bvid"]
-        try:
-            resp = client.get(VIDEO_INFO_URL, params={"bvid": bvid})
-            time.sleep(0.3)  # avoid rate limiting
-            if resp.status_code != 200:
-                recoverable.append(entry)
-                if i % 10 == 0:
-                    print(f"[字幕]   已扫描 {i}/{len(orphaned)}...")
-                continue
-            data = resp.json()
-            if data.get("code") != 0:
-                # Some videos may be deleted / not visible
-                if i % 10 == 0:
-                    print(f"[字幕]   已扫描 {i}/{len(orphaned)}...")
-                continue  # skip unreachable videos
-
-            # Check if zh-CN subtitles already exist on Bilibili
-            subtitle_list = data.get("data", {}).get("subtitle", {}).get("list", [])
-            has_zh = any(s.get("lan", "").startswith("zh") for s in subtitle_list)
-            if has_zh:
-                skipped_has_sub += 1
-                continue  # already uploaded, skip
-
+    for entry, kind, data in _iter_subtitle_status(orphaned):
+        if kind == "has_zh":
+            skipped_has_sub += 1
+            continue
+        if kind == "not_visible":
+            continue  # 稿件已删除 / 不可见：重试也没有意义
+        if kind == "missing":
             # Pre-extract CID so upload_pending_subtitles can skip wait_for_cid
-            pages = data.get("data", {}).get("pages", [])
+            pages = (data or {}).get("data", {}).get("pages", [])
             if pages and pages[0].get("cid", 0) > 0:
                 entry["cid"] = int(pages[0]["cid"])
-
-            recoverable.append(entry)
-        except Exception:
-            recoverable.append(entry)  # err on the side of retrying, but no CID
-
-        if i % 10 == 0:
-            print(f"[字幕]   已扫描 {i}/{len(orphaned)}...")
-
-    client.close()
+        # http_error / request_error 也照收：手头就是一批已经翻好的字幕文件，
+        # 网络抖一下不该把它们丢掉（没有 CID 而已）
+        recoverable.append(entry)
 
     if recoverable:
         with_cid = sum(1 for e in recoverable if e.get("cid"))
@@ -1088,48 +1109,32 @@ def requeue_missing_subtitles() -> int:
     requeued = 0
     has_sub = 0
     skipped = 0
-    client = _build_client(timeout=_DEFAULT_TIMEOUT)
-    try:
-        for i, item in enumerate(candidates, 1):
-            bvid = item.get("bvid", "")
-            video_id = item.get("video_id", "")
-            try:
-                resp = client.get(VIDEO_INFO_URL, params={"bvid": bvid})
-                time.sleep(0.3)  # avoid rate limiting
-                if resp.status_code != 200:
-                    skipped += 1
-                    continue
-                data = resp.json()
-                if data.get("code") != 0:
-                    skipped += 1  # deleted / not visible — nothing to do
-                    continue
-                subtitle_list = (
-                    data.get("data", {}).get("subtitle", {}).get("list", [])
-                )
-                if any(s.get("lan", "").startswith("zh") for s in subtitle_list):
-                    has_sub += 1
-                    continue
-                # No Chinese subtitle on Bilibili — re-queue it. The translated
-                # file is missing by design; upload_pending_subtitles will
-                # regenerate it (re-download + re-translate) on the next run.
-                if not video_id:
-                    skipped += 1
-                    continue
-                translated_path = str(
-                    Path(config.SUBTITLE_DIR)
-                    / f"{video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
-                )
-                save_pending_subtitle(
-                    bvid=bvid, aid=item.get("aid", 0),
-                    translated_path=translated_path,
-                )
-                requeued += 1
-            except Exception:
-                skipped += 1
-            if i % 10 == 0:
-                print(f"[字幕]   已检查 {i}/{len(candidates)}...")
-    finally:
-        client.close()
+
+    for item, kind, _data in _iter_subtitle_status(candidates):
+        if kind == "has_zh":
+            has_sub += 1
+            continue
+        if kind != "missing":
+            # 不可达 / 请求出错：这条记录重试也是白搭，交给窗口外的下次运行
+            skipped += 1
+            continue
+
+        bvid = item.get("bvid", "")
+        video_id = item.get("video_id", "")
+        if not video_id:
+            skipped += 1
+            continue
+        # No Chinese subtitle on Bilibili — re-queue it. The translated file is
+        # missing by design; upload_pending_subtitles will regenerate it
+        # (re-download + re-translate) on the next run.
+        save_pending_subtitle(
+            bvid=bvid, aid=item.get("aid", 0),
+            translated_path=str(
+                Path(config.SUBTITLE_DIR)
+                / f"{video_id}.{config.SUBTITLE_TARGET_LANG}.srt"
+            ),
+        )
+        requeued += 1
 
     print(
         f"[字幕] 恢复完成: 重新入队 {requeued} 个，B站已有中文字幕 {has_sub} 个，"

@@ -423,6 +423,61 @@ class ActiveCredentialsTests(unittest.TestCase):
                 client.close()
 
 
+class IterSubtitleStatusTests(unittest.TestCase):
+    """_iter_subtitle_status：两种扫描共用的分类循环（残留文件扫描 / 重新入队）。"""
+
+    def setUp(self):
+        self.client = MagicMock()
+
+    def _kinds(self, entries, responses):
+        self.client.get.side_effect = responses
+        with patch.object(bsub, "_build_client", return_value=self.client), \
+             patch.object(bsub.time, "sleep"):
+            return [
+                (entry["bvid"], kind)
+                for entry, kind, _data in bsub._iter_subtitle_status(entries)
+            ]
+
+    def test_classifies_each_response(self):
+        entries = [{"bvid": f"BV{i}"} for i in range(1, 6)]
+        responses = [
+            httpx.Response(200, json={"code": 0, "data": {
+                "pages": [{"cid": 7}], "subtitle": {"list": []}}}),
+            httpx.Response(200, json={"code": 0, "data": {
+                "subtitle": {"list": [{"lan": "zh-CN"}]}}}),
+            httpx.Response(200, json={"code": 62002, "message": "稿件不可见"}),
+            httpx.Response(500, text="boom"),
+            RuntimeError("网络错误"),
+        ]
+        self.assertEqual(
+            self._kinds(entries, responses),
+            [
+                ("BV1", "missing"),
+                ("BV2", "has_zh"),
+                ("BV3", "not_visible"),
+                ("BV4", "http_error"),
+                ("BV5", "request_error"),
+            ],
+        )
+
+    def test_missing_carries_the_response_body(self):
+        """missing 分支要拿 pages 预取 CID。"""
+        self.client.get.return_value = _ok_response([{"cid": 42}])
+        with patch.object(bsub, "_build_client", return_value=self.client), \
+             patch.object(bsub.time, "sleep"):
+            results = list(bsub._iter_subtitle_status([{"bvid": "BV1"}]))
+        _entry, kind, data = results[0]
+        self.assertEqual(kind, "missing")
+        self.assertEqual(data["data"]["pages"][0]["cid"], 42)
+
+    def test_client_is_closed_even_when_the_loop_is_abandoned(self):
+        self.client.get.return_value = _ok_response()
+        with patch.object(bsub, "_build_client", return_value=self.client), \
+             patch.object(bsub.time, "sleep"):
+            next(bsub._iter_subtitle_status([{"bvid": "BV1"}, {"bvid": "BV2"}]))
+        self.client.close.assert_called_once()
+
+
 class RecoverOrphanedScopedTests(unittest.TestCase):
     """_recover_orphaned_subtitles：只扫描当前账号频道的字幕文件。"""
 
