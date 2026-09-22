@@ -332,8 +332,7 @@ class ConfigTests(unittest.TestCase):
              patch.object(config, "DOWNLOAD_DIR", str(Path(tempfile.gettempdir()) / "yt2bili-test-dl")), \
              patch.object(config, "RUNS_DIR", str(Path(tempfile.gettempdir()) / "yt2bili-test-runs")), \
              patch.object(config, "SUBTITLE_DIR", str(Path(tempfile.gettempdir()) / "yt2bili-test-sub")), \
-             patch.object(config, "SUBTITLE_TRANSLATE_BATCH_SIZE", 30), \
-             patch.object(config, "SUBTITLE_WAIT_CID_INTERVAL", 10):
+             patch.object(config, "SUBTITLE_TRANSLATE_BATCH_SIZE", 30):
             issues = config.validate()
         joined = "\n".join(issues)
         self.assertIn("SESSDATA", joined)
@@ -352,8 +351,7 @@ class ConfigTests(unittest.TestCase):
              patch.object(config, "DOWNLOAD_DIR", str(Path(tempfile.gettempdir()) / "yt2bili-test-dl2")), \
              patch.object(config, "RUNS_DIR", str(Path(tempfile.gettempdir()) / "yt2bili-test-runs2")), \
              patch.object(config, "SUBTITLE_DIR", str(Path(tempfile.gettempdir()) / "yt2bili-test-sub2")), \
-             patch.object(config, "SUBTITLE_TRANSLATE_BATCH_SIZE", 30), \
-             patch.object(config, "SUBTITLE_WAIT_CID_INTERVAL", 10):
+             patch.object(config, "SUBTITLE_TRANSLATE_BATCH_SIZE", 30):
             issues = config.validate()
         self.assertEqual(issues, [])
 

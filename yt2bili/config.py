@@ -205,10 +205,6 @@ SUBTITLE_UPLOAD_TO_BILIBILI = _get("SUBTITLE_UPLOAD_TO_BILIBILI", "true").lower(
 # 下载 json3 逐词字幕并按句子边界重分段（改善 DeepSeek 翻译的上下文质量）；
 # json3 不可用或重分段失败时自动回退普通 srt。
 SUBTITLE_RESEGMENT_ENABLED = _get("SUBTITLE_RESEGMENT_ENABLED", "true").lower() == "true"
-SUBTITLE_LAN = _get("SUBTITLE_LAN", "zh")
-SUBTITLE_LAN_DOC = _get("SUBTITLE_LAN_DOC", "中文（简体）")
-SUBTITLE_WAIT_CID_SECONDS = _get_int("SUBTITLE_WAIT_CID_SECONDS", 300)
-SUBTITLE_WAIT_CID_INTERVAL = _get_int("SUBTITLE_WAIT_CID_INTERVAL", 10)
 SUBTITLE_DIR = _get("SUBTITLE_DIR", str(Path(DOWNLOAD_DIR) / "subtitles"))
 
 
@@ -393,8 +389,6 @@ def validate() -> list[str]:
         issues.append("SUBTITLE_DEFER_MAX_ATTEMPTS must be >= 1")
     if SUBTITLE_DEFER_RETRY_MINUTES < 1:
         issues.append("SUBTITLE_DEFER_RETRY_MINUTES must be >= 1")
-    if SUBTITLE_WAIT_CID_INTERVAL < 1:
-        issues.append("SUBTITLE_WAIT_CID_INTERVAL must be >= 1")
 
     if WORK_START_HOUR < 0 or WORK_START_HOUR > 23:
         issues.append("WORK_START_HOUR must be between 0 and 23")
