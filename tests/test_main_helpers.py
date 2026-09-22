@@ -26,6 +26,7 @@ from yt2bili.profile import (
     YouTubeSettings,
 )
 from yt2bili.youtube.downloader import VideoInfo
+from yt2bili.subtitles.downloader import SubtitleUnavailable
 
 
 def make_result(url="https://youtu.be/abc", success=True, stage="complete"):
@@ -296,6 +297,95 @@ class ProcessVideoCollectionWiringTests(unittest.TestCase):
         self.assertEqual(up.call_args.kwargs["video_id"], "abc")
         self.assertEqual(up.call_args.kwargs["channel_title"], "Bynx_Plays")
         self.assertEqual(result.channel_title, "Bynx_Plays")
+
+
+class SubtitleSourceDeferTests(unittest.TestCase):
+    """源字幕失败：可恢复的挂进延迟队列，永久的当场放弃。"""
+
+    def _profile(self):
+        return Profile(
+            name="snap",
+            bilibili=BiliCredentials(sessdata="s", bili_jct="j"),
+            youtube=YouTubeSettings(channels=[
+                YouTubeChannel("UC1", "Bynx_Plays"),
+            ]),
+        )
+
+    def _run(self, source_exc, *, upload_to_bilibili=True, defer_exc=None):
+        """跑一遍 process_video，源字幕下载按 source_exc 失败。"""
+        video = VideoInfo(
+            file_path="x.mp4", title="T", description="",
+            original_url="https://youtu.be/abc", video_id="abc",
+            channel_title="Bynx_Plays", channel_id="UC1", duration=60.0,
+        )
+
+        def _fake_download(url, before_download=None):
+            if before_download:
+                before_download({"id": "abc"})
+            return video
+
+        with patch.object(main_mod.workhours, "check", return_value=(True, "")), \
+             patch.object(main_mod.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(main_mod.profile_mod, "resolve_profile",
+                          return_value=self._profile()), \
+             patch.object(main_mod, "download_video", side_effect=_fake_download), \
+             patch.object(main_mod, "find_existing_translation", return_value=None), \
+             patch.object(main_mod, "download_subtitles", side_effect=source_exc), \
+             patch.object(main_mod, "translate", return_value="译题"), \
+             patch.object(main_mod, "prepare_cover", return_value="/tmp/c.jpg"), \
+             patch.object(main_mod, "upload_video") as up, \
+             patch.object(config, "SUBTITLE_UPLOAD_TO_BILIBILI", upload_to_bilibili), \
+             patch("yt2bili.bilibili.subtitle.save_deferred_subtitle",
+                   side_effect=defer_exc) as defer:
+            up.return_value = UploadResult(success=True, bvid="BV1", aid=1)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                result = main_mod.process_video("https://youtu.be/abc")
+        return result, defer, out.getvalue()
+
+    @staticmethod
+    def _no_tracks(*args, **kwargs):
+        raise SubtitleUnavailable("no_tracks", "YouTube 上还没有该视频的字幕轨")
+
+    def test_retryable_source_failure_is_deferred(self):
+        result, defer, out = self._run(self._no_tracks)
+        self.assertTrue(result.success)
+        self.assertEqual(result.subtitle_status, "deferred")
+        self.assertEqual(result.subtitle_defer_kind, "no_tracks")
+        defer.assert_called_once()
+        kwargs = defer.call_args.kwargs
+        self.assertEqual(kwargs["bvid"], "BV1")
+        self.assertEqual(kwargs["aid"], 1)
+        self.assertEqual(kwargs["kind"], "no_tracks")
+        # 译文字幕此刻还不存在，靠 sweep 重建
+        self.assertTrue(kwargs["translated_path"].endswith("abc.zh-CN.srt"))
+        self.assertIn("延迟队列", out)
+
+    def test_no_match_is_permanent(self):
+        """只有 zh-HK 手动轨的频道：重试多少次都一样，不该入队。"""
+        def _no_match(*args, **kwargs):
+            # 与 downloader._unavailable() 的措辞一致：报告里要能看出可用语言
+            raise SubtitleUnavailable(
+                "no_match", "YouTube 有字幕轨，但没有匹配的语言；可用语言: zh-HK", ["zh-HK"])
+        result, defer, _ = self._run(_no_match)
+        self.assertTrue(result.success)
+        self.assertEqual(result.subtitle_status, "failed")
+        self.assertEqual(result.subtitle_defer_kind, "no_match")
+        self.assertFalse(defer.called)
+        self.assertIn("zh-HK", result.subtitle_error)
+
+    def test_defer_enqueue_failure_is_not_fatal(self):
+        """入队自己炸了也不能影响已成功的投稿（否则下轮会重复投稿）。"""
+        result, _, out = self._run(self._no_tracks, defer_exc=OSError("磁盘满"))
+        self.assertTrue(result.success)
+        self.assertEqual(result.subtitle_status, "failed")
+        self.assertIn("延迟入队失败", out)
+
+    def test_not_deferred_when_bilibili_upload_disabled(self):
+        result, defer, _ = self._run(self._no_tracks, upload_to_bilibili=False)
+        self.assertEqual(result.subtitle_status, "failed")
+        self.assertFalse(defer.called)
 
 
 class FixCollectionsCommandTests(unittest.TestCase):

@@ -67,6 +67,22 @@
 | `YOUTUBE_MONITOR_RETRY_DELAY` | 监控周期重试基础延迟秒数（上限 600s） | `30` |
 | `YOUTUBE_VIDEO_RETRY_MAX` | 单视频处理失败后的额外重试次数（仅 download/split/upload 阶段） | `2` |
 | `YOUTUBE_VIDEO_RETRY_DELAY` | 单视频重试基础延迟秒数 | `30` |
+| `SUBTITLE_DEFER_MAX_ATTEMPTS` | 源字幕当时拿不到时，入延迟队列后最多再试几次 | `6` |
+| `SUBTITLE_DEFER_RETRY_MINUTES` | 两次延迟重试之间的最小间隔（分钟） | `60` |
+
+### 字幕源缺失的延迟恢复
+
+视频上传成功但**源字幕**这次没拿到（刚发布还没生成 / 代理瞬断）时，视频会被挂进
+`state/<profile>/pending_subtitles.json`，由监控每轮的 sweep（以及 `--subtitle-only`）
+重新下载源字幕 → 翻译 → 上传，不需要人工干预。
+
+- 只有可恢复的原因会入队；`no_match`（有字幕轨但语言不匹配，例如频道只有 `zh-HK`）
+  与 `bad_timing`（时间轴崩坏）属于永久失败，当场放弃并把可用语言写进运行报告。
+- 放弃规则按**次数**（`SUBTITLE_DEFER_MAX_ATTEMPTS`）而不是墙钟：`WORK_HOURS_ONLY`
+  下周五 19:50 入队的条目要到周一早上才有第一次机会。另有一周的粗兜底。
+- 重试受 `SUBTITLE_DEFER_RETRY_MINUTES` 节流，且单轮最多重建 2 条，避免拖长监控周期。
+- 注意：`SUBTITLE_UPLOAD_TO_BILIBILI=false` 或 `--no-subtitle-upload` 时没有恢复路径
+  （没有 bvid 或不落队列），源失败就是彻底失败。
 
 ---
 

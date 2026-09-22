@@ -17,6 +17,7 @@ from yt2bili import config
 from yt2bili import profile as profile_mod
 from yt2bili.bilibili import subtitle as bsub
 from yt2bili.profile import BiliCredentials, Profile, YouTubeChannel, YouTubeSettings
+from yt2bili.subtitles.downloader import SubtitleUnavailable
 
 
 def _ok_response(pages=None):
@@ -726,6 +727,191 @@ class RegenerateMissingSubtitleTests(unittest.TestCase):
         with patch("yt2bili.subtitles.translator.translate_cues",
                    side_effect=RuntimeError("翻译失败")):
             self.assertIsNone(bsub._regenerate_missing_subtitle(self.entry))
+
+
+class DeferredSubtitleTests(unittest.TestCase):
+    """源字幕当时没拿到的条目（defer_kind）：用自己的重试预算，且必须被节流。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.pending = Path(self.tmp.name) / "pending_subtitles.json"
+        # 故意指向不存在的文件：延迟条目的译文字幕要靠 sweep 重建
+        self.missing_srt = Path(self.tmp.name) / "abc123.zh-CN.srt"
+
+    def _entry(self, **extra):
+        entry = {
+            "bvid": "BV1",
+            "aid": 1,
+            "translated_path": str(self.missing_srt),
+            # 默认一小时前入队：既过了首次节流，也远没到 _DEFER_MAX_AGE_HOURS 兜底
+            "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600)),
+            "defer_kind": "no_tracks",
+            "defer_attempts": 0,
+        }
+        entry.update(extra)
+        return entry
+
+    def _write_pending(self, entries):
+        self.pending.write_text(
+            json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+
+    def _read_pending(self):
+        return json.loads(self.pending.read_text(encoding="utf-8"))
+
+    def _patch_pipeline(self, regen_side_effect=None):
+        patchers = [
+            patch.object(bsub, "_pending_subtitles_path", return_value=self.pending),
+            patch.object(bsub, "_migrate_legacy_pending_queue"),
+            patch.object(bsub, "_regenerate_missing_subtitle",
+                         side_effect=regen_side_effect),
+            patch.object(bsub, "_recover_orphaned_subtitles", return_value=[]),
+            patch("yt2bili.subtitles.parser.parse_subtitle",
+                  return_value=[{"index": 1, "start": 1.0, "end": 2.0, "text": "hi"}]),
+            patch("yt2bili.subtitles.bilibili_format.cues_to_bilibili_json",
+                  return_value={"body": []}),
+            patch.object(bsub, "submit_subtitle", return_value={"code": 0}),
+            patch.object(bsub, "_cleanup_subtitle_files"),
+            patch.object(bsub, "wait_for_cid", return_value=42),
+            patch.object(bsub, "get_video_pages",
+                         return_value=[{"cid": 42, "duration": 60}]),
+        ]
+        mocks = {}
+        for patcher in patchers:
+            m = patcher.start()
+            self.addCleanup(patcher.stop)
+            mocks[patcher.attribute] = m
+        return mocks
+
+    @staticmethod
+    def _no_tracks(*args, **kwargs):
+        raise SubtitleUnavailable("no_tracks", "YouTube 上还没有该视频的字幕轨")
+
+    def test_no_tracks_uses_own_budget_not_regen_limit(self):
+        """「还没生成」不该消耗三振额度：活过 REGEN 上限，按 defer 次数放弃。"""
+        self._write_pending([self._entry()])
+        self._patch_pipeline(regen_side_effect=self._no_tracks)
+        with patch.object(config, "SUBTITLE_REGEN_MAX_FAILURES", 2), \
+             patch.object(config, "SUBTITLE_DEFER_MAX_ATTEMPTS", 3), \
+             patch.object(config, "SUBTITLE_DEFER_RETRY_MINUTES", 0):
+            for attempt in (1, 2):  # 已经超过 REGEN 上限 2 次，条目仍在
+                with self.subTest(attempt=attempt):
+                    self.assertEqual(bsub.upload_pending_subtitles(), 0)
+                    remaining = self._read_pending()
+                    self.assertEqual(remaining[0]["defer_attempts"], attempt)
+                    self.assertNotIn("regen_failures", remaining[0])
+            self.assertEqual(bsub.upload_pending_subtitles(), 0)
+        self.assertFalse(self.pending.exists())  # 第 3 次确认后放弃
+
+    def test_deferred_is_throttled_within_window(self):
+        """节流窗口内不再重试，也不碰 CID 探测（省掉一次 B站 请求）。"""
+        self._write_pending([self._entry(
+            defer_attempts=1,
+            last_defer_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        )])
+        mocks = self._patch_pipeline(
+            regen_side_effect=AssertionError("节流窗口内不应重建"))
+        self.assertEqual(bsub.upload_pending_subtitles(), 0)
+        self.assertFalse(mocks["_regenerate_missing_subtitle"].called)
+        self.assertFalse(mocks["get_video_pages"].called)
+        remaining = self._read_pending()
+        self.assertEqual(remaining[0]["defer_attempts"], 1)  # 计数不变
+
+    def test_deferred_retries_after_window(self):
+        self._write_pending([self._entry(
+            defer_attempts=1, last_defer_at="2026-07-16T12:36:13Z",
+        )])
+        self._patch_pipeline(regen_side_effect=self._no_tracks)
+        self.assertEqual(bsub.upload_pending_subtitles(), 0)
+        self.assertEqual(self._read_pending()[0]["defer_attempts"], 2)
+
+    def test_deferred_age_net_drops_stale_entry(self):
+        """粗兜底：放了一周还没拿到源字幕的条目不再占位。"""
+        self._write_pending([self._entry(added_at="2026-07-16T12:36:13Z")])
+        self._patch_pipeline(regen_side_effect=self._no_tracks)
+        self.assertEqual(bsub.upload_pending_subtitles(), 0)
+        self.assertFalse(self.pending.exists())
+
+    def test_permanent_source_kind_drops_immediately(self):
+        """语言不匹配属于永久失败，一轮就该结束，不该占用重试预算。"""
+        self._write_pending([self._entry()])
+        def _no_match(*args, **kwargs):
+            raise SubtitleUnavailable("no_match", "没有匹配的语言", ["zh-HK"])
+        self._patch_pipeline(regen_side_effect=_no_match)
+        self.assertEqual(bsub.upload_pending_subtitles(), 0)
+        self.assertFalse(self.pending.exists())
+
+    def test_deferred_recovery_uploads(self):
+        """重建成功后照常走上传流程并出队。"""
+        self._write_pending([self._entry()])
+        self._patch_pipeline(regen_side_effect=lambda entry: str(self.missing_srt))
+        self.assertEqual(bsub.upload_pending_subtitles(), 1)
+        self.assertFalse(self.pending.exists())
+
+    def test_non_deferred_entry_keeps_three_strike(self):
+        """没有 defer_kind 的条目（worker/孤儿恢复）行为完全不变。"""
+        entry = self._entry()
+        entry.pop("defer_kind")
+        entry.pop("defer_attempts")
+        self._write_pending([entry])
+        self._patch_pipeline(regen_side_effect=lambda e: None)
+        with patch.object(config, "SUBTITLE_REGEN_MAX_FAILURES", 2):
+            self.assertEqual(bsub.upload_pending_subtitles(), 0)
+            remaining = self._read_pending()
+            self.assertEqual(remaining[0]["regen_failures"], 1)
+            self.assertNotIn("defer_attempts", remaining[0])
+
+
+class SaveDeferredSubtitleTests(unittest.TestCase):
+    """save_deferred_subtitle：合并而非覆盖，别把重试预算刷没了。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.pending = Path(self.tmp.name) / "pending_subtitles.json"
+        patcher = patch.object(bsub, "_pending_subtitles_path", return_value=self.pending)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _read(self):
+        return json.loads(self.pending.read_text(encoding="utf-8"))
+
+    def test_new_entry_has_defer_fields(self):
+        bsub.save_deferred_subtitle("BV1", 1, "/s/a.zh-CN.srt", "no_tracks")
+        entry = self._read()[0]
+        self.assertEqual(entry["defer_kind"], "no_tracks")
+        self.assertEqual(entry["defer_attempts"], 0)
+        self.assertTrue(entry["added_at"])
+
+    def test_same_kind_keeps_budget(self):
+        """重新处理同一条视频时不能把 added_at/计数复位。"""
+        bsub.save_deferred_subtitle("BV1", 1, "/s/a.zh-CN.srt", "no_tracks")
+        entry = self._read()[0]
+        entry["defer_attempts"] = 4
+        entry["last_defer_at"] = "2026-07-16T12:36:13Z"
+        entry["added_at"] = "2026-07-15T00:00:00Z"
+        self.pending.write_text(json.dumps([entry]), encoding="utf-8")
+
+        bsub.save_deferred_subtitle("BV1", 1, "/s/a.zh-CN.srt", "no_tracks")
+        merged = self._read()[0]
+        self.assertEqual(merged["defer_attempts"], 4)
+        self.assertEqual(merged["last_defer_at"], "2026-07-16T12:36:13Z")
+        self.assertEqual(merged["added_at"], "2026-07-15T00:00:00Z")
+
+    def test_different_kind_resets(self):
+        bsub.save_deferred_subtitle("BV1", 1, "/s/a.zh-CN.srt", "no_tracks")
+        entry = self._read()[0]
+        entry["defer_attempts"] = 4
+        self.pending.write_text(json.dumps([entry]), encoding="utf-8")
+
+        bsub.save_deferred_subtitle("BV1", 1, "/s/a.zh-CN.srt", "download_failed")
+        reset = self._read()[0]
+        self.assertEqual(reset["defer_kind"], "download_failed")
+        self.assertEqual(reset["defer_attempts"], 0)
+
+    def test_ignores_empty_bvid(self):
+        bsub.save_deferred_subtitle("", 1, "/s/a.zh-CN.srt", "no_tracks")
+        self.assertFalse(self.pending.exists())
 
 
 if __name__ == "__main__":

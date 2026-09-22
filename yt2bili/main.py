@@ -123,7 +123,11 @@ from yt2bili.translation.translator import translate
 from yt2bili.bilibili.uploader import upload_video
 from yt2bili.media.video_splitter import split_video
 from yt2bili.bilibili import auth
-from yt2bili.subtitles.downloader import download_subtitles
+from yt2bili.subtitles.downloader import (
+    SubtitleUnavailable,
+    download_subtitles,
+    is_retryable_kind,
+)
 from yt2bili.subtitles.parser import parse_subtitle
 from yt2bili.subtitles.queue import enqueue_translation, find_existing_translation
 
@@ -154,8 +158,10 @@ class ProcessResult:
     # Subtitle fields
     subtitle_source_path: str = ""
     subtitle_translated_path: str = ""
-    subtitle_status: str = ""       # success | skipped_multi_part | skipped_disabled | cid_timeout | upload_failed | failed | no_source
+    subtitle_status: str = ""       # success | queued | deferred | skipped_multi_part | skipped_disabled | cid_timeout | upload_failed | failed | no_source
     subtitle_error: str = ""
+    # 源失败原因（SubtitleUnavailable.kind），deferred/failed 时用来定位
+    subtitle_defer_kind: str = ""
     subtitle_cid: int = 0
 
 
@@ -254,9 +260,14 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
     # the callback to avoid concurrent yt-dlp cookie/stderr-suppression races.
     subtitle_job = None
     subtitle_source_error: str | None = None
+    # 源失败的原因分类（SubtitleUnavailable.kind）：可恢复的稍后入延迟队列重试，
+    # 永久的（语言不匹配/时间轴崩坏）当场放弃。
+    subtitle_source_kind: str = ""
+    subtitle_source_video_id: str = ""
 
     def _prepare_subtitles(info: dict) -> None:
         nonlocal subtitle_job, subtitle_source_error
+        nonlocal subtitle_source_kind, subtitle_source_video_id
         if not config.SUBTITLE_ENABLED:
             return
         video_id = (info or {}).get("id", "")
@@ -276,10 +287,20 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
                 return
             source_path = download_subtitles(url, video_id)
             if not source_path:
-                raise RuntimeError("YouTube 上未找到匹配的字幕语言")
+                raise SubtitleUnavailable(
+                    "list_failed", "YouTube 上未找到匹配的字幕语言"
+                )
             cues = parse_subtitle(source_path)
             if not cues:
-                raise RuntimeError("字幕文件解析为空")
+                # 文件在盘上但是空的 —— 延迟队列会用 yt-dlp 重下覆盖它，可重试
+                raise SubtitleUnavailable(
+                    "download_failed", "字幕文件解析为空"
+                )
+        except SubtitleUnavailable as e:
+            subtitle_source_error = str(e)
+            subtitle_source_kind = e.kind
+            subtitle_source_video_id = video_id
+            return
         except Exception as e:
             subtitle_source_error = str(e)
             return
@@ -428,7 +449,34 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
         record.subtitle_status = "skipped_disabled"
     elif subtitle_source_error:
         record.subtitle_error = subtitle_source_error
-        record.subtitle_status = "failed"
+        record.subtitle_defer_kind = subtitle_source_kind
+        if (is_retryable_kind(subtitle_source_kind) and record.bvid and record.aid
+                and config.SUBTITLE_UPLOAD_TO_BILIBILI):
+            # 源字幕这次没拿到（还没生成 / 网络失败）→ 挂进延迟队列。
+            # 视频已经是 uploaded，监控永远不会再碰它，这条队列是唯一的补救路径。
+            try:
+                from yt2bili.bilibili.subtitle import save_deferred_subtitle
+                from yt2bili.subtitles.queue import translated_srt_path
+
+                save_deferred_subtitle(
+                    bvid=record.bvid,
+                    aid=record.aid,
+                    translated_path=str(translated_srt_path(subtitle_source_video_id)),
+                    kind=subtitle_source_kind,
+                )
+                record.subtitle_status = "deferred"
+                print(
+                    f"[字幕] 已挂入延迟队列（{subtitle_source_kind}），"
+                    "后续周期自动重试",
+                    flush=True,
+                )
+            except Exception as e:
+                # 绝不能抛出去：此时投稿已经成功，异常逃出 process_video 会让监控
+                # 当成本轮失败 → 下轮重新下载并**重复投稿**。
+                record.subtitle_status = "failed"
+                print(f"[字幕] [WARN] 延迟入队失败（非致命）: {e}", flush=True)
+        else:
+            record.subtitle_status = "failed"
         if config.SUBTITLE_REQUIRED:
             record.error = subtitle_source_error
             record.stage = "subtitle"

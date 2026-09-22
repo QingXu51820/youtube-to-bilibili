@@ -7,11 +7,12 @@ that are not covered by ``bilibili-api-python``.
 
 import json
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 import httpx
-from yt2bili import config
+from yt2bili import atomic_io, config
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -33,6 +34,18 @@ GONE_CODES = (-404, 62002)
 _GONE_GIVE_UP_ATTEMPTS = 3
 # 队列条目至少存活这么久（小时）才允许走"消失"判定，保护刚上传还在审核的视频
 _GONE_MIN_AGE_HOURS = 2.0
+
+# 源字幕当时拿不到（defer_kind 条目）后的重试策略：按**次数**放弃，不按墙钟 ——
+# WORK_HOURS_ONLY 下周五 19:50 入队的条目要到周一早上才有第一次机会，纯小时窗口会让它
+# 一次都没试就过期。_DEFER_MAX_AGE_HOURS 只作粗兜底（一周），防止条目无限期占位。
+_DEFER_MAX_AGE_HOURS = 168.0
+# 单次 sweep 最多重建几条 defer 条目：每次重建要重新下字幕+重译，
+# 不限制的话队列一长就会把监控周期拖住。
+_MAX_DEFER_REGEN_PER_RUN = 2
+
+# pending_subtitles.json 现在有三个写入者：翻译 worker 线程、pipeline 线程（新入队）
+# 和 sweep 自身。同一进程内读-改-写必须串行化（跨进程仍靠 atomic_io 的原子替换）。
+_PENDING_LOCK = threading.Lock()
 
 
 # ── Profile helpers ──────────────────────────────────────────────────
@@ -475,49 +488,125 @@ def pending_subtitles_path() -> Path:
     return _pending_subtitles_path()
 
 
+def _parse_stamp(raw: str) -> datetime | None:
+    """Parse a queue timestamp (``...Z`` or naive) into an aware datetime."""
+    raw = str(raw or "")
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp
+
+
 def _entry_age_hours(entry: dict) -> float:
     """Hours since the queue entry was added; ``inf`` when the stamp is unusable."""
-    raw = str(entry.get("added_at", "") or "")
-    if not raw:
+    added = _parse_stamp(entry.get("added_at", ""))
+    if added is None:
         return float("inf")
-    try:
-        added = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return float("inf")
-    if added.tzinfo is None:
-        added = added.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - added).total_seconds() / 3600.0
+
+
+def _defer_throttled(entry: dict) -> bool:
+    """延迟条目距上次尝试不足 ``SUBTITLE_DEFER_RETRY_MINUTES`` 时为 True。
+
+    第一次机会不节流（``defer_attempts == 0``）：监控一轮一小时，本来就够慢；
+    节流是为了挡住 ``--subtitle-only`` 那种 10 分钟一轮的轮询。
+    """
+    if int(entry.get("defer_attempts", 0) or 0) <= 0:
+        return False
+    last = _parse_stamp(entry.get("last_defer_at", ""))
+    if last is None:
+        return False
+    minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60.0
+    return minutes < config.SUBTITLE_DEFER_RETRY_MINUTES
+
+
+def _now_stamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _read_pending_entries(path: Path) -> list[dict]:
+    """Read the pending queue, tolerating missing/corrupt/BOM files."""
+    if not path.exists():
+        return []
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return entries if isinstance(entries, list) else []
+
+
+def _write_pending_entries(path: Path, entries: list[dict]) -> None:
+    """Persist the pending queue atomically (Windows-safe: file may be read by peers)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_io.atomic_write_text(
+        path, json.dumps(entries, ensure_ascii=False, indent=2) + "\n"
+    )
 
 
 def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
     """Record a subtitle that needs deferred upload (Bilibili CID not ready yet)."""
     path = _pending_subtitles_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    with _PENDING_LOCK:
+        entries = _read_pending_entries(path)
+        existing = {e.get("bvid", ""): i for i, e in enumerate(entries)}
+        entry = {
+            "bvid": bvid,
+            "aid": aid,
+            "translated_path": translated_path,
+            "added_at": _now_stamp(),
+        }
+        if bvid in existing:
+            entries[existing[bvid]] = entry
+        else:
+            entries.append(entry)
+        _write_pending_entries(path, entries)
 
-    entries: list[dict] = []
-    if path.exists():
-        try:
-            entries = json.loads(path.read_text(encoding="utf-8-sig"))
-            if not isinstance(entries, list):
-                entries = []
-        except (json.JSONDecodeError, OSError):
-            entries = []
 
-    existing = {e.get("bvid", ""): i for i, e in enumerate(entries)}
-    entry = {
-        "bvid": bvid,
-        "aid": aid,
-        "translated_path": translated_path,
-        "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
-    if bvid in existing:
-        entries[existing[bvid]] = entry
-    else:
-        entries.append(entry)
+def save_deferred_subtitle(
+    bvid: str, aid: int, translated_path: str, kind: str
+) -> None:
+    """
+    源字幕当时拿不到（``SubtitleUnavailable``）时把视频挂进延迟队列。
 
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    与 :func:`save_pending_subtitle` 的区别在于**合并而非覆盖**：同 bvid 的条目
+    若已带着同一个 ``defer_kind`` 在队列里，保留 ``added_at`` 与各类计数 ——
+    否则每次重新处理视频都会把 ``added_at`` 刷新，重试预算永远用不完。
+    """
+    if not bvid or not translated_path:
+        return
+    path = _pending_subtitles_path()
+    with _PENDING_LOCK:
+        entries = _read_pending_entries(path)
+        existing = {e.get("bvid", ""): i for i, e in enumerate(entries)}
+        entry = {
+            "bvid": bvid,
+            "aid": aid,
+            "translated_path": translated_path,
+            "added_at": _now_stamp(),
+            "defer_kind": kind,
+            "defer_attempts": 0,
+        }
+        idx = existing.get(bvid)
+
+        if idx is None:
+            entries.append(entry)
+        elif entries[idx].get("defer_kind") == kind:
+            # 同因重入队：保留已消耗的重试预算和上次尝试时间
+            merged = dict(entries[idx])
+            merged.update(entry)
+            merged["added_at"] = entries[idx].get("added_at", entry["added_at"])
+            merged["defer_attempts"] = int(entries[idx].get("defer_attempts", 0) or 0)
+            if entries[idx].get("last_defer_at"):
+                merged["last_defer_at"] = entries[idx]["last_defer_at"]
+            entries[idx] = merged
+        else:
+            entries[idx] = entry
+        _write_pending_entries(path, entries)
 
 
 def _recover_orphaned_subtitles(
@@ -802,6 +891,10 @@ def _regenerate_missing_subtitle(entry: dict) -> str | None:
     reused and only re-translated; otherwise the subtitle is re-downloaded
     from YouTube first. Returns the translated file path on success, or
     ``None`` (the entry stays in the queue and is retried next cycle).
+
+    Raises:
+        SubtitleUnavailable: 源字幕拿不到（仍未生成 / 网络失败 / 语言不匹配）。
+            调用方需要 ``kind`` 来区分"再等等"与"别试了"，所以这里**故意不吞**。
     """
     translated_path = entry.get("translated_path", "")
     if not translated_path:
@@ -841,6 +934,28 @@ def _regenerate_missing_subtitle(entry: dict) -> str | None:
     return translated_path
 
 
+def _try_regenerate(entry: dict) -> tuple[str | None, "SubtitleUnavailable | None"]:
+    """
+    Run :func:`_regenerate_missing_subtitle` and classify the failure.
+
+    Returns ``(translated_path, source_error)`` — mutually exclusive: a source
+    problem (YouTube has no usable caption track) comes back as the second
+    element so the caller can apply the deferred-retry budget instead of the
+    generic three-strike counter. Other exceptions (e.g. a translation API
+    error) are logged and reported as a plain failure, which also keeps them
+    out of the outer ``except Exception`` that would retry them forever.
+    """
+    from yt2bili.subtitles.downloader import SubtitleUnavailable
+
+    try:
+        return _regenerate_missing_subtitle(entry), None
+    except SubtitleUnavailable as e:
+        return None, e
+    except Exception as e:  # 翻译/写盘等：按普通失败计数，别落到外层无限重试
+        print(f"[字幕] [WARN] 重新生成出错: {e}", flush=True)
+        return None, None
+
+
 def upload_pending_subtitles() -> int:
     """Try to upload pending subtitles. Returns count of successfully uploaded."""
     _migrate_legacy_pending_queue()
@@ -878,6 +993,7 @@ def upload_pending_subtitles() -> int:
     print(f"[字幕] 检查 {len(entries)} 条待上传字幕...")
     remaining: list[dict] = []
     uploaded = 0
+    defer_regen_used = 0   # 本轮已经为几条延迟条目重建过源字幕
 
     for entry in entries:
         bvid = entry.get("bvid", "")
@@ -886,6 +1002,17 @@ def upload_pending_subtitles() -> int:
 
         if not bvid or not translated_path:
             continue
+
+        # 延迟条目（源字幕当时没拿到）：节流 + 单轮上限。检查放在 CID 探测之前 ——
+        # 否则每次跳过前都要先付一次 B站 请求（甚至 30 秒 wait_for_cid）。
+        defer_kind = str(entry.get("defer_kind", "") or "")
+        if defer_kind:
+            if _defer_throttled(entry):
+                remaining.append(entry)
+                continue
+            if defer_regen_used >= _MAX_DEFER_REGEN_PER_RUN:
+                remaining.append(entry)
+                continue
 
         # Use CID from recovery scan if available; otherwise poll
         cid = entry.get("cid", 0)
@@ -936,12 +1063,44 @@ def upload_pending_subtitles() -> int:
                     f"[字幕] 翻译字幕文件缺失 ({bvid}): {translated_path}",
                     flush=True,
                 )
-                if _regenerate_missing_subtitle(entry):
+                if defer_kind:
+                    defer_regen_used += 1
+                    entry["defer_attempts"] = int(entry.get("defer_attempts", 0) or 0) + 1
+                    entry["last_defer_at"] = _now_stamp()
+                regenerated, source_error = _try_regenerate(entry)
+                if regenerated:
                     print(
                         f"[字幕] 重新生成完成: {Path(translated_path).name}",
                         flush=True,
                     )
                     entry.pop("regen_failures", None)  # 成功后清零
+                elif source_error is not None and defer_kind:
+                    # 源字幕那一侧的失败：按延迟预算计，不消耗 regen_failures ——
+                    # "还没生成"不是失败，只是还没轮到。
+                    if source_error.permanent:
+                        print(
+                            f"[字幕] [WARN] 源字幕永久不可用（{source_error.kind}），"
+                            f"放弃 ({bvid}): {source_error}",
+                            flush=True,
+                        )
+                        continue  # 永久放弃：不写回 remaining
+                    attempts = int(entry.get("defer_attempts", 0) or 0)
+                    if (attempts >= config.SUBTITLE_DEFER_MAX_ATTEMPTS
+                            or _entry_age_hours(entry) >= _DEFER_MAX_AGE_HOURS):
+                        print(
+                            f"[字幕] [WARN] 源字幕重试 {attempts} 次仍未拿到，"
+                            f"放弃 ({bvid}): {source_error}",
+                            flush=True,
+                        )
+                        continue  # 重试预算用完：不写回 remaining
+                    print(
+                        f"[字幕] [WARN] 源字幕仍不可用（{source_error.kind}，"
+                        f"第 {attempts}/{config.SUBTITLE_DEFER_MAX_ATTEMPTS} 次），"
+                        "保留在队列中下轮重试",
+                        flush=True,
+                    )
+                    remaining.append(entry)
+                    continue
                 else:
                     # 视频被设为私有 / YouTube 没有字幕轨道时，重新生成必然失败。
                     # 连续失败超过阈值后永久放弃，避免每轮监控都白试一次。
@@ -994,12 +1153,11 @@ def upload_pending_subtitles() -> int:
                 print(f"[字幕] [WARN] 延迟上传失败 ({bvid}): {e}")
                 remaining.append(entry)
 
-    if remaining:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(remaining, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
-    elif path.exists():
-        path.unlink()
+    with _PENDING_LOCK:
+        if remaining:
+            _write_pending_entries(path, remaining)
+        elif path.exists():
+            path.unlink()
 
     if uploaded:
         print(f"[字幕] 延迟上传完成: {uploaded} 条，剩余 {len(remaining)} 条待处理")

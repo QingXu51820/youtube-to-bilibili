@@ -154,6 +154,10 @@ python main.py --monitor --all-profiles
 
 字幕处理与视频上传**并行进行**，不会增加总耗时。翻译支持多线程（默认 3 线程，可通过 `SUBTITLE_TRANSLATE_WORKERS` 调整）。
 
+源字幕这次没拿到（视频刚发布还没生成、或代理瞬断）时不会就此丢掉：视频会挂进延迟队列，
+后续周期自动重新下载 + 翻译 + 上传。语言不匹配（例如频道只有 `zh-HK` 手动轨）与时间轴
+损坏属于永久失败，当场放弃并在运行报告里写明原因。
+
 相关配置：
 
 ```env
@@ -163,6 +167,8 @@ SUBTITLE_TARGET_LANG=zh-CN         # 目标翻译语言
 SUBTITLE_TRANSLATE_BATCH_SIZE=80   # 每次 API 调用翻译条数
 SUBTITLE_TRANSLATE_WORKERS=3       # 并行翻译线程数
 SUBTITLE_UPLOAD_TO_BILIBILI=true   # 翻译后自动上传到 B站
+SUBTITLE_DEFER_MAX_ATTEMPTS=6      # 源字幕拿不到时最多再试几次
+SUBTITLE_DEFER_RETRY_MINUTES=60    # 两次延迟重试的最小间隔（分钟）
 ```
 
 ## 内容筛选

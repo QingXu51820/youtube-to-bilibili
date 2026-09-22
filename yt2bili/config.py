@@ -195,6 +195,12 @@ SUBTITLE_TRANSLATE_WORKERS = _get_int("SUBTITLE_TRANSLATE_WORKERS", 3)  # parall
 # 字幕文件缺失时重新生成（重下源字幕+重译）连续失败多少次后永久放弃。
 # 视频被设为私有 / YouTube 上根本没有字幕轨道时重新生成必然失败，不放弃会每轮白试。
 SUBTITLE_REGEN_MAX_FAILURES = _get_int("SUBTITLE_REGEN_MAX_FAILURES", 3)
+# 源字幕当时拿不到（还没生成/网络失败）时，入延迟队列后最多再试几次。
+# 按**次数**而非墙钟放弃：WORK_HOURS_ONLY 下周五晚上的条目要到周一早上才有机会。
+SUBTITLE_DEFER_MAX_ATTEMPTS = _get_int("SUBTITLE_DEFER_MAX_ATTEMPTS", 6)
+# 两次延迟重试之间的最小间隔（分钟）。--subtitle-only 的轮询间隔可能只有 10 分钟，
+# 不节流会把 YouTube 打成风控。
+SUBTITLE_DEFER_RETRY_MINUTES = _get_int("SUBTITLE_DEFER_RETRY_MINUTES", 60)
 SUBTITLE_UPLOAD_TO_BILIBILI = _get("SUBTITLE_UPLOAD_TO_BILIBILI", "true").lower() == "true"
 # 下载 json3 逐词字幕并按句子边界重分段（改善 DeepSeek 翻译的上下文质量）；
 # json3 不可用或重分段失败时自动回退普通 srt。
@@ -383,6 +389,10 @@ def validate() -> list[str]:
         issues.append("SUBTITLE_TRANSLATE_BATCH_SIZE must be >= 1")
     if SUBTITLE_REGEN_MAX_FAILURES < 1:
         issues.append("SUBTITLE_REGEN_MAX_FAILURES must be >= 1")
+    if SUBTITLE_DEFER_MAX_ATTEMPTS < 1:
+        issues.append("SUBTITLE_DEFER_MAX_ATTEMPTS must be >= 1")
+    if SUBTITLE_DEFER_RETRY_MINUTES < 1:
+        issues.append("SUBTITLE_DEFER_RETRY_MINUTES must be >= 1")
     if SUBTITLE_WAIT_CID_INTERVAL < 1:
         issues.append("SUBTITLE_WAIT_CID_INTERVAL must be >= 1")
 
