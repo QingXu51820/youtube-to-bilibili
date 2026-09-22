@@ -686,12 +686,7 @@ def enrich_missing_channels(state_path: Path, resolve_channel) -> int:
         print(f"[合集] 反查频道: {video_id} → {v['channel_title']}")
 
     if enriched:
-        tmp = state_path.with_suffix(state_path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(state_path)
+        atomic_io.write_json(state_path, state)
     return enriched
 
 
@@ -1063,14 +1058,7 @@ async def reorder_collection_section(
 
 
 def _save_reorder_markers(queue_path: Path, markers: dict) -> None:
-    path = _reorder_markers_path(queue_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(markers, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    atomic_io.write_json(_reorder_markers_path(queue_path), markers)
 
 
 def _save_bvid_date_cache(queue_path: Path, dates: dict, yt_bvids: set) -> None:

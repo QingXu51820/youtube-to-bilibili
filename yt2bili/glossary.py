@@ -24,7 +24,7 @@ from typing import Any
 
 import requests
 
-from yt2bili import config
+from yt2bili import atomic_io, config
 
 _CARDS_URL = "https://snapjson.untapped.gg/v2/latest/zh/cards.json"
 _LOCATIONS_URL = "https://snapjson.untapped.gg/v2/latest/zh/locations.json"
@@ -184,10 +184,7 @@ def _save_cache(
         }
         if game_terms is not None:
             payload["game_terms"] = game_terms
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        tmp.replace(path)
+        atomic_io.write_json(path, payload)
     except OSError:
         pass  # non-critical — will retry next time
 

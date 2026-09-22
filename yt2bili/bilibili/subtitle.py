@@ -548,22 +548,19 @@ def _now_stamp() -> str:
 
 
 def _read_pending_entries(path: Path) -> list[dict]:
-    """Read the pending queue, tolerating missing/corrupt/BOM files."""
-    if not path.exists():
-        return []
-    try:
-        entries = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
-        return []
-    return entries if isinstance(entries, list) else []
+    """Read the pending queue, tolerating missing/corrupt/BOM files.
+
+    损坏时先把文件备份留档再当空队列处理：队列里是等着上传的字幕，静默丢弃
+    会让操作者事后完全看不到线索。
+    """
+    return atomic_io.read_json(
+        path, [], expect=list, backup_corrupt=True, label="[字幕]"
+    )
 
 
 def _write_pending_entries(path: Path, entries: list[dict]) -> None:
     """Persist the pending queue atomically (Windows-safe: file may be read by peers)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_io.atomic_write_text(
-        path, json.dumps(entries, ensure_ascii=False, indent=2) + "\n"
-    )
+    atomic_io.write_json(path, entries)
 
 
 def save_pending_subtitle(bvid: str, aid: int, translated_path: str) -> None:
@@ -839,26 +836,12 @@ def _migrate_legacy_pending_queue() -> None:
             if old and old.get("added_at", "") >= e.get("added_at", ""):
                 continue
             merged[bvid] = e
-        queue.parent.mkdir(parents=True, exist_ok=True)
-        tmp = queue.with_suffix(queue.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(list(merged.values()), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(queue)
+        atomic_io.write_json(queue, list(merged.values()))
 
     if unattributed:
-        tmp = legacy.with_suffix(legacy.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(unattributed, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(legacy)
+        atomic_io.write_json(legacy, unattributed)
     else:
-        try:
-            legacy.unlink()
-        except OSError:
-            pass
+        atomic_io.remove_best_effort(legacy)
 
     if per_profile:
         summary = "，".join(
@@ -1003,10 +986,8 @@ def upload_pending_subtitles() -> int:
     if recovered:
         entries.extend(recovered)
         # Persist merged list
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        tmp.replace(path)
+        with _PENDING_LOCK:
+            _write_pending_entries(path, entries)
 
     if not entries:
         return 0

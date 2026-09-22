@@ -8,7 +8,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from yt2bili import config
+from yt2bili import atomic_io, config
 
 
 def get_credential(profile_name: str = "default"):
@@ -227,9 +227,7 @@ def _save_credential_to_env(credential) -> None:
 
     # Atomic write: tmp + replace so an interrupted process can't truncate
     # .env (which would break credential parsing on next startup).
-    tmp = env_path.with_suffix(env_path.suffix + ".tmp")
-    tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-    tmp.replace(env_path)
+    atomic_io.atomic_write_text(env_path, "\n".join(new_lines) + "\n")
 
     # Reload config to pick up new values
     from dotenv import load_dotenv

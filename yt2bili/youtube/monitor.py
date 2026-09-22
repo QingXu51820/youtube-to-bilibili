@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-from yt2bili import config
+from yt2bili import atomic_io, config
 from yt2bili.youtube.subscriptions import (
     Subscription,
     VideoItem,
@@ -326,11 +326,8 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     state["generated_at"] = utc_now()
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    atomic_io.write_json(path, state)
 
 
 def seed_state_from_runs(state: dict[str, Any], runs_dir: Path) -> int:
@@ -433,11 +430,7 @@ def _load_upload_log() -> list[dict[str, Any]]:
 
 def _save_upload_log(log_entries: list[dict[str, Any]]) -> None:
     """Atomically write the persistent upload log."""
-    path = _upload_log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(log_entries, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    atomic_io.write_json(_upload_log_path(), log_entries)
 
 
 def append_upload_log_entry(video: VideoItem, result: Any) -> None:
@@ -534,11 +527,7 @@ def _load_rss_fallback_cache(cache_file: Path) -> set[str]:
 
 def _save_rss_fallback_cache(cache_file: Path, channel_ids: set[str]) -> None:
     """Save set of channel IDs needing API fallback."""
-    path = _rss_fallback_cache_path(cache_file)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(sorted(channel_ids), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    atomic_io.write_json(_rss_fallback_cache_path(cache_file), sorted(channel_ids))
 
 
 def _fetch_rss_with_fallback(

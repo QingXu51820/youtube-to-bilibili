@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from yt2bili import config
+from yt2bili import atomic_io, config
 from yt2bili.bilibili import subtitle as subtitle_mod
 from yt2bili.bilibili.collection import (
     load_pending_collections,
@@ -243,12 +243,7 @@ def _backup(path: Path, stamp: str) -> None:
 
 
 def _write_json(path: Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    tmp.replace(path)
+    atomic_io.write_json(path, payload)
 
 
 def _drop_cache_keys(path: Path, bvids: set[str]) -> int:
