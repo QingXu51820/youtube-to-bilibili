@@ -772,26 +772,16 @@ def _collect_published_dates(
             bvid_to_video_id.setdefault(
                 str(entry.get("bvid")), str(entry.get("video_id"))
             )
-    cache = _reorder_cache_path(queue_path)
-    if cache.exists():
-        try:
-            cached = json.loads(cache.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, OSError):
-            cached = {}
-        if isinstance(cached, dict):
-            for key, value in cached.items():
-                add(key, value)
-                if str(key).startswith("BV"):
-                    yt_bvids.add(str(key))
-    bili_cache = _bili_cache_path(queue_path)
-    if bili_cache.exists():
-        try:
-            cached = json.loads(bili_cache.read_text(encoding="utf-8-sig"))
-        except (json.JSONDecodeError, OSError):
-            cached = {}
-        if isinstance(cached, dict):
-            for key, value in cached.items():
-                add(key, value)
+    for key, value in atomic_io.read_json(
+        _reorder_cache_path(queue_path), {}, expect=dict
+    ).items():
+        add(key, value)
+        if str(key).startswith("BV"):
+            yt_bvids.add(str(key))
+    for key, value in atomic_io.read_json(
+        _bili_cache_path(queue_path), {}, expect=dict
+    ).items():
+        add(key, value)
     return dates, yt_bvids, bvid_to_video_id
 
 
@@ -1013,54 +1003,31 @@ def _save_reorder_markers(queue_path: Path, markers: dict) -> None:
     atomic_io.write_json(_reorder_markers_path(queue_path), markers)
 
 
+def _save_date_cache(path: Path, dates: dict, keys: set) -> None:
+    """Merge ``bvid → date`` entries into a cache file so later reorders skip refetches.
+
+    两个日期缓存（YouTube 发布时间 / B站 兜底发布时间）的写入逻辑本来是逐字重复的
+    两份，只有路径与过滤集合不同。
+    """
+    fresh = {
+        key: value for key, value in dates.items()
+        if str(key).startswith("BV") and str(key) in keys and value
+    }
+    if not fresh:
+        return
+    existing = atomic_io.read_json(path, {}, expect=dict)
+    existing.update(fresh)
+    atomic_io.write_json(path, existing)
+
+
 def _save_bvid_date_cache(queue_path: Path, dates: dict, yt_bvids: set) -> None:
     """Persist bvid → YouTube date entries so later reorders skip refetches."""
-    bvid_dates = {
-        key: value for key, value in dates.items()
-        if str(key).startswith("BV") and str(key) in yt_bvids and value
-    }
-    if not bvid_dates:
-        return
-    path = _reorder_cache_path(queue_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
-        existing = {}
-    if not isinstance(existing, dict):
-        existing = {}
-    existing.update(bvid_dates)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    _save_date_cache(_reorder_cache_path(queue_path), dates, yt_bvids)
 
 
 def _save_bili_date_cache(queue_path: Path, dates: dict, bili_only: set) -> None:
     """Persist bvid → B站 fallback dates so later reorders skip refetches."""
-    bili_dates = {
-        key: value for key, value in dates.items()
-        if str(key).startswith("BV") and str(key) in bili_only and value
-    }
-    if not bili_dates:
-        return
-    path = _bili_cache_path(queue_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (json.JSONDecodeError, OSError):
-        existing = {}
-    if not isinstance(existing, dict):
-        existing = {}
-    existing.update(bili_dates)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    _save_date_cache(_bili_cache_path(queue_path), dates, bili_only)
 
 
 async def _reorder_touched_collections(
@@ -1145,15 +1112,9 @@ def reorder_collections(
         dates, yt_bvids, bvid_to_video_id = _collect_published_dates(
             resolved_state, queue_path
         )
-        markers_path = _reorder_markers_path(queue_path)
-        markers: dict = {}
-        if markers_path.exists():
-            try:
-                markers = json.loads(
-                    markers_path.read_text(encoding="utf-8-sig")
-                ) or {}
-            except (json.JSONDecodeError, OSError):
-                markers = {}
+        markers: dict = atomic_io.read_json(
+            _reorder_markers_path(queue_path), {}, expect=dict
+        )
         collections = sync_list_collections(credential)
 
         async def run() -> tuple[int, int, set]:

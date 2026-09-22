@@ -1567,5 +1567,47 @@ class ReorderCollectionsFullPassTests(unittest.TestCase):
             self.assertEqual(saved["10"]["mtime"], 100)
 
 
+class DateCacheWriterTests(unittest.TestCase):
+    """两个日期缓存共用同一个合并写入器（曾经是逐字重复的两份）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.queue = Path(self._tmp.name) / "pending_collections.json"
+        self.cache = self.queue.parent / "bvid_dates.json"
+        self.bili_cache = self.queue.parent / "bili_dates.json"
+
+    def test_merges_and_keeps_existing_entries(self):
+        self.cache.write_text(
+            json.dumps({"BV1715983": "2026-01-01", "BV1OLD": "2025-01-01"}),
+            encoding="utf-8",
+        )
+        collection_mod._save_bvid_date_cache(
+            self.queue,
+            {"BV1715983": "2026-02-02", "BV1NEW": "2026-03-03", "not-a-bvid": "x"},
+            {"BV1715983", "BV1NEW"},
+        )
+        saved = json.loads(self.cache.read_text(encoding="utf-8"))
+        self.assertEqual(saved["BV1715983"], "2026-02-02")
+        self.assertEqual(saved["BV1OLD"], "2025-01-01")
+        self.assertEqual(saved["BV1NEW"], "2026-03-03")
+        self.assertNotIn("not-a-bvid", saved)
+
+    def test_keys_outside_the_filter_set_are_not_written(self):
+        collection_mod._save_bili_date_cache(
+            self.queue, {"BV1": "2026-01-01"}, {"BV2"}
+        )
+        self.assertFalse(self.bili_cache.exists())
+
+    def test_corrupt_cache_is_treated_as_empty(self):
+        self.cache.write_text("{not json", encoding="utf-8")
+        collection_mod._save_bvid_date_cache(
+            self.queue, {"BV1": "2026-01-01"}, {"BV1"}
+        )
+        self.assertEqual(
+            json.loads(self.cache.read_text(encoding="utf-8")), {"BV1": "2026-01-01"}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
