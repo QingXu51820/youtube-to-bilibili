@@ -26,13 +26,20 @@ _SRT_TIMESTAMP_RE = re.compile(
 )
 
 
+def _hms_to_seconds(hours: int, minutes: int, seconds: int, millis: int) -> float:
+    """``HH:MM:SS,mmm`` 的四个分量 → 秒。
+
+    SRT 与 VTT 两条解析路径都先把时间戳拆成分量，再算同一个式子；式子只有这一份。
+    """
+    return hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0
+
+
 def _srt_timestamp_to_seconds(ts: str) -> float:
     """Convert 'HH:MM:SS,mmm' or 'HH:MM:SS.mmm' to float seconds."""
     m = _SRT_TIMESTAMP_RE.match(ts.strip())
     if not m:
         raise ValueError(f"Invalid SRT timestamp: {ts!r}")
-    h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-    return h * 3600.0 + mi * 60.0 + s + ms / 1000.0
+    return _hms_to_seconds(*(int(group) for group in m.groups()))
 
 
 # ── SRT parser ───────────────────────────────────────────────────────
@@ -91,10 +98,8 @@ def _parse_srt_text(text: str) -> list[Cue]:
             ts_match = _SRT_CUE_HEADER_RE.match(lines[1])
             if not ts_match:
                 continue
-            h1, m1, s1, ms1 = (int(ts_match.group(i)) for i in range(1, 5))
-            h2, m2, s2, ms2 = (int(ts_match.group(i)) for i in range(5, 9))
-            start = h1 * 3600.0 + m1 * 60.0 + s1 + ms1 / 1000.0
-            end = h2 * 3600.0 + m2 * 60.0 + s2 + ms2 / 1000.0
+            start = _hms_to_seconds(*(int(ts_match.group(i)) for i in range(1, 5)))
+            end = _hms_to_seconds(*(int(ts_match.group(i)) for i in range(5, 9)))
             # Remaining lines are the text
             cue_text = "\n".join(lines[2:])
             cues.append(Cue(index=idx, start=start, end=end, text=cue_text))
@@ -175,17 +180,15 @@ def _parse_vtt_text(text: str) -> list[Cue]:
         if not ts_match:
             continue
 
-        h1 = int(ts_match.group(1)[:-1]) if ts_match.group(1) else 0  # strip trailing colon
-        m1 = int(ts_match.group(2))
-        s1 = int(ts_match.group(3))
-        ms1 = int(ts_match.group(4))
-        h2 = int(ts_match.group(5)[:-1]) if ts_match.group(5) else 0
-        m2 = int(ts_match.group(6))
-        s2 = int(ts_match.group(7))
-        ms2 = int(ts_match.group(8))
-
-        start = h1 * 3600.0 + m1 * 60.0 + s1 + ms1 / 1000.0
-        end = h2 * 3600.0 + m2 * 60.0 + s2 + ms2 / 1000.0
+        # VTT 的 hours 段可能缺席（"MM:SS.mmm"），带尾随冒号
+        start = _hms_to_seconds(
+            int(ts_match.group(1)[:-1]) if ts_match.group(1) else 0,
+            int(ts_match.group(2)), int(ts_match.group(3)), int(ts_match.group(4)),
+        )
+        end = _hms_to_seconds(
+            int(ts_match.group(5)[:-1]) if ts_match.group(5) else 0,
+            int(ts_match.group(6)), int(ts_match.group(7)), int(ts_match.group(8)),
+        )
 
         # Text is lines after the timing line (may include VTT tags, keep as-is)
         cue_text = "\n".join(block_lines[timing_idx + 1:])
