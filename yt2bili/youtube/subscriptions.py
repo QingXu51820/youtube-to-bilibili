@@ -30,6 +30,7 @@ from yt2bili.atomic_io import (
     atomic_write_text,
     read_text_with_retry,
     remove_best_effort,
+    write_json,
 )
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 YOUTUBE_VIDEO_URL = "https://www.youtube.com/watch?v={video_id}"
@@ -693,10 +694,13 @@ def fetch_recent_videos_api(
 
 def save_subscriptions_cache(path: Path, subscriptions: list[Subscription]) -> None:
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        # 秒精度，与其它状态文件一致（微秒精度会让同一份缓存里的时间戳格式不统一）
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        ),
         "subscriptions": [asdict(sub) for sub in subscriptions],
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_json(path, payload)
 
 
 def load_subscriptions_cache(path: Path) -> list[Subscription]:

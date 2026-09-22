@@ -194,6 +194,22 @@ class SaveSubscriptionsCacheTests(unittest.TestCase):
         self.assertEqual(data["subscriptions"][0]["channel_id"], "UC1")
         self.assertEqual(data["subscriptions"][0]["channel_title"], "Chan")
 
+    def test_timestamp_has_second_precision_like_every_other_state_file(self):
+        """回归：唯一一处微秒精度时间戳（缓存与其它状态文件格式不一致）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            subs.save_subscriptions_cache(path, [])
+            data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertRegex(data["generated_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_write_is_atomic(self):
+        """回归：这是唯一非原子写多进程共读文件的地方（两个 --profile 监控都读它）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cache.json"
+            subs.save_subscriptions_cache(path, [subs.Subscription("UC1", "Chan")])
+            leftovers = [p.name for p in Path(tmp).iterdir() if p.name != "cache.json"]
+        self.assertEqual(leftovers, [])
+
 
 class FetchRecentVideosRssTests(unittest.TestCase):
     """fetch_recent_videos_rss：RSS 抓取、404 死频道、网络错误重试。"""
