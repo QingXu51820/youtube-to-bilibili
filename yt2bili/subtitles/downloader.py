@@ -364,7 +364,7 @@ def _list_or_fail(video_url: str) -> tuple[dict, dict]:
     raise _unavailable("list_failed")
 
 
-def download_subtitles(video_url: str, video_id: str) -> str | None:
+def download_subtitles(video_url: str, video_id: str) -> str:
     """
     Download the best-matching subtitle for a YouTube video.
 

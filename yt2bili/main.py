@@ -286,10 +286,6 @@ def process_video(url: str, credential=None, channel_title=None) -> ProcessResul
                 )
                 return
             source_path = download_subtitles(url, video_id)
-            if not source_path:
-                raise SubtitleUnavailable(
-                    "list_failed", "YouTube 上未找到匹配的字幕语言"
-                )
             cues = parse_subtitle(source_path)
             if not cues:
                 # 文件在盘上但是空的 —— 延迟队列会用 yt-dlp 重下覆盖它，可重试

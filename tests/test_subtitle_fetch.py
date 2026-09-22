@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from yt2bili.subtitles import fetch
+from yt2bili.subtitles.downloader import SubtitleUnavailable
 from yt2bili.subtitles.parser import Cue, parse_srt
 
 
@@ -114,14 +115,16 @@ class FetchAndTranslateTests(unittest.TestCase):
                 self._run(tmp, {"id": "", "duration": 10.0}, [], [])
 
     def test_no_subtitles_raises(self):
+        """源字幕拿不到时原样抛出：消息由 downloader 给出，kind 保留给调用方。"""
         meta = {"id": "abc", "title": "T", "duration": 100.0}
-        src = Path(tempfile.mkdtemp()) / "abc.en.srt"
-        src.write_text("", encoding="utf-8")
+        err = SubtitleUnavailable("no_match", "没有匹配 SUBTITLE_SOURCE_LANGS 的语言")
         with patch.object(fetch, "_extract_metadata", return_value=meta), \
-             patch.object(fetch, "download_subtitles", return_value=None):
+             patch.object(fetch, "download_subtitles", side_effect=err):
             with self.assertRaises(RuntimeError) as ctx:
                 fetch.fetch_and_translate("https://youtu.be/abc")
-            self.assertIn("字幕", str(ctx.exception))
+        self.assertIsInstance(ctx.exception, SubtitleUnavailable)
+        self.assertEqual(ctx.exception.kind, "no_match")
+        self.assertTrue(str(ctx.exception))
 
     def test_zero_duration_skips_alignment(self):
         """拿不到时长时不能把字幕清空，原样写出。"""

@@ -63,9 +63,9 @@ def fetch_and_translate(video_url: str) -> dict:
     print(f"[字幕] 视频: {meta.get('title') or video_id} ({video_id})")
     print(f"[字幕] 时长: {duration:.0f}s")
 
+    # download_subtitles 拿不到源字幕时抛 SubtitleUnavailable（RuntimeError 子类），
+    # 消息里已写明原因，这里不再重复包装。
     source_path = download_subtitles(video_url, video_id)
-    if not source_path:
-        raise RuntimeError("YouTube 上未找到匹配的字幕语言")
 
     cues = parse_subtitle(source_path)
     if not cues:

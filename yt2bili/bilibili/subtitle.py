@@ -804,16 +804,17 @@ def _regenerate_missing_subtitle(entry: dict) -> str | None:
 
     If a source subtitle (e.g. ``{video_id}.en.srt``) is still on disk it is
     reused and only re-translated; otherwise the subtitle is re-downloaded
-    from YouTube first. Returns the translated file path on success, or
-    ``None`` (the entry stays in the queue and is retried next cycle).
+    from YouTube first.
+
+    Returns:
+        译文字幕文件路径；重下成功但解析为空、或翻译失败时返回 ``None``
+        （条目留在队列里，下轮再试）。
 
     Raises:
         SubtitleUnavailable: 源字幕拿不到（仍未生成 / 网络失败 / 语言不匹配）。
             调用方需要 ``kind`` 来区分"再等等"与"别试了"，所以这里**故意不吞**。
     """
     translated_path = entry.get("translated_path", "")
-    if not translated_path:
-        return None
     video_id = video_id_from_filename(translated_path)
 
     from yt2bili.subtitles.parser import parse_subtitle
@@ -828,10 +829,9 @@ def _regenerate_missing_subtitle(entry: dict) -> str | None:
         url = _lookup_upload_log_url(video_id) or f"https://www.youtube.com/watch?v={video_id}"
         print(f"[字幕] 源字幕缺失，重新下载: {video_id}")
         from yt2bili.subtitles.downloader import download_subtitles
+        # 拿不到源字幕时抛 SubtitleUnavailable —— 故意不吞，调用方要靠 kind
+        # 区分"再等等"（可重试）与"别试了"（永久）。
         source_path = download_subtitles(url, video_id)
-        if not source_path:
-            print(f"[字幕] [WARN] 重新下载字幕失败 ({video_id})")
-            return None
         cues = parse_subtitle(source_path)
         if not cues:
             print(f"[字幕] [WARN] 重新下载的字幕解析为空: {Path(source_path).name}")

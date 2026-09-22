@@ -797,9 +797,13 @@ class RegenerateMissingSubtitleTests(unittest.TestCase):
         self.assertEqual(result, self.translated)
         self.assertEqual(mock_dl.call_args.args[0], "https://www.youtube.com/watch?v=abc123")
 
-    def test_download_failure_returns_none(self):
-        with patch("yt2bili.subtitles.downloader.download_subtitles", return_value=None):
-            self.assertIsNone(bsub._regenerate_missing_subtitle(self.entry))
+    def test_source_unavailable_propagates(self):
+        """源字幕拿不到时**不吞**：调用方要靠 kind 区分"再等等"与"别试了"。"""
+        err = SubtitleUnavailable("no_tracks", "YouTube 上还没有该视频的字幕轨")
+        with patch("yt2bili.subtitles.downloader.download_subtitles", side_effect=err):
+            with self.assertRaises(SubtitleUnavailable) as ctx:
+                bsub._regenerate_missing_subtitle(self.entry)
+        self.assertEqual(ctx.exception.kind, "no_tracks")
 
     def test_translate_failure_returns_none(self):
         self.src.write_text("1\n00:00:01,000 --> 00:00:02,000\nhello\n", encoding="utf-8")
