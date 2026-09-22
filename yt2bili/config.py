@@ -353,8 +353,8 @@ def validate() -> list[str]:
         issues.append("COVER_HEIGHT must be a positive integer")
     if COVER_FIT not in ("crop", "contain"):
         issues.append("COVER_FIT must be crop or contain")
-    # Useless default values for SESSDATA / bili_jct check
-    bogus_defaults = ("your_sessdata_here", "your_bili_jct_here", "")
+    # 占位符默认值：空值由上面的 "Missing required config" 分支负责，放进来会重复报两条
+    bogus_defaults = ("your_sessdata_here", "your_bili_jct_here")
     if BILI_SESSDATA.lower() in bogus_defaults:
         issues.append("BILI_SESSDATA appears to be a placeholder value. Please set your real SESSDATA.")
     if BILI_BILI_JCT.lower() in bogus_defaults:

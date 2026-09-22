@@ -338,6 +338,11 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("SESSDATA", joined)
         self.assertIn("BILI_JCT", joined)
         self.assertIn("DEEPSEEK_API_KEY", joined)
+        # 缺凭据只报一条（空值不再落进"占位符"分支，否则每次报两条）
+        self.assertEqual(
+            [i for i in issues if "BILI_SESSDATA" in i],
+            ["Missing required config: BILI_SESSDATA. Please set it in .env file."],
+        )
 
     def test_validate_clean(self):
         with patch.object(config, "BILI_SESSDATA", "real"), \
