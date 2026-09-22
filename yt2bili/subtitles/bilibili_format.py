@@ -23,6 +23,11 @@ _MAX_CONTENT_CHARS = 80   # per-cue content length (Bilibili limit ≈100)
 _MAX_CUE_COUNT = 1000     # total cues (Bilibili limit, loosely enforced)
 _MIN_CUE_DURATION = 0.01  # seconds; Bilibili rejects 0-duration cues (79014)
 
+#: 字幕最多贴到视频结束前多少秒。ffprobe 的小数秒与 B站 的整数秒之差足以触发
+#: 79014「字幕时间点超过视频时间长度」，所以每个上传路径都要留同一段安全余量 ——
+#: 流水线（翻译队列 / --subtitle-url）与延迟上传 sweep 用的是同一个值。
+DURATION_MARGIN_S = 0.5
+
 
 def clamp_cues_to_duration(
     cues: list[Cue],

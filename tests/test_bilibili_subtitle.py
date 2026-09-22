@@ -17,6 +17,7 @@ from yt2bili import config
 from yt2bili import profile as profile_mod
 from yt2bili.bilibili import subtitle as bsub
 from yt2bili.profile import BiliCredentials, Profile, YouTubeChannel, YouTubeSettings
+from yt2bili.subtitles import bilibili_format as bf
 from yt2bili.subtitles.downloader import SubtitleUnavailable
 
 
@@ -164,6 +165,16 @@ class UploadPendingSubtitlesTests(unittest.TestCase):
         self._patch_pipeline()
         self.assertEqual(bsub.upload_pending_subtitles(), 1)
         self.assertFalse(self.pending.exists())  # 全部成功后队列文件被删除
+
+    def test_clamps_with_the_pipeline_margin(self):
+        """回归：sweep 曾用 0.3 而流水线用 0.5 —— 79014 正是这段余量要防的错。"""
+        self._write_pending([{"bvid": "BV1", "aid": 1, "translated_path": str(self.srt)}])
+        mocks = self._patch_pipeline()
+        self.assertEqual(bsub.upload_pending_subtitles(), 1)
+        self.assertEqual(
+            mocks["cues_to_bilibili_json"].call_args.kwargs["margin"],
+            bf.DURATION_MARGIN_S,
+        )
 
     def test_missing_file_regenerated_and_uploaded(self):
         """文件缺失时重新生成成功 → 正常上传并清空队列。"""

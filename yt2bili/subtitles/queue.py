@@ -14,7 +14,7 @@ from pathlib import Path
 from yt2bili import config
 from yt2bili.subtitles.translator import translate_cues
 from yt2bili.subtitles.writer import write_srt
-from yt2bili.subtitles.bilibili_format import clamp_cues_to_duration
+from yt2bili.subtitles.bilibili_format import DURATION_MARGIN_S, clamp_cues_to_duration
 
 
 class SubtitleTranslationJob:
@@ -123,7 +123,7 @@ def _run_job(job: SubtitleTranslationJob) -> None:
 
             if job.duration and job.duration > 0:
                 translated, dropped_n, clamped_n = clamp_cues_to_duration(
-                    translated, job.duration, margin=0.5
+                    translated, job.duration, margin=DURATION_MARGIN_S
                 )
                 if dropped_n:
                     print(f"[字幕] 已移除 {dropped_n} 条超出视频时长的字幕")

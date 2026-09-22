@@ -971,7 +971,10 @@ def upload_pending_subtitles() -> int:
             pass
 
     from yt2bili.subtitles.parser import parse_subtitle
-    from yt2bili.subtitles.bilibili_format import cues_to_bilibili_json
+    from yt2bili.subtitles.bilibili_format import (
+        DURATION_MARGIN_S,
+        cues_to_bilibili_json,
+    )
 
     # Recover orphaned subtitles (previously marked as permanent failures),
     # scoped to this account's channels in profile mode
@@ -1138,7 +1141,8 @@ def upload_pending_subtitles() -> int:
                 pass  # duration is best-effort; proceed without it if unavailable
 
             subtitle_json = cues_to_bilibili_json(
-                cues, video_duration=video_duration or None, margin=0.3,
+                cues, video_duration=video_duration or None,
+                margin=DURATION_MARGIN_S,
             )
             submit_subtitle(bvid=bvid, cid=cid, subtitle_json=subtitle_json, aid=aid)
             uploaded += 1

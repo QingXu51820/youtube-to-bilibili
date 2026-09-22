@@ -16,16 +16,12 @@ import re
 from pathlib import Path
 
 from yt2bili import config
-from yt2bili.subtitles.bilibili_format import clamp_cues_to_duration
+from yt2bili.subtitles.bilibili_format import DURATION_MARGIN_S, clamp_cues_to_duration
 from yt2bili.subtitles.downloader import download_subtitles
 from yt2bili.subtitles.parser import parse_subtitle
 from yt2bili.subtitles.translator import translate_cues
 from yt2bili.subtitles.writer import write_srt
 from yt2bili.youtube.downloader import _extract_metadata
-
-#: 译文字幕最多贴到视频结束前多少秒 —— 与后台队列 worker 保持一致，
-#: 避免 ffprobe 的小数秒和 B站 的整数秒之差触发 79014。
-DURATION_MARGIN_S = 0.5
 
 #: 没指定 --game 也没配 profile 时默认锁定的游戏。
 DEFAULT_GAME = "brawl_stars"
