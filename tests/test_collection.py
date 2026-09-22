@@ -1406,19 +1406,6 @@ class ReorderDateCollectionTests(unittest.TestCase):
         self.assertEqual(yt_bvids, {"BV1", "BV2"})
         self.assertEqual(bvid_to_video_id, {"BV1": "vid1", "BV2": "v2"})
 
-    def test_extract_youtube_url(self):
-        self.assertEqual(
-            collection_mod._extract_youtube_url(
-                "来源：https://www.youtube.com/watch?v=abc123XYZ99 点赞！"
-            ),
-            "abc123XYZ99",
-        )
-        self.assertEqual(
-            collection_mod._extract_youtube_url("youtu.be/abc123XYZ99"),
-            "abc123XYZ99",
-        )
-        self.assertEqual(collection_mod._extract_youtube_url("无链接"), "")
-
     def test_fill_youtube_api_pubdates_batches(self):
         class FakeVideosList:
             def __init__(self, result):

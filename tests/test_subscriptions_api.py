@@ -85,40 +85,6 @@ class ExecuteYouTubeRequestTests(unittest.TestCase):
         self.assertIn("OAuth token 已过期", str(ctx.exception))
 
 
-class ResolveChannelHandleApiTests(unittest.TestCase):
-    """resolve_channel_handle_api：@handle 与 channel URL 两种解析。"""
-
-    def _youtube(self, items):
-        request = Mock()
-        request.execute.return_value = {"items": items}
-        youtube = Mock()
-        youtube.channels.return_value.list.return_value = request
-        return youtube, request
-
-    def test_at_handle(self):
-        youtube, request = self._youtube(
-            [{"id": "UC1", "snippet": {"title": "Chan"}}])
-        result = subs.resolve_channel_handle_api(youtube, "@MarvelSnap")
-        self.assertEqual(result, ("UC1", "Chan"))
-        self.assertEqual(
-            youtube.channels.return_value.list.call_args.kwargs["forHandle"],
-            "MarvelSnap")
-
-    def test_channel_url(self):
-        youtube, request = self._youtube(
-            [{"id": "UC1", "snippet": {"title": "Chan"}}])
-        result = subs.resolve_channel_handle_api(
-            youtube, "https://youtube.com/channel/UC1/extra")
-        self.assertEqual(result, ("UC1", "Chan"))
-        self.assertEqual(
-            youtube.channels.return_value.list.call_args.kwargs["id"], "UC1")
-
-    def test_unresolvable_raises(self):
-        youtube, _ = self._youtube([])
-        with self.assertRaises(ValueError):
-            subs.resolve_channel_handle_api(youtube, "@Ghost")
-
-
 class FetchSubscriptionsApiTests(unittest.TestCase):
     """fetch_subscriptions_api：分页拉取订阅频道。"""
 

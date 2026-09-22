@@ -128,11 +128,6 @@ def save_profile(profile: Profile) -> None:
     save_profiles(profiles)
 
 
-def get_profile(name: str) -> Profile | None:
-    """Get a single profile by name, or None."""
-    return load_profiles().get(name)
-
-
 def profile_exists(name: str) -> bool:
     """Return True if a profile with this name exists in profiles.json."""
     return name in load_profiles()

@@ -797,18 +797,6 @@ async def fetch_collection_section(
         return await _fetch(own)
 
 
-def _extract_youtube_url(desc: str) -> str:
-    """Extract a YouTube video id from a B站 description, or "" when absent."""
-    match = re.search(
-        r"(?:https?://)?(?:www\.|m\.)?youtu\.?be(?:\.com)?/"
-        r"(?:watch\?v=|shorts/|embed/)?([A-Za-z0-9_-]{11})",
-        desc or "",
-    )
-    if not match:
-        return ""
-    return match.group(1)
-
-
 async def _fill_youtube_api_pubdates(
     dates: dict,
     yt_bvids: set,

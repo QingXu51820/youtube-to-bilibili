@@ -244,15 +244,15 @@ class ProfileRuntimeTests(unittest.TestCase):
 
     def test_save_profile_then_get_and_exists(self):
         profile_mod.save_profile(Profile(name="snap", bilibili=BiliCredentials(sessdata="s")))
-        self.assertEqual(profile_mod.get_profile("snap").bilibili.sessdata, "s")
+        self.assertEqual(profile_mod.resolve_profile("snap").bilibili.sessdata, "s")
         self.assertTrue(profile_mod.profile_exists("snap"))
         self.assertFalse(profile_mod.profile_exists("nope"))
-        self.assertIsNone(profile_mod.get_profile("nope"))
+        self.assertIsNone(profile_mod.resolve_profile("nope"))
 
     def test_save_profile_upserts_same_name(self):
         profile_mod.save_profile(Profile(name="snap", bilibili=BiliCredentials(sessdata="s1")))
         profile_mod.save_profile(Profile(name="snap", bilibili=BiliCredentials(sessdata="s2")))
-        self.assertEqual(profile_mod.get_profile("snap").bilibili.sessdata, "s2")
+        self.assertEqual(profile_mod.resolve_profile("snap").bilibili.sessdata, "s2")
 
     def test_save_profile_keeps_others(self):
         profile_mod.save_profile(Profile(name="a"))

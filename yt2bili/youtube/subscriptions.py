@@ -185,39 +185,6 @@ def resolve_channel_handle_ytdlp(handle_or_url: str) -> tuple[str, str]:
         return channel_id, channel_title
 
 
-def resolve_channel_handle_api(youtube, handle: str) -> tuple[str, str]:
-    """
-    Resolve a YouTube @handle to ``(channel_id, channel_title)``
-    using the YouTube Data API.
-
-    *youtube* must be an authenticated service from ``get_youtube_service()``.
-    """
-    handle = handle.strip().lstrip("@").rstrip("/")
-    if "youtube.com/@" in handle:
-        handle = handle.split("@")[-1].split("/")[0]
-    elif "youtube.com/channel/" in handle:
-        channel_id = handle.split("channel/")[-1].split("/")[0]
-        # Look up the title
-        request = youtube.channels().list(part="snippet", id=channel_id, maxResults=1)
-        response = execute_youtube_request(request)
-        items = response.get("items", [])
-        if items:
-            return items[0]["id"], items[0]["snippet"]["title"]
-        raise ValueError(f"Channel not found: {channel_id}")
-
-    request = youtube.channels().list(
-        part="snippet",
-        forHandle=handle,
-        maxResults=1,
-    )
-    response = execute_youtube_request(request)
-    items = response.get("items", [])
-    if not items:
-        raise ValueError(f"Cannot resolve YouTube handle: @{handle}")
-
-    return items[0]["id"], items[0]["snippet"]["title"]
-
-
 def require_file(path: Path, purpose: str) -> None:
     if not path.exists():
         raise SystemExit(

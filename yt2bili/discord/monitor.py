@@ -271,24 +271,6 @@ def _message_to_dict(message) -> dict[str, Any]:
 
 # ── Channel name resolution ───────────────────────────────────────────
 
-async def _resolve_channel_names(bot, channel_ids: list[int]) -> dict[int, str]:
-    """Build a channel_id → channel_name cache."""
-    import discord
-    names: dict[int, str] = {}
-    for cid in channel_ids:
-        channel = bot.get_channel(cid)
-        if channel is None:
-            try:
-                channel = await bot.fetch_channel(cid)
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                names[cid] = f"unknown-{cid}"
-                continue
-        names[cid] = getattr(channel, "name", f"unknown-{cid}")
-    return names
-
-
-# ── Public API ─────────────────────────────────────────────────────────
-
 async def run_discord_monitor() -> None:
     """Run the Discord message monitor indefinitely.
 
