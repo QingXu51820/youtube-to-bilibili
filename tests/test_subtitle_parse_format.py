@@ -219,15 +219,16 @@ class CuesToBilibiliJsonTests(unittest.TestCase):
         self.assertEqual(len(payload["body"]), 1)
         self.assertIn("已跳过 1 条", err.getvalue())
 
-    def test_content_truncated_at_80_chars(self):
+    def test_long_content_and_many_cues_pass_through(self):
+        """不再做字符数 / 条数限制：长句与超过 1000 条的字幕原样提交。"""
         cues = [Cue(1, 0.0, 1.0, "字" * 100)]
+        cues += [Cue(i, float(i), float(i) + 0.5, "短句") for i in range(2, 1102)]
         err = io.StringIO()
         with redirect_stderr(err):
-            payload = bf.cues_to_bilibili_json(cues, warn_overlength=True)
-        content = payload["body"][0]["content"]
-        self.assertEqual(len(content), 81)  # 80 + "…"
-        self.assertTrue(content.endswith("…"))
-        self.assertIn("字幕过长", err.getvalue())
+            payload = bf.cues_to_bilibili_json(cues)
+        self.assertEqual(len(payload["body"]), 1101)
+        self.assertEqual(payload["body"][0]["content"], "字" * 100)
+        self.assertEqual(err.getvalue(), "")
 
     def test_zero_duration_cue_extended_to_minimum(self):
         """回归：YouTube 自动字幕的 0 时长 cue 会被 B站 79014 拒绝，需延长。"""

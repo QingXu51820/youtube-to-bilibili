@@ -17,10 +17,10 @@ _DEFAULT_BACKGROUND_COLOR = "#9C27B0"
 _DEFAULT_STROKE = "none"
 _DEFAULT_LOCATION = 2  # bottom center
 
-# Bilibili subtitle limits (enforced server-side, validate client-side to
-# avoid wasted API calls and provide actionable warnings).
-_MAX_CONTENT_CHARS = 80   # per-cue content length (Bilibili limit ≈100)
-_MAX_CUE_COUNT = 1000     # total cues (Bilibili limit, loosely enforced)
+# NOTE: 这里故意不做字符数 / 条数上限。曾经按「B站大概 80 字符、1000 条」的猜测
+# 在客户端截断并告警，但那是错的：整条投稿被拒与字幕长度无关（疑似时间轴堆叠所致），
+# 而截断会把句子拦腰砍断、还可能切断时间轴，反而更糟。服务端真要拒绝，报错会带着
+# 返回码上来，比客户端瞎猜可靠。若日后确认存在硬上限，再加回来。
 _MIN_CUE_DURATION = 0.01  # seconds; Bilibili rejects 0-duration cues (79014)
 
 #: 字幕最多贴到视频结束前多少秒。ffprobe 的小数秒与 B站 的整数秒之差足以触发
@@ -76,7 +76,6 @@ def cues_to_bilibili_json(
     location: int = _DEFAULT_LOCATION,
     video_duration: float | None = None,
     margin: float = 0.0,
-    warn_overlength: bool = True,
 ) -> dict:
     """
     Convert SRT cues to Bilibili subtitle JSON format.
@@ -97,8 +96,7 @@ def cues_to_bilibili_json(
 
     When *video_duration* is provided (in seconds), cues whose ``start``
     time exceeds it are silently dropped, and cues that straddle the end
-    have their ``to`` clamped.  Content exceeding ``_MAX_CONTENT_CHARS``
-    is truncated with a trailing ``…``.
+    have their ``to`` clamped.
 
     Args:
         cues: Translated subtitle cues.
@@ -110,8 +108,6 @@ def cues_to_bilibili_json(
         location: Display position. ``2`` = bottom center.
         video_duration: Video duration in seconds.  When set, cues
             beyond this duration are trimmed / clamped.
-        warn_overlength: When True (default), print a warning to stderr
-            for the first 5 cues whose content is truncated.
 
     Returns:
         Dict matching the Bilibili subtitle upload schema.
@@ -120,7 +116,6 @@ def cues_to_bilibili_json(
     trimmed = 0
     clamped = 0
     fixed_zero = 0
-    truncated = 0
 
     # ── Timestamp validation ─────────────────────────────────────
     if video_duration is not None:
@@ -129,18 +124,6 @@ def cues_to_bilibili_json(
         )
 
     for cue in cues:
-        # ── Content length validation ─────────────────────────────
-        content = cue.text
-        if len(content) > _MAX_CONTENT_CHARS:
-            content = content[:_MAX_CONTENT_CHARS] + "…"
-            truncated += 1
-            if warn_overlength and truncated <= 5:
-                print(
-                    f"[字幕] [WARN] #{cue.index} 字幕过长 ({len(cue.text)} 字符)，"
-                    f"已截断至 {_MAX_CONTENT_CHARS} 字符",
-                    flush=True, file=sys.stderr,
-                )
-
         # ── Minimum duration validation ───────────────────────────
         # YouTube 自动字幕常有 start == end 的 0 时长 cue（音效标签等），
         # B站会以 79014 "字幕的持续时间必须大于0" 拒绝整个投稿。
@@ -160,7 +143,7 @@ def cues_to_bilibili_json(
             "from": start,
             "to": end,
             "location": location,
-            "content": content,
+            "content": cue.text,
         })
 
     # ── Summary warnings ──────────────────────────────────────────
@@ -178,18 +161,6 @@ def cues_to_bilibili_json(
         print(
             f"[字幕] [WARN] 共 {fixed_zero} 条 0 时长字幕已延长至"
             f" {_MIN_CUE_DURATION * 1000:.0f}ms",
-            flush=True, file=sys.stderr,
-        )
-    if truncated > 5:
-        print(
-            f"[字幕] [WARN] 共 {truncated} 条字幕过长已截断"
-            f"（上限 {_MAX_CONTENT_CHARS} 字符）",
-            flush=True, file=sys.stderr,
-        )
-    if len(body) > _MAX_CUE_COUNT:
-        print(
-            f"[字幕] [WARN] 字幕共 {len(body)} 条，超过 B站 {_MAX_CUE_COUNT} 条限制，"
-            f"可能被拒绝",
             flush=True, file=sys.stderr,
         )
 
