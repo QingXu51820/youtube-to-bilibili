@@ -13,6 +13,14 @@ from yt2bili import config
 from yt2bili.profile import Profile, ProfileSettings
 
 
+class SubtitleConfigTests(unittest.TestCase):
+    def test_bilibili_subtitle_max_chars_defaults_to_80(self):
+        self.assertEqual(
+            getattr(config, "SUBTITLE_BILIBILI_MAX_CHARS", 140),
+            80,
+        )
+
+
 class FindToolTests(unittest.TestCase):
     """find_tool：shutil.which 优先，Windows 注册表 PATH 兜底。"""
 

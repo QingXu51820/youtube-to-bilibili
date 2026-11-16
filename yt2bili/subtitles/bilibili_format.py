@@ -7,7 +7,10 @@ metadata plus a ``body`` array of timed text segments.
 
 import sys
 
+from yt2bili import config
+
 from .parser import Cue
+from .splitter import split_cues
 
 # Sensible defaults matching typical Bilibili CC subtitle appearance
 _DEFAULT_FONT_SIZE = 0.4
@@ -116,6 +119,10 @@ def cues_to_bilibili_json(
     trimmed = 0
     clamped = 0
     fixed_zero = 0
+
+    # Final platform-specific guard. Keep this here so every upload caller gets
+    # the same safe payload even when it passes an older, unsplit SRT.
+    cues = split_cues(list(cues), config.SUBTITLE_BILIBILI_MAX_CHARS)
 
     # ── Timestamp validation ─────────────────────────────────────
     if video_duration is not None:

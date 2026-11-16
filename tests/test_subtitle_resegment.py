@@ -138,6 +138,31 @@ class ResegmentJson3Tests(unittest.TestCase):
         for c in cues:
             self.assertLessEqual(len(c.text), resegment.MAX_CHARS)
 
+    def test_rendered_length_counts_spaces_between_words(self):
+        """回归：分词长度和是 136，但实际渲染长度是 173，必须拆条。"""
+        text = (
+            "They're like related to him. like one of her friends she went to "
+            "dinner with the other night knows got a young in real life and I "
+            "was like oh my god that seems cool I have a"
+        )
+        segs = [_seg(word, i * 100) for i, word in enumerate(text.split())]
+        cues = resegment_json3(_json3(_event(0, 7659, segs)))
+        self.assertGreater(len(cues), 1)
+        self.assertEqual(" ".join(_texts(cues)), text)
+        for cue in cues:
+            self.assertLessEqual(len(cue.text), resegment.MAX_CHARS)
+
+    def test_manual_single_token_over_max_chars_splits(self):
+        """无逐词时间戳的长窗口也必须执行硬上限。"""
+        text = " ".join(f"word{i}" for i in range(1, 40))
+        cues = resegment_json3(_json3(_event(0, 10000, [_seg(text)])))
+        self.assertGreater(len(cues), 1)
+        self.assertEqual(" ".join(_texts(cues)), text)
+        self.assertAlmostEqual(cues[0].start, 0.0)
+        self.assertAlmostEqual(cues[-1].end, 10.08)
+        for cue in cues:
+            self.assertLessEqual(len(cue.text), resegment.MAX_CHARS)
+
     def test_events_without_segs_skipped(self):
         j = _json3(
             _event(0, 2000, []),

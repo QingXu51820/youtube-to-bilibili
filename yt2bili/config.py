@@ -191,6 +191,7 @@ SUBTITLE_REQUIRED = _get("SUBTITLE_REQUIRED", "false").lower() == "true"
 SUBTITLE_SOURCE_LANGS = _get("SUBTITLE_SOURCE_LANGS", "en.*,ja,ko")
 SUBTITLE_TARGET_LANG = _get("SUBTITLE_TARGET_LANG", "zh-CN")
 SUBTITLE_TRANSLATE_BATCH_SIZE = _get_int("SUBTITLE_TRANSLATE_BATCH_SIZE", 30)
+SUBTITLE_BILIBILI_MAX_CHARS = _get_int("SUBTITLE_BILIBILI_MAX_CHARS", 80)
 SUBTITLE_TRANSLATE_WORKERS = _get_int("SUBTITLE_TRANSLATE_WORKERS", 3)  # parallel API threads
 # 字幕文件缺失时重新生成（重下源字幕+重译）连续失败多少次后永久放弃。
 # 视频被设为私有 / YouTube 上根本没有字幕轨道时重新生成必然失败，不放弃会每轮白试。
@@ -383,6 +384,8 @@ def validate() -> list[str]:
 
     if SUBTITLE_TRANSLATE_BATCH_SIZE < 1:
         issues.append("SUBTITLE_TRANSLATE_BATCH_SIZE must be >= 1")
+    if SUBTITLE_BILIBILI_MAX_CHARS < 1:
+        issues.append("SUBTITLE_BILIBILI_MAX_CHARS must be >= 1")
     if SUBTITLE_REGEN_MAX_FAILURES < 1:
         issues.append("SUBTITLE_REGEN_MAX_FAILURES must be >= 1")
     if SUBTITLE_DEFER_MAX_ATTEMPTS < 1:

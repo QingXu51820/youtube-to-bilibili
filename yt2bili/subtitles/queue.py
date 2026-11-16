@@ -15,6 +15,7 @@ from yt2bili import config
 from yt2bili.subtitles.translator import translate_cues
 from yt2bili.subtitles.writer import write_srt
 from yt2bili.subtitles.bilibili_format import DURATION_MARGIN_S, clamp_cues_to_duration
+from yt2bili.subtitles.splitter import split_cues
 from yt2bili.subtitles.paths import translated_srt_path
 
 
@@ -126,6 +127,9 @@ def _run_job(job: SubtitleTranslationJob) -> None:
                 if clamped_n:
                     print(f"[字幕] 已修正 {clamped_n} 条字幕的结束时间（不超过视频时长）")
 
+            translated = split_cues(
+                translated, config.SUBTITLE_BILIBILI_MAX_CHARS
+            )
             subtitle_dir = Path(config.SUBTITLE_DIR)
             subtitle_dir.mkdir(parents=True, exist_ok=True)
             translated_path = str(translated_srt_path(job.video_id))

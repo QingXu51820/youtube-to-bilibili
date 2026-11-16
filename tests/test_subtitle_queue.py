@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from yt2bili import config
 from yt2bili.subtitles import queue as squeue
+from yt2bili.subtitles.parser import Cue
 
 
 def _make_job(*, reuse_path=None, video_id="vid123"):
@@ -21,6 +22,25 @@ def _make_job(*, reuse_path=None, video_id="vid123"):
 
 
 class ReuseTranslationTests(unittest.TestCase):
+    def test_new_translation_splits_before_writing_srt(self):
+        text = "甲" * 113
+        translated = [Cue(1, 0.0, 8.0, text)]
+        job = _make_job()
+        job.set_upload("", 0)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(config, "SUBTITLE_DIR", tmp), \
+             patch.object(config, "SUBTITLE_BILIBILI_MAX_CHARS", 80), \
+             patch("yt2bili.subtitles.queue.translate_cues",
+                   return_value=translated), \
+             patch("yt2bili.subtitles.queue.write_srt") as mock_write:
+            squeue._run_job(job)
+
+        written = mock_write.call_args.args[0]
+        self.assertGreater(len(written), 1)
+        self.assertEqual("".join(cue.text for cue in written), text)
+        self.assertTrue(all(len(cue.text) <= 80 for cue in written))
+
     def test_reuse_skips_translation_and_enqueues_upload(self):
         """复用路径：不调用 DeepSeek，不重写文件，只入延迟上传队列。"""
         with tempfile.TemporaryDirectory() as tmp:

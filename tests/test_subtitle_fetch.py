@@ -138,6 +138,21 @@ class FetchAndTranslateTests(unittest.TestCase):
             self.assertEqual(result["dropped"], 0)
             self.assertEqual(result["clamped"], 0)
 
+    def test_overlong_translation_is_split_in_saved_srt(self):
+        meta = {"id": "abc", "title": "T", "duration": 100.0}
+        src = [_cue(1, 0.0, 5.0, "en")]
+        text = "甲" * 113
+        translated = [_cue(1, 0.0, 5.0, text)]
+        with patch.object(
+            config, "SUBTITLE_BILIBILI_MAX_CHARS", 80, create=True
+        ):
+            with tempfile.TemporaryDirectory() as tmp:
+                result = self._run(tmp, meta, src, translated)
+                cues = parse_srt(result["translated_path"])
+        self.assertGreater(len(cues), 1)
+        self.assertEqual("".join(cue.text for cue in cues), text)
+        self.assertTrue(all(len(cue.text) <= 80 for cue in cues))
+
 
 if __name__ == "__main__":
     unittest.main()

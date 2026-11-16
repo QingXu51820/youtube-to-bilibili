@@ -3,6 +3,9 @@ Write translated subtitle cues to a standard SRT file.
 """
 
 from pathlib import Path
+
+from yt2bili.atomic_io import atomic_write_text
+
 from .parser import Cue
 
 
@@ -19,9 +22,23 @@ def _seconds_to_srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def render_srt(cues: list[Cue]) -> str:
+    """Render cues as standard SRT text."""
+    lines: list[str] = []
+    for i, cue in enumerate(cues, start=1):
+        lines.append(str(i))
+        lines.append(
+            f"{_seconds_to_srt_timestamp(cue.start)} --> "
+            f"{_seconds_to_srt_timestamp(cue.end)}"
+        )
+        lines.append(cue.text)
+        lines.append("")  # blank separator line
+    return "\n".join(lines)
+
+
 def write_srt(cues: list[Cue], output_path: str | Path) -> str:
     """
-    Write a list of Cue objects to an SRT file.
+    Write a list of Cue objects to a standard SRT file.
 
     Output format::
 
@@ -46,16 +63,12 @@ def write_srt(cues: list[Cue], output_path: str | Path) -> str:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    lines: list[str] = []
-    for i, cue in enumerate(cues, start=1):
-        lines.append(str(i))
-        lines.append(
-            f"{_seconds_to_srt_timestamp(cue.start)} --> "
-            f"{_seconds_to_srt_timestamp(cue.end)}"
-        )
-        lines.append(cue.text)
-        lines.append("")  # blank separator line
+    path.write_text(render_srt(cues), encoding="utf-8")
+    return str(path.resolve())
 
-    content = "\n".join(lines)
-    path.write_text(content, encoding="utf-8")
+
+def write_srt_atomic(cues: list[Cue], output_path: str | Path) -> str:
+    """Atomically replace an existing SRT file."""
+    path = Path(output_path)
+    atomic_write_text(path, render_srt(cues))
     return str(path.resolve())

@@ -26,6 +26,7 @@ import statistics
 from pathlib import Path
 
 from .parser import Cue
+from .splitter import split_cues
 from .writer import write_srt
 
 # ── Tunables ──────────────────────────────────────────────────────────
@@ -163,24 +164,22 @@ def _split_sentence(words: list[tuple[float, float, str]], max_chars: int):
 
     Returns ``(piece, rest)`` — two lists of words.
     """
-    if sum(len(w[2].strip()) for w in words) <= max_chars:
+    def rendered_length(items) -> int:
+        return len(_join_text([item[2] for item in items]))
+
+    if rendered_length(words) <= max_chars:
         return words, []
-    budget = 0
     cut = -1
     for i, (_, _, text) in enumerate(words):
-        t = text.strip()
-        budget += len(t)
-        if budget > max_chars:
+        if rendered_length(words[: i + 1]) > max_chars:
             break
-        if t.rstrip().endswith(","):
+        if text.strip().rstrip().endswith(","):
             cut = i
     if cut > 0:
         return words[: cut + 1], words[cut + 1 :]
-    budget = 0
     cut = 0
-    for i, (_, _, text) in enumerate(words):
-        budget += len(text.strip())
-        if budget > max_chars:
+    for i in range(len(words)):
+        if rendered_length(words[: i + 1]) > max_chars:
             cut = i
             break
     if cut <= 0:
@@ -287,7 +286,7 @@ def resegment_json3(
         # at its raw end must not end up with end < start.
         end = max(end, start + 0.05)
         cues.append(Cue(index=i + 1, start=start, end=end, text=text))
-    return cues
+    return split_cues(cues, max_chars)
 
 
 def timing_defect(cues: list[Cue]) -> str | None:

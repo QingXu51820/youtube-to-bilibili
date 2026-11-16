@@ -219,16 +219,57 @@ class CuesToBilibiliJsonTests(unittest.TestCase):
         self.assertEqual(len(payload["body"]), 1)
         self.assertIn("已跳过 1 条", err.getvalue())
 
-    def test_long_content_and_many_cues_pass_through(self):
-        """不再做字符数 / 条数限制：长句与超过 1000 条的字幕原样提交。"""
-        cues = [Cue(1, 0.0, 1.0, "字" * 100)]
+    def test_many_short_cues_are_not_limited(self):
+        """不限制总条数；超过 1000 条短字幕仍原样提交。"""
+        cues = [Cue(1, 0.0, 1.0, "短句")]
         cues += [Cue(i, float(i), float(i) + 0.5, "短句") for i in range(2, 1102)]
         err = io.StringIO()
         with redirect_stderr(err):
             payload = bf.cues_to_bilibili_json(cues)
         self.assertEqual(len(payload["body"]), 1101)
-        self.assertEqual(payload["body"][0]["content"], "字" * 100)
         self.assertEqual(err.getvalue(), "")
+
+    def test_overlong_content_splits_without_data_loss(self):
+        """回归：113 字符中文超过默认 80 字符上限，必须拆开。"""
+        text = (
+            "他们好像和他有亲戚关系。就像她的一个朋友，她前几天晚上一起吃饭的那个，"
+            "认识现实生活中的一个Young，我当时就想，哦天哪，那看起来挺酷的，"
+            "我基本上和一位Marvel Snap艺术家有联系，对吧，我想我是不是在变体期间打开的，呃"
+        )
+        cues = [Cue(1, 10.0, 17.659, text)]
+        payload = bf.cues_to_bilibili_json(cues)
+        body = payload["body"]
+        self.assertGreater(len(body), 1)
+        self.assertEqual("".join(item["content"] for item in body), text)
+        self.assertTrue(all(len(item["content"]) <= 80 for item in body))
+        self.assertAlmostEqual(body[0]["from"], 10.0)
+        self.assertAlmostEqual(body[-1]["to"], 17.659)
+        for previous, current in zip(body, body[1:]):
+            self.assertAlmostEqual(previous["to"], current["from"])
+
+    def test_bilibili_limit_is_configurable(self):
+        cues = [Cue(1, 1.0, 3.0, "甲" * 50)]
+        with patch.object(
+            sys.modules["yt2bili.subtitles.bilibili_format"],
+            "config",
+            create=True,
+        ) as mocked_config:
+            mocked_config.SUBTITLE_BILIBILI_MAX_CHARS = 20
+            payload = bf.cues_to_bilibili_json(cues)
+        self.assertGreater(len(payload["body"]), 1)
+        self.assertTrue(
+            all(len(item["content"]) <= 20 for item in payload["body"])
+        )
+
+    def test_split_cues_never_overlap_when_original_interval_is_tiny(self):
+        cues = [Cue(1, 1.0, 1.001, "甲" * 113)]
+        payload = bf.cues_to_bilibili_json(cues)
+        body = payload["body"]
+        self.assertGreater(len(body), 1)
+        for item in body:
+            self.assertGreater(item["to"], item["from"])
+        for previous, current in zip(body, body[1:]):
+            self.assertGreaterEqual(current["from"], previous["to"])
 
     def test_zero_duration_cue_extended_to_minimum(self):
         """回归：YouTube 自动字幕的 0 时长 cue 会被 B站 79014 拒绝，需延长。"""
