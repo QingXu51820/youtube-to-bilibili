@@ -19,6 +19,7 @@ from yt2bili.bilibili import subtitle as bsub
 from yt2bili.profile import BiliCredentials, Profile, YouTubeChannel, YouTubeSettings
 from yt2bili.subtitles import bilibili_format as bf
 from yt2bili.subtitles.downloader import SubtitleUnavailable
+from yt2bili.subtitles.parser import Cue, parse_srt
 
 
 def _ok_response(pages=None):
@@ -136,7 +137,7 @@ class UploadPendingSubtitlesTests(unittest.TestCase):
             patch.object(bsub, "_regenerate_missing_subtitle", return_value=None),
             patch.object(bsub, "_recover_orphaned_subtitles", return_value=[]),
             patch("yt2bili.subtitles.parser.parse_subtitle",
-                  return_value=[{"index": 1, "start": 1.0, "end": 2.0, "text": "hi"}]),
+                  return_value=[Cue(1, 1.0, 2.0, "hi")]),
             patch("yt2bili.subtitles.bilibili_format.cues_to_bilibili_json",
                   return_value={"body": []}),
             patch.object(bsub, "submit_subtitle", return_value={"code": 0}),
@@ -191,6 +192,27 @@ class UploadPendingSubtitlesTests(unittest.TestCase):
         mocks["_regenerate_missing_subtitle"].side_effect = _regenerate
         self.assertEqual(bsub.upload_pending_subtitles(), 1)
         self.assertFalse(self.pending.exists())
+
+    def test_overlong_existing_srt_is_rewritten_before_upload(self):
+        text = "甲" * 113
+        self.srt.write_text(
+            f"1\n00:00:01,000 --> 00:00:09,000\n{text}\n",
+            encoding="utf-8",
+        )
+        self._write_pending([
+            {"bvid": "BV1", "aid": 1, "translated_path": str(self.srt)}
+        ])
+        mocks = self._patch_pipeline()
+        mocks["parse_subtitle"].return_value = [Cue(1, 1.0, 9.0, text)]
+
+        with patch.object(bsub.config, "SUBTITLE_BILIBILI_MAX_CHARS", 80):
+            self.assertEqual(bsub.upload_pending_subtitles(), 1)
+
+        cues = parse_srt(self.srt)
+        self.assertGreater(len(cues), 1)
+        self.assertEqual("".join(cue.text for cue in cues), text)
+        self.assertTrue(all(len(cue.text) <= 80 for cue in cues))
+        self.assertFalse(list(self.srt.parent.glob(f"{self.srt.name}.*.tmp")))
 
     def test_missing_file_regeneration_failure_keeps_entry(self):
         """文件缺失且重新生成失败 → 条目保留在队列中，下轮重试。"""
@@ -723,6 +745,136 @@ class RequeueMissingSubtitlesTests(unittest.TestCase):
         self.assertFalse(self.queue.exists())
 
 
+class RepairMissingSubtitlesTests(unittest.TestCase):
+    """repair_missing_subtitles：报告先行，再自动补传并复查。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.state = self.root / "state" / "snap"
+        self.state.mkdir(parents=True)
+        self.queue = self.state / "pending_subtitles.json"
+        self.subs = self.root / "downloads" / "subtitles"
+        self.subs.mkdir(parents=True)
+        self.upload_log = [
+            {"video_id": "vidA", "channel_title": "ChanA", "bvid": "BV-A", "aid": 1},
+            {"video_id": "vidA", "channel_title": "ChanA", "bvid": "BV-A", "aid": 1},
+            {"video_id": "vidB", "channel_title": "ChanA", "bvid": "BV-B", "aid": 2},
+            {"video_id": "vidC", "channel_title": "ChanA", "bvid": "BV-C", "aid": 3},
+            {"video_id": "vidD", "channel_title": "Other", "bvid": "BV-D", "aid": 4},
+        ]
+        (self.root / "state" / "upload_log.json").write_text(
+            json.dumps(self.upload_log), encoding="utf-8"
+        )
+        (self.subs / "vidA.zh-CN.srt").write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\n甲\n", encoding="utf-8"
+        )
+
+    def test_report_then_requeue_upload_and_recheck(self):
+        first = [
+            (self.upload_log[0], "missing", {}),
+            (self.upload_log[2], "missing", {}),
+            (self.upload_log[3], "has_zh", {}),
+        ]
+        second = [
+            (self.upload_log[0], "has_zh", {}),
+            (self.upload_log[2], "has_zh", {}),
+        ]
+
+        def upload():
+            report = self.state / "subtitle_repair_latest.json"
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(data["counts"]["ready_local"], 1)
+            self.assertEqual(data["counts"]["needs_regeneration"], 1)
+            self.assertEqual(data["counts"]["has_zh"], 1)
+            for item in data["items"]:
+                expected = "has_zh" if item["status"] == "has_zh" else "pending"
+                self.assertEqual(item["after"], expected)
+            return 2
+
+        with patch.object(bsub, "pending_subtitles_path", return_value=self.queue), \
+             patch.object(bsub, "_iter_subtitle_status",
+                          side_effect=[first, second]), \
+             patch.object(bsub, "_active_profile_channel_titles",
+                          return_value={"ChanA"}), \
+             patch.object(bsub, "save_pending_subtitle") as mock_save, \
+             patch.object(bsub, "upload_pending_subtitles",
+                          side_effect=upload) as mock_upload, \
+             patch.object(bsub.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(config, "SUBTITLE_DIR", str(self.subs)), \
+             patch.object(config, "SUBTITLE_TARGET_LANG", "zh-CN"):
+            report = bsub.repair_missing_subtitles()
+
+        self.assertEqual(
+            sorted(call.kwargs["bvid"] for call in mock_save.call_args_list),
+            ["BV-A", "BV-B"],
+        )
+        mock_upload.assert_called_once()
+        self.assertEqual(report["profile"], "snap")
+        self.assertEqual(report["uploaded"], 2)
+        self.assertEqual(
+            {item["bvid"]: item["after"] for item in report["items"]},
+            {"BV-A": "has_zh", "BV-B": "has_zh", "BV-C": "has_zh"},
+        )
+        self.assertEqual(report["after_counts"]["has_zh"], 3)
+        self.assertEqual(report["after_counts"]["ready_local"], 0)
+        self.assertEqual(report["after_counts"]["needs_regeneration"], 0)
+        self.assertTrue((self.state / "subtitle_repair_latest.json").exists())
+        timestamped = list(self.state.glob("subtitle_repair_*.json"))
+        self.assertEqual(len(timestamped), 2)  # timestamped + latest
+
+    def test_failed_recheck_stays_in_known_repair_category(self):
+        item = self.upload_log[0]
+        (self.subs / "vidA.zh-CN.srt").unlink()
+        with patch.object(bsub, "pending_subtitles_path", return_value=self.queue), \
+             patch.object(bsub, "_iter_subtitle_status",
+                          side_effect=[[(item, "missing", {})],
+                                       [(item, "missing", {})]]), \
+             patch.object(bsub, "_active_profile_channel_titles",
+                          return_value={"ChanA"}), \
+             patch.object(bsub, "save_pending_subtitle"), \
+             patch.object(bsub, "upload_pending_subtitles", return_value=0), \
+             patch.object(bsub.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(config, "SUBTITLE_DIR", str(self.subs)), \
+             patch.object(config, "SUBTITLE_TARGET_LANG", "zh-CN"):
+            report = bsub.repair_missing_subtitles()
+
+        self.assertEqual(report["items"][0]["after"], "needs_regeneration")
+        self.assertEqual(report["after_counts"]["needs_regeneration"], 1)
+
+    def test_existing_pending_failure_budget_is_not_reset(self):
+        item = self.upload_log[0]
+        (self.subs / "vidA.zh-CN.srt").unlink()
+        self.queue.write_text(json.dumps([{
+            "bvid": "BV-A",
+            "aid": 1,
+            "translated_path": str(self.subs / "vidA.zh-CN.srt"),
+            "added_at": "2026-11-16T00:00:00Z",
+            "regen_failures": 2,
+        }]), encoding="utf-8")
+
+        with patch.object(bsub, "pending_subtitles_path", return_value=self.queue), \
+             patch.object(bsub, "_iter_subtitle_status",
+                          side_effect=[[(item, "missing", {})],
+                                       [(item, "missing", {})]]), \
+             patch.object(bsub, "_active_profile_channel_titles",
+                          return_value={"ChanA"}), \
+             patch.object(bsub, "save_pending_subtitle") as mock_save, \
+             patch.object(bsub, "upload_pending_subtitles", return_value=0), \
+             patch.object(bsub.profile_mod, "get_active_profile_name",
+                          return_value="snap"), \
+             patch.object(config, "SUBTITLE_DIR", str(self.subs)), \
+             patch.object(config, "SUBTITLE_TARGET_LANG", "zh-CN"):
+            bsub.repair_missing_subtitles()
+
+        mock_save.assert_not_called()
+        existing = json.loads(self.queue.read_text(encoding="utf-8"))
+        self.assertEqual(existing[0]["regen_failures"], 2)
+
+
 class RegenerateMissingSubtitleTests(unittest.TestCase):
     """_regenerate_missing_subtitle：文件缺失时复用源字幕重新翻译，或重新下载。"""
 
@@ -738,9 +890,9 @@ class RegenerateMissingSubtitleTests(unittest.TestCase):
     def _patch_pipeline(self, *, parse_cues=None, translate_cues=None):
         patchers = [
             patch("yt2bili.subtitles.parser.parse_subtitle",
-                  return_value=parse_cues if parse_cues is not None else [{"index": 1}]),
+                  return_value=parse_cues if parse_cues is not None else [Cue(1, 1.0, 2.0, "hello")]),
             patch("yt2bili.subtitles.translator.translate_cues",
-                  return_value=translate_cues if translate_cues is not None else [{"index": 1, "text": "hi"}]),
+                  return_value=translate_cues if translate_cues is not None else [Cue(1, 1.0, 2.0, "hi")]),
             patch("yt2bili.subtitles.writer.write_srt"),
         ]
         mocks = {}
@@ -757,15 +909,34 @@ class RegenerateMissingSubtitleTests(unittest.TestCase):
                    side_effect=AssertionError("保留源字幕时不应重新下载")):
             result = bsub._regenerate_missing_subtitle(self.entry)
         self.assertEqual(result, self.translated)
-        mocks["write_srt"].assert_called_once_with([{"index": 1, "text": "hi"}], self.translated)
+        mocks["write_srt"].assert_called_once_with(
+            [Cue(1, 1.0, 2.0, "hi")], self.translated
+        )
+
+    def test_overlong_translation_is_split_before_write(self):
+        self.src.write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nhello\n", encoding="utf-8"
+        )
+        text = "甲" * 113
+        mocks = self._patch_pipeline(
+            parse_cues=[Cue(1, 1.0, 9.0, "hello")],
+            translate_cues=[Cue(1, 1.0, 9.0, text)],
+        )
+        with patch.object(config, "SUBTITLE_BILIBILI_MAX_CHARS", 80):
+            result = bsub._regenerate_missing_subtitle(self.entry)
+        self.assertEqual(result, self.translated)
+        written = mocks["write_srt"].call_args.args[0]
+        self.assertGreater(len(written), 1)
+        self.assertEqual("".join(cue.text for cue in written), text)
+        self.assertTrue(all(len(cue.text) <= 80 for cue in written))
 
     def test_unparseable_kept_source_falls_back_to_download(self):
         self.src.write_text("garbage", encoding="utf-8")
         # 第一次解析（保留的源字幕）为空 → 触发重新下载；下载后解析成功
         with patch("yt2bili.subtitles.parser.parse_subtitle",
-                   side_effect=[[], [{"index": 1}]]), \
+                   side_effect=[[], [Cue(1, 1.0, 2.0, "hello")]]), \
              patch("yt2bili.subtitles.translator.translate_cues",
-                   return_value=[{"index": 1, "text": "hi"}]), \
+                   return_value=[Cue(1, 1.0, 2.0, "hi")]), \
              patch("yt2bili.subtitles.writer.write_srt"), \
              patch("yt2bili.subtitles.downloader.download_subtitles",
                    return_value=str(self.src)) as mock_dl:
@@ -851,7 +1022,7 @@ class DeferredSubtitleTests(unittest.TestCase):
                          side_effect=regen_side_effect),
             patch.object(bsub, "_recover_orphaned_subtitles", return_value=[]),
             patch("yt2bili.subtitles.parser.parse_subtitle",
-                  return_value=[{"index": 1, "start": 1.0, "end": 2.0, "text": "hi"}]),
+                  return_value=[Cue(1, 1.0, 2.0, "hi")]),
             patch("yt2bili.subtitles.bilibili_format.cues_to_bilibili_json",
                   return_value={"body": []}),
             patch.object(bsub, "submit_subtitle", return_value={"code": 0}),

@@ -123,6 +123,31 @@ class DryRunGuardTests(unittest.TestCase):
         process.assert_not_called()
 
 
+class RepairSubtitlesCliTests(unittest.TestCase):
+    def test_parser_has_repair_subtitles_flag(self):
+        args = main_mod._build_parser().parse_args(
+            ["--repair-subtitles", "--profile", "snap"]
+        )
+        self.assertTrue(args.repair_subtitles)
+
+    def test_repair_subtitles_dispatches_with_active_profile(self):
+        with patch.object(main_mod, "_check_external_tools"), \
+             patch.object(main_mod, "_cleanup_old_runs"), \
+             patch.object(main_mod, "setup_profile"), \
+             patch.object(main_mod.profile_mod, "is_multi_profile",
+                          return_value=False), \
+             patch.object(main_mod.workhours, "check",
+                          return_value=(True, "")), \
+             patch.object(main_mod, "_ensure_credentials"), \
+             patch("yt2bili.bilibili.subtitle.repair_missing_subtitles",
+                   return_value={}) as repair, \
+             patch.object(sys, "argv",
+                          ["main.py", "--repair-subtitles", "--profile", "snap"]):
+            code = main_mod.main()
+        self.assertEqual(code, 0)
+        repair.assert_called_once_with()
+
+
 class MonitorArgWiringTests(unittest.TestCase):
     """--monitor --once --dry-run 的参数接线（monitor_source 回退、dry_run 传递）。"""
 

@@ -818,6 +818,7 @@ def _regenerate_missing_subtitle(entry: dict) -> str | None:
     video_id = video_id_from_filename(translated_path)
 
     from yt2bili.subtitles.parser import parse_subtitle
+    from yt2bili.subtitles.splitter import split_cues
     from yt2bili.subtitles.translator import translate_cues
     from yt2bili.subtitles.writer import write_srt
 
@@ -845,6 +846,9 @@ def _regenerate_missing_subtitle(entry: dict) -> str | None:
         print(f"[字幕] [WARN] 重新翻译失败: {e}")
         return None
 
+    translated = split_cues(
+        translated, config.SUBTITLE_BILIBILI_MAX_CHARS
+    )
     write_srt(translated, translated_path)
     return translated_path
 
@@ -1036,6 +1040,25 @@ def upload_pending_subtitles() -> int:
                 remaining.append(entry)
                 continue
 
+            from yt2bili.subtitles.splitter import split_cues
+            from yt2bili.subtitles.writer import write_srt_atomic
+
+            safe_cues = split_cues(
+                cues, config.SUBTITLE_BILIBILI_MAX_CHARS
+            )
+            if len(safe_cues) != len(cues) or any(
+                (left.start, left.end, left.text)
+                != (right.start, right.end, right.text)
+                for left, right in zip(cues, safe_cues)
+            ):
+                write_srt_atomic(safe_cues, translated_path)
+                print(
+                    f"[字幕] 已重写超长翻译字幕: {Path(translated_path).name} "
+                    f"({len(cues)} -> {len(safe_cues)} 条)",
+                    flush=True,
+                )
+            cues = safe_cues
+
             # Fetch video duration to validate cue timestamps.
             # Avoids 79014 "字幕时间点超过视频时间长度" rejections.
             video_duration: float = 0.0
@@ -1142,3 +1165,153 @@ def requeue_missing_subtitles() -> int:
         f"跳过 {skipped} 个（不可达/出错）"
     )
     return requeued
+
+
+def _write_subtitle_repair_report(
+    report: dict,
+    report_dir: Path,
+    timestamped: Path | None = None,
+) -> tuple[Path, Path]:
+    """Write timestamped and stable ``latest`` copies of a repair report."""
+    report_dir.mkdir(parents=True, exist_ok=True)
+    if timestamped is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        timestamped = report_dir / f"subtitle_repair_{stamp}.json"
+    latest = report_dir / "subtitle_repair_latest.json"
+    atomic_io.write_json(timestamped, report)
+    atomic_io.write_json(latest, report)
+    return timestamped, latest
+
+
+def repair_missing_subtitles() -> dict:
+    """Audit the active profile's upload log, report gaps, then repair them."""
+    path = pending_subtitles_path()
+    channel_titles = _active_profile_channel_titles()
+
+    candidates: list[dict] = []
+    by_bvid: dict[str, dict] = {}
+    for item in _load_upload_log():
+        bvid = item.get("bvid", "")
+        if not bvid or not _channel_in_scope(item, channel_titles):
+            continue
+        if bvid not in by_bvid:
+            candidates.append(item)
+        by_bvid[bvid] = item
+
+    # Keep the first-seen order while retaining the latest metadata.
+    candidates = [by_bvid[item["bvid"]] for item in candidates]
+
+    items: list[dict] = []
+    actionable: list[dict] = []
+    if candidates:
+        print(f"[字幕] 审计 {len(candidates)} 个视频的中文字幕状态...")
+
+    for item, kind, _data in _iter_subtitle_status(candidates):
+        video_id = item.get("video_id", "")
+        translated_path = (
+            str(translated_srt_path(video_id)) if video_id else ""
+        )
+        if kind == "has_zh":
+            status = "has_zh"
+        elif kind == "missing" and not video_id:
+            status = "query_error"
+        elif kind == "missing":
+            status = (
+                "ready_local"
+                if translated_path and Path(translated_path).exists()
+                else "needs_regeneration"
+            )
+        elif kind == "not_visible":
+            status = "not_visible"
+        else:
+            status = "query_error"
+
+        record = {
+            "bvid": item.get("bvid", ""),
+            "video_id": video_id,
+            "title": item.get("title", ""),
+            "status": status,
+            "translated_path": translated_path,
+            "after": (
+                "pending"
+                if status in ("ready_local", "needs_regeneration")
+                else status
+            ),
+        }
+        items.append(record)
+        if record["after"] == "pending":
+            actionable.append(item)
+
+    count_keys = (
+        "has_zh",
+        "ready_local",
+        "needs_regeneration",
+        "not_visible",
+        "query_error",
+    )
+    report = {
+        "generated_at": utc_now(),
+        "profile": profile_mod.get_active_profile_name(),
+        "max_chars": config.SUBTITLE_BILIBILI_MAX_CHARS,
+        "total": len(items),
+        "counts": {
+            key: sum(1 for item in items if item["status"] == key)
+            for key in count_keys
+        },
+        "uploaded": 0,
+        "items": items,
+    }
+    report_dir = path.parent
+    timestamped, latest = _write_subtitle_repair_report(report, report_dir)
+    print(f"[字幕] 审计报告: {latest}")
+
+    existing_pending_bvids = {
+        entry.get("bvid", "")
+        for entry in _read_pending_entries(path)
+        if isinstance(entry, dict)
+    }
+    for item in actionable:
+        if item.get("bvid", "") in existing_pending_bvids:
+            continue
+        save_pending_subtitle(
+            bvid=item.get("bvid", ""),
+            aid=item.get("aid", 0),
+            translated_path=str(
+                translated_srt_path(item.get("video_id", ""))
+            ),
+        )
+
+    if actionable:
+        report["uploaded"] = upload_pending_subtitles()
+        after_by_bvid: dict[str, str] = {}
+        for item, kind, _data in _iter_subtitle_status(actionable):
+            bvid = item.get("bvid", "")
+            if kind == "has_zh":
+                after = "has_zh"
+            elif kind == "missing":
+                video_id = item.get("video_id", "")
+                local_path = translated_srt_path(video_id) if video_id else None
+                after = (
+                    "ready_local"
+                    if local_path is not None and Path(local_path).exists()
+                    else "needs_regeneration"
+                )
+            elif kind == "not_visible":
+                after = "not_visible"
+            else:
+                after = "query_error"
+            after_by_bvid[bvid] = after
+        for item in items:
+            if item["bvid"] in after_by_bvid:
+                item["after"] = after_by_bvid[item["bvid"]]
+
+    report["after_counts"] = {
+        key: sum(1 for item in items if item["after"] == key)
+        for key in count_keys
+    }
+    _write_subtitle_repair_report(report, report_dir, timestamped)
+    print(
+        f"[字幕] 修复完成: 上传 {report['uploaded']} 条，"
+        f"审计 {report['total']} 条；报告 {timestamped}"
+    )
+    return report

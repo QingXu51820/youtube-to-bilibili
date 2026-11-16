@@ -895,6 +895,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--requeue-subtitles", action="store_true",
                         help="一次性恢复：检查 upload_log 中缺少 B站 中文字幕的视频并重新入队（多账号模式需配合 --profile）")
+    parser.add_argument(
+        "--repair-subtitles",
+        action="store_true",
+        help="审计并修复当前账号历史视频的缺失字幕，报告后自动补传（多账号模式需配合 --profile）",
+    )
     parser.add_argument("--subtitle-interval", type=int, default=600, help="字幕轮询间隔秒数（默认 600=10分钟）")
     parser.add_argument("--no-subtitle-upload", action="store_true", help="跳过延迟字幕上传（仅下载+翻译，不提交到 B站）")
     parser.add_argument("--discord", action="store_true", help="实时监听 Discord 频道消息并搬运到 B站动态")
@@ -1158,7 +1163,7 @@ def main():
         from yt2bili.auth_checker import run_auth_check
 
         exit_code = run_auth_check()
-        if not args.login and not args.monitor and not args.file and not args.urls and not args.refresh_youtube_cookies and not args.subtitle_only and not args.requeue_subtitles:
+        if not args.login and not args.monitor and not args.file and not args.urls and not args.refresh_youtube_cookies and not args.subtitle_only and not args.requeue_subtitles and not args.repair_subtitles:
             return exit_code
 
     if args.refresh_youtube_cookies:
@@ -1167,12 +1172,12 @@ def main():
         cookie_path = refresh_youtube_cookies()
         if not cookie_path:
             return 1
-        if not args.login and not args.monitor and not args.file and not args.urls and not args.subtitle_only and not args.requeue_subtitles:
+        if not args.login and not args.monitor and not args.file and not args.urls and not args.subtitle_only and not args.requeue_subtitles and not args.repair_subtitles:
             return 0
 
     if args.login:
         _login_interactive()
-        if not args.monitor and not args.file and not args.urls and not args.subtitle_only and not args.requeue_subtitles:
+        if not args.monitor and not args.file and not args.urls and not args.subtitle_only and not args.requeue_subtitles and not args.repair_subtitles:
             return 0
 
     # ── Requeue missing subtitles (one-time recovery) ──────────
@@ -1190,6 +1195,21 @@ def main():
         requeue_missing_subtitles()
         return 0
 
+    # ── Audit and repair missing subtitles ─────────────────────
+    if args.repair_subtitles:
+        if profile_mod.is_multi_profile() and profile_mod.get_active_profile_name() == "default":
+            print("❌ 多账号模式下请用 --profile 指定账号（如 --profile snap）。")
+            return 1
+        allowed, reason = workhours.check()
+        if not allowed:
+            print(f"⏸️  {reason}，已取消 --repair-subtitles。")
+            return 1
+        _ensure_credentials()
+        from yt2bili.bilibili.subtitle import repair_missing_subtitles
+
+        repair_missing_subtitles()
+        return 0
+
     # ── Subtitle-only mode ─────────────────────────────────────
     if args.subtitle_only:
         allowed, reason = workhours.check()
@@ -1197,11 +1217,11 @@ def main():
             print(f"⏸️  {reason}，已取消 --subtitle-only。")
             return 1
         _ensure_credentials()
-        from yt2bili.bilibili.subtitle import upload_pending_subtitles, _pending_subtitles_path
+        from yt2bili.bilibili.subtitle import upload_pending_subtitles, pending_subtitles_path
 
         if args.once:
             uploaded = upload_pending_subtitles()
-            pending_path = _pending_subtitles_path()
+            pending_path = pending_subtitles_path()
             if uploaded == 0 and not pending_path.exists():
                 if profile_mod.is_multi_profile():
                     print("[字幕] 没有待处理的字幕（多账号模式下请用 --profile 指定账号）。")

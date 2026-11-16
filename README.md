@@ -142,6 +142,9 @@ python main.py --monitor --profile snap
 # 轮询所有配置账号（无间隔等待）
 python main.py --monitor --all-profiles --once
 
+# 审计并补传指定账号的历史缺失字幕
+python main.py --repair-subtitles --profile snap
+
 # 持续轮询所有账号
 python main.py --monitor --all-profiles
 ```
@@ -165,6 +168,7 @@ SUBTITLE_ENABLED=true              # 启用字幕功能
 SUBTITLE_SOURCE_LANGS=en.*,ja,ko   # 优先匹配的字幕语言
 SUBTITLE_TARGET_LANG=zh-CN         # 目标翻译语言
 SUBTITLE_TRANSLATE_BATCH_SIZE=80   # 每次 API 调用翻译条数
+SUBTITLE_BILIBILI_MAX_CHARS=80     # B站单条字幕安全字符上限
 SUBTITLE_TRANSLATE_WORKERS=3       # 并行翻译线程数
 SUBTITLE_UPLOAD_TO_BILIBILI=true   # 翻译后自动上传到 B站
 SUBTITLE_DEFER_MAX_ATTEMPTS=6      # 源字幕拿不到时最多再试几次

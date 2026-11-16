@@ -67,6 +67,7 @@
 | `YOUTUBE_MONITOR_RETRY_DELAY` | 监控周期重试基础延迟秒数（上限 600s） | `30` |
 | `YOUTUBE_VIDEO_RETRY_MAX` | 单视频处理失败后的额外重试次数（仅 download/split/upload 阶段） | `2` |
 | `YOUTUBE_VIDEO_RETRY_DELAY` | 单视频重试基础延迟秒数 | `30` |
+| `SUBTITLE_BILIBILI_MAX_CHARS` | B站单条字幕安全字符上限，翻译后与上传前都会拆条 | `80` |
 | `SUBTITLE_DEFER_MAX_ATTEMPTS` | 源字幕当时拿不到时，入延迟队列后最多再试几次 | `6` |
 | `SUBTITLE_DEFER_RETRY_MINUTES` | 两次延迟重试之间的最小间隔（分钟） | `60` |
 
@@ -80,6 +81,10 @@
   与 `bad_timing`（时间轴崩坏）属于永久失败，当场放弃并把可用语言写进运行报告。
 - 放弃规则按**次数**（`SUBTITLE_DEFER_MAX_ATTEMPTS`）而不是墙钟：`WORK_HOURS_ONLY`
   下周五 19:50 入队的条目要到周一早上才有第一次机会。另有一周的粗兜底。
+
+历史缺口可用 `python main.py --repair-subtitles --profile snap` 审计。命令会先把
+逐稿件状态与本地文件情况写入 `state/snap/subtitle_repair_latest.json`，随后自动
+重写超长中文 SRT、重新生成缺失文件并补传，最后复查 B 站中文字幕状态。
 - 重试受 `SUBTITLE_DEFER_RETRY_MINUTES` 节流，且单轮最多重建 2 条，避免拖长监控周期。
 - 注意：`SUBTITLE_UPLOAD_TO_BILIBILI=false` 或 `--no-subtitle-upload` 时没有恢复路径
   （没有 bvid 或不落队列），源失败就是彻底失败。
